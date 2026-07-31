@@ -1,0 +1,20 @@
+# Proxy configuration — PRD §7
+#
+# This file is the single source of truth for the LLM QDisc Proxy.
+# Environment variables (LLM_QDISC__*) override values here.
+
+backend:
+  url: http://localhost:8000
+
+scheduler:
+  algorithm: drr
+  max_active_flows: 4
+  starvation_timeout: 300s
+
+flows:
+  default_weight: 1
+
+priorities:
+  interactive: 100
+  agent: 50
+  background: 10

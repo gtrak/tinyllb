@@ -1,5 +1,7 @@
 use axum::{routing::get, Router};
 
+use llm_qdisc_proxy::config;
+
 async fn healthz() -> &'static str {
     "ok"
 }
@@ -12,14 +14,27 @@ pub fn create_router() -> Router {
 async fn main() {
     tracing_subscriber::fmt().init();
 
-    let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
-    let addr = format!("0.0.0.0:{port}");
+    let cfg = config::load().expect("failed to load configuration");
+    tracing::info!(?cfg, "config loaded");
+
+    let addr = if std::env::var("LLM_QDISC__SERVER__BIND").is_ok() {
+        cfg.server.bind
+    } else if let Ok(port_str) = std::env::var("PORT") {
+        let port: u16 = port_str.parse().expect("PORT must be a valid port number");
+        format!("0.0.0.0:{port}")
+            .parse::<std::net::SocketAddr>()
+            .unwrap()
+    } else {
+        cfg.server.bind
+    };
 
     let app = create_router();
 
     tracing::info!("listening on {addr}");
 
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(&addr.to_string())
+        .await
+        .unwrap();
     axum::serve(listener, app).await.unwrap();
 }
 

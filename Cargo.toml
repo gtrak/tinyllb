@@ -14,4 +14,10 @@ prometheus = "0.14"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
 clap = { version = "4", features = ["derive"] }
-config = "0.15"
+config = { version = "0.15", features = ["yaml"] }
+anyhow = "1"
+humantime = "2"
+url = { version = "2", features = ["serde"] }
+
+[dev-dependencies]
+serial_test = "3"
