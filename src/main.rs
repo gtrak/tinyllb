@@ -1,13 +1,18 @@
 use axum::{routing::get, Router};
+use std::sync::Arc;
 
 use llm_qdisc_proxy::config;
+use llm_qdisc_proxy::gateway;
 
 async fn healthz() -> &'static str {
     "ok"
 }
 
-pub fn create_router() -> Router {
-    Router::new().route("/healthz", get(healthz))
+pub fn create_router(state: gateway::AppState) -> Router {
+    let health_router = Router::new().route("/healthz", get(healthz));
+    let gateway_router = gateway::create_router().with_state(state);
+
+    Router::new().merge(health_router).merge(gateway_router)
 }
 
 #[tokio::main]
@@ -28,7 +33,12 @@ async fn main() {
         cfg.server.bind
     };
 
-    let app = create_router();
+    let state = gateway::AppState {
+        client: gateway::build_client(),
+        backend_url: Arc::new(cfg.backend.url),
+    };
+
+    let app = create_router(state);
 
     tracing::info!("listening on {addr}");
 
@@ -47,7 +57,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_healthz_returns_ok() {
-        let app = create_router();
+        let state = gateway::AppState {
+            client: gateway::build_client(),
+            backend_url: Arc::new(url::Url::parse("http://localhost:8000").unwrap()),
+        };
+        let app = create_router(state);
         let response = app
             .oneshot(
                 Request::builder()
