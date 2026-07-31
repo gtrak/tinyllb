@@ -9,6 +9,7 @@ use url::Url;
 
 use self::proxy::proxy_handler;
 use crate::metrics::Metrics;
+use crate::scheduler::FifoScheduler;
 
 /// Application state shared across all request handlers.
 #[derive(Clone)]
@@ -16,6 +17,7 @@ pub struct AppState {
     pub client: reqwest::Client,
     pub backend_url: Arc<Url>,
     pub metrics: Arc<Metrics>,
+    pub scheduler: Arc<FifoScheduler>,
 }
 
 /// Create the gateway router that handles OpenAI-compatible routes.

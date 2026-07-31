@@ -6,6 +6,8 @@ use futures::Stream;
 use prometheus::Counter;
 use std::sync::Arc;
 
+use crate::scheduler::QueueTicket;
+
 /// RAII guard that decrements `vllm_requests_active` on drop.
 ///
 /// Moved here so `MetricStream` can own the guard for the duration
@@ -123,20 +125,30 @@ impl TokenAccumulator {
 /// to best-effort parse `usage.completion_tokens` from streaming JSON payloads.
 /// If parsing fails, tokens are silently skipped — the stream never
 /// breaks due to metrics collection.
+///
+/// The `_queue_ticket` field holds the admission slot for the stream's
+/// entire lifetime, ensuring the slot is released when the stream ends
+/// (or the client disconnects), not when the handler returns.
 pub struct MetricStream {
     inner: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>,
     accumulator: TokenAccumulator,
     tokens_counter: Arc<Counter>,
     _active_guard: RequestActiveGuard,
+    _queue_ticket: QueueTicket,
 }
 
 impl MetricStream {
-    pub fn new(response: reqwest::Response, metrics: Arc<crate::metrics::Metrics>) -> Self {
+    pub fn new(
+        response: reqwest::Response,
+        metrics: Arc<crate::metrics::Metrics>,
+        queue_ticket: QueueTicket,
+    ) -> Self {
         Self {
             inner: Box::pin(response.bytes_stream()),
             accumulator: TokenAccumulator::new(),
             tokens_counter: Arc::new(metrics.tokens_generated_total.clone()),
             _active_guard: RequestActiveGuard::new(metrics),
+            _queue_ticket: queue_ticket,
         }
     }
 }

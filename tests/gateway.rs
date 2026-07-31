@@ -7,6 +7,9 @@ use bytes::Bytes;
 use futures::Stream;
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 use tower::ServiceExt;
 
 /// Start a stub backend server on an ephemeral port and return its address.
@@ -156,12 +159,15 @@ impl Stream for SseStream {
 fn build_proxy_app(backend_url: &str) -> Router {
     use llm_qdisc_proxy::gateway;
     use llm_qdisc_proxy::metrics;
+    use llm_qdisc_proxy::scheduler;
 
     let metrics = metrics::create_metrics();
+    let scheduler = scheduler::FifoScheduler::new(4, metrics.clone());
     let state = gateway::AppState {
         client: gateway::build_client(),
         backend_url: std::sync::Arc::new(url::Url::parse(backend_url).expect("valid backend URL")),
         metrics: metrics.clone(),
+        scheduler: std::sync::Arc::new(scheduler),
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
@@ -480,5 +486,283 @@ async fn test_query_string_preserved() {
     assert_eq!(
         forwarded_query, "api_key=test123",
         "query string must be forwarded exactly to the backend"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Stub helpers for load test (issue 05, defect 4)
+// ---------------------------------------------------------------------------
+
+/// Shared atomic counter tracking concurrent in-flight requests at the backend.
+struct LoadTestState {
+    current: AtomicU32,
+    peak: AtomicU32,
+}
+
+/// Stub handler that tracks in-flight concurrency via an atomic counter.
+/// Each request sleeps 200ms to hold the slot, allowing the test to observe
+/// concurrent execution.
+async fn load_test_handler(
+    state: axum::extract::State<Arc<LoadTestState>>,
+    _req: Request<Body>,
+) -> Response<Body> {
+    // Increment current in-flight count.
+    let prev = state.current.fetch_add(1, Ordering::SeqCst);
+    // Track peak.
+    let new_val = prev + 1;
+    loop {
+        let peak = state.peak.load(Ordering::SeqCst);
+        if new_val > peak {
+            match state.peak.compare_exchange_weak(
+                peak,
+                new_val,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(_) => continue, // CAS failed, retry.
+            }
+        } else {
+            break;
+        }
+    }
+
+    // Hold the slot for a short period.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Decrement current in-flight count.
+    state.current.fetch_sub(1, Ordering::SeqCst);
+
+    let json = r#"{"choices":[{"message":{"content":"ok"},"index":0}]}"#;
+    let mut resp = Response::new(Body::from(json));
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    resp
+}
+
+/// Build a proxy app with a configurable max_active_flows for load testing.
+fn build_proxy_app_with_max(
+    _backend_url: &str,
+    max_active_flows: u32,
+) -> (Router, Arc<LoadTestState>) {
+    use llm_qdisc_proxy::gateway;
+    use llm_qdisc_proxy::metrics;
+    use llm_qdisc_proxy::scheduler;
+
+    let load_state = Arc::new(LoadTestState {
+        current: AtomicU32::new(0),
+        peak: AtomicU32::new(0),
+    });
+
+    // Build the stub backend.
+    let backend_app = Router::new()
+        .route("/v1/chat/completions", post(load_test_handler))
+        .with_state(load_state.clone());
+
+    // Bind once, get the address, then spawn the server.
+    let listener = futures::executor::block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .expect("bind should succeed");
+    let addr = listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        axum::serve(listener, backend_app).await.unwrap();
+    });
+
+    let backend_url_str = format!("http://{}/", addr);
+
+    // Build the proxy.
+    let metrics = metrics::create_metrics();
+    let scheduler = scheduler::FifoScheduler::new(max_active_flows, metrics.clone());
+    let proxy_state = gateway::AppState {
+        client: gateway::build_client(),
+        backend_url: Arc::new(url::Url::parse(&backend_url_str).expect("valid URL")),
+        metrics: metrics.clone(),
+        scheduler: Arc::new(scheduler),
+    };
+
+    let _ = _backend_url; // unused; we use the actual backend URL
+    let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
+    let gateway_router = gateway::create_router().with_state(proxy_state.clone());
+    let metrics_router = Router::new()
+        .route(
+            "/metrics",
+            get(llm_qdisc_proxy::metrics::endpoint::metrics_handler),
+        )
+        .with_state(proxy_state.clone());
+
+    let app = Router::new()
+        .merge(health_router)
+        .merge(metrics_router)
+        .merge(gateway_router)
+        .with_state(proxy_state);
+
+    (app, load_state)
+}
+
+/// HEADLINE LOAD TEST: with max_active_flows=2, fire 3 concurrent requests
+/// and verify exactly 2 are in flight at the backend at peak.
+///
+/// This is the spec verification from issue 05:
+/// > With max_active_flows=2, a 3-concurrent-request load test shows exactly
+/// > 2 in flight at the backend (assert via stub backend's active counter).
+#[tokio::test]
+async fn test_load_three_requests_max_two_concurrent() {
+    let (app, load_state) = build_proxy_app_with_max("http://127.0.0.1:0/", 2);
+
+    // Reset counters.
+    load_state.current.store(0, Ordering::SeqCst);
+    load_state.peak.store(0, Ordering::SeqCst);
+
+    // Fire 3 concurrent requests.
+    let body = r#"{"model":"test","messages":[{"role":"user","content":"hi"}]}"#;
+
+    let handles: Vec<_> = (0..3)
+        .map(|i| {
+            let app = app.clone();
+            tokio::spawn(async move {
+                let resp = app
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/v1/chat/completions")
+                            .header("content-type", "application/json")
+                            .body(Body::from(body))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status(), 200);
+                // Consume the body.
+                let _ = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                    .await
+                    .unwrap();
+                i
+            })
+        })
+        .collect();
+
+    // Wait for all 3 requests to complete.
+    let results: Vec<_> = futures::future::join_all(handles).await;
+    assert_eq!(results.len(), 3);
+
+    // Verify peak concurrency was exactly 2.
+    let peak = load_state.peak.load(Ordering::SeqCst);
+    assert_eq!(
+        peak, 2,
+        "peak concurrent backend requests should be 2 (max_active_flows), got {}",
+        peak
+    );
+
+    // After all requests complete, current should be 0.
+    let current = load_state.current.load(Ordering::SeqCst);
+    assert_eq!(
+        current, 0,
+        "current in-flight should be 0 after all requests complete, got {}",
+        current
+    );
+}
+
+/// Test: client disconnect during streaming releases the admission slot
+/// and does not leak the active_flows gauge.
+///
+/// The proxy fires a streaming request, the client drops the response
+/// mid-stream, and we verify that active_flows returns to 0.
+#[tokio::test]
+async fn test_client_disconnect_releases_permit() {
+    use llm_qdisc_proxy::gateway;
+    use llm_qdisc_proxy::metrics;
+    use llm_qdisc_proxy::scheduler;
+
+    // Build a streaming stub backend.
+    let streaming_handler = |_req: Request<Body>| async {
+        let chunks: Vec<Bytes> = vec![
+            Bytes::from("data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n"),
+            Bytes::from("data: {\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n\n"),
+            Bytes::from("data: [DONE]\n\n"),
+        ];
+        let stream = SseStream::new(chunks);
+        let body = Body::from_stream(stream);
+        let mut resp = Response::new(body);
+        resp.headers_mut().insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("text/event-stream"),
+        );
+        resp
+    };
+
+    let backend_app = Router::new().route("/v1/chat/completions", post(streaming_handler));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, backend_app).await.unwrap();
+    });
+
+    let backend_url = format!("http://{}/", addr);
+
+    let metrics = metrics::create_metrics();
+    let metrics_clone = metrics.clone();
+    let scheduler = scheduler::FifoScheduler::new(4, metrics.clone());
+    let state = gateway::AppState {
+        client: gateway::build_client(),
+        backend_url: Arc::new(url::Url::parse(&backend_url).expect("valid backend URL")),
+        metrics: metrics.clone(),
+        scheduler: Arc::new(scheduler),
+    };
+
+    let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
+    let gateway_router = gateway::create_router().with_state(state.clone());
+
+    let app = Router::new()
+        .merge(health_router)
+        .merge(gateway_router)
+        .with_state(state);
+
+    // Initial: 0 active flows.
+    assert_eq!(metrics_clone.active_flows.get(), 0.0);
+
+    // Spawn a task that sends a streaming request but drops it mid-stream.
+    let app_clone = app.clone();
+    let drop_handle = tokio::spawn(async move {
+        let body =
+            r#"{"model":"llama-2","messages":[{"role":"user","content":"hi"}],"stream":true}"#;
+        let resp = app_clone
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+
+        // Drop the response immediately without draining the stream.
+        // This simulates a client disconnect: the stream body is dropped,
+        // which drops MetricStream, which drops both the QueueTicket and
+        // the RequestActiveGuard.
+        drop(resp);
+    });
+
+    // Give the task time to execute.
+    drop_handle.await.expect("task should not panic");
+
+    // After the disconnect, both gauges should be back to 0.
+    assert_eq!(
+        metrics_clone.active_flows.get(),
+        0.0,
+        "active_flows should be 0 after client disconnect, got {}",
+        metrics_clone.active_flows.get()
+    );
+    assert_eq!(
+        metrics_clone.requests_active.get(),
+        0.0,
+        "requests_active should be 0 after client disconnect, got {}",
+        metrics_clone.requests_active.get()
     );
 }

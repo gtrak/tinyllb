@@ -184,6 +184,10 @@ pub async fn proxy_handler(
     // Build the backend URL, preserving the query string.
     let backend_url = build_backend_url(&state.backend_url, &original_path, query.as_deref())?;
 
+    // Admit through the scheduler: blocks until a slot is available,
+    // returns a RAII ticket that releases the slot on drop.
+    let _ticket = state.scheduler.admit().await;
+
     // Build and send the request to the backend, passing raw bytes (byte-preserving).
     let mut builder = state.client.request(method, backend_url).body(body_bytes);
 
@@ -230,10 +234,11 @@ pub async fn proxy_handler(
 
     // Streaming path: if SSE or body wanted streaming, use MetricStream.
     // Do NOT forward Content-Length — axum will use chunked transfer encoding.
-    // MetricStream owns the RequestActiveGuard so the gauge stays elevated
-    // until the stream completes (or the client disconnects).
+    // MetricStream owns both the RequestActiveGuard and the QueueTicket so the
+    // admission slot stays held until the stream completes (or the client
+    // disconnects), not when the handler returns.
     if is_sse || wants_streaming {
-        let stream = MetricStream::new(response, state.metrics.clone());
+        let stream = MetricStream::new(response, state.metrics.clone(), _ticket);
         let body = Body::from_stream(stream);
         let mut resp = Response::new(body);
         *resp.status_mut() = status;
@@ -246,8 +251,7 @@ pub async fn proxy_handler(
     }
 
     // Non-streaming path: collect the full body and return with filtered headers.
-    // The guard lives for the duration of body collection so the active gauge
-    // reflects the in-flight request.
+    // The ticket (admission slot) is held until body collection finishes.
     let _guard = RequestActiveGuard::new(Arc::clone(&state.metrics));
     let body_bytes = collect_response_body(response, "normal-response").await?;
 

@@ -64,10 +64,16 @@ async fn main() {
 
     let metrics = metrics::create_metrics();
 
+    let scheduler = llm_qdisc_proxy::scheduler::FifoScheduler::new(
+        cfg.scheduler.max_active_flows,
+        metrics.clone(),
+    );
+
     let state = gateway::AppState {
         client: gateway::build_client(),
         backend_url: Arc::new(cfg.backend.url),
         metrics: metrics.clone(),
+        scheduler: Arc::new(scheduler),
     };
 
     let app = create_router(state);
@@ -93,10 +99,12 @@ mod tests {
     #[tokio::test]
     async fn test_healthz_returns_ok() {
         let metrics = metrics::create_metrics();
+        let scheduler = llm_qdisc_proxy::scheduler::FifoScheduler::new(4, metrics.clone());
         let state = gateway::AppState {
             client: gateway::build_client(),
             backend_url: Arc::new(url::Url::parse("http://localhost:8000").unwrap()),
             metrics: metrics.clone(),
+            scheduler: Arc::new(scheduler),
         };
         let app = create_router(state);
         let response = app
