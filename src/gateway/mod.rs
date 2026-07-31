@@ -8,12 +8,14 @@ use std::sync::Arc;
 use url::Url;
 
 use self::proxy::proxy_handler;
+use crate::metrics::Metrics;
 
 /// Application state shared across all request handlers.
 #[derive(Clone)]
 pub struct AppState {
     pub client: reqwest::Client,
     pub backend_url: Arc<Url>,
+    pub metrics: Arc<Metrics>,
 }
 
 /// Create the gateway router that handles OpenAI-compatible routes.

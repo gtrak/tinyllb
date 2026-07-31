@@ -5,9 +5,10 @@ use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use http_body_util::BodyExt;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use crate::gateway::error::ProxyError;
-use crate::gateway::stream::PassthroughStream;
+use crate::gateway::stream::{MetricStream, RequestActiveGuard};
 
 use super::AppState;
 
@@ -112,6 +113,28 @@ async fn collect_response_body(
     })
 }
 
+/// Parse `usage.completion_tokens` from a JSON response body (best-effort).
+/// Falls back to `total_tokens` if `completion_tokens` is absent.
+/// Returns the extracted token count or 0 if parsing fails.
+fn extract_completion_tokens(body: &[u8]) -> i64 {
+    let value = match serde_json::from_slice::<serde_json::Value>(body) {
+        Ok(v) => v,
+        Err(_) => return 0,
+    };
+    // Prefer completion_tokens; fall back to total_tokens if absent.
+    value
+        .get("usage")
+        .and_then(|u| {
+            u.get("completion_tokens")
+                .and_then(|t| t.as_i64())
+                .or_else(|| {
+                    tracing::debug!("completion_tokens absent, falling back to total_tokens");
+                    u.get("total_tokens").and_then(|t| t.as_i64())
+                })
+        })
+        .unwrap_or(0)
+}
+
 /// Handle a proxied request.
 pub async fn proxy_handler(
     State(state): State<AppState>,
@@ -169,7 +192,15 @@ pub async fn proxy_handler(
         builder = builder.header(name, value);
     }
 
-    let response = builder.send().await?;
+    // Send the request to the backend.
+    let response = match builder.send().await {
+        Ok(resp) => resp,
+        Err(e) => {
+            // Network error — increment vllm_errors_total.
+            state.metrics.errors_total.inc();
+            return Err(ProxyError::Network(e));
+        }
+    };
 
     let status = response.status();
     let response_headers = response.headers().clone();
@@ -184,6 +215,10 @@ pub async fn proxy_handler(
     // If the backend returned an error status (4xx/5xx), collect the body and
     // return it verbatim with filtered headers.
     if status.is_client_error() || status.is_server_error() {
+        // Count 5xx errors (not 4xx — those are client errors).
+        if status.is_server_error() {
+            state.metrics.errors_total.inc();
+        }
         let body_bytes = collect_response_body(response, "error-response").await?;
         return Ok(ProxyError::BackendError {
             status,
@@ -193,10 +228,12 @@ pub async fn proxy_handler(
         .into_response());
     }
 
-    // Streaming path: if SSE or body wanted streaming, use PassthroughStream.
+    // Streaming path: if SSE or body wanted streaming, use MetricStream.
     // Do NOT forward Content-Length — axum will use chunked transfer encoding.
+    // MetricStream owns the RequestActiveGuard so the gauge stays elevated
+    // until the stream completes (or the client disconnects).
     if is_sse || wants_streaming {
-        let stream = PassthroughStream::new(response);
+        let stream = MetricStream::new(response, state.metrics.clone());
         let body = Body::from_stream(stream);
         let mut resp = Response::new(body);
         *resp.status_mut() = status;
@@ -209,7 +246,19 @@ pub async fn proxy_handler(
     }
 
     // Non-streaming path: collect the full body and return with filtered headers.
+    // The guard lives for the duration of body collection so the active gauge
+    // reflects the in-flight request.
+    let _guard = RequestActiveGuard::new(Arc::clone(&state.metrics));
     let body_bytes = collect_response_body(response, "normal-response").await?;
+
+    // Best-effort: extract completion_tokens from the JSON response.
+    let completion_tokens = extract_completion_tokens(&body_bytes);
+    if completion_tokens > 0 {
+        state
+            .metrics
+            .tokens_generated_total
+            .inc_by(completion_tokens as f64);
+    }
 
     let mut resp = Response::new(Body::from(body_bytes.to_vec()));
     *resp.status_mut() = status;

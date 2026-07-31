@@ -3,6 +3,29 @@ use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use futures::Stream;
+use prometheus::Counter;
+use std::sync::Arc;
+
+/// RAII guard that decrements `vllm_requests_active` on drop.
+///
+/// Moved here so `MetricStream` can own the guard for the duration
+/// of the stream (preventing early decrement when the handler returns).
+pub struct RequestActiveGuard {
+    metrics: Arc<crate::metrics::Metrics>,
+}
+
+impl RequestActiveGuard {
+    pub fn new(metrics: Arc<crate::metrics::Metrics>) -> Self {
+        metrics.requests_active.inc();
+        Self { metrics }
+    }
+}
+
+impl Drop for RequestActiveGuard {
+    fn drop(&mut self) {
+        self.metrics.requests_active.dec();
+    }
+}
 
 /// A stream adapter wrapping the reqwest response bytes stream that maps
 /// errors to `std::io::Error` so it can be consumed by
@@ -33,5 +56,105 @@ impl Stream for PassthroughStream {
                 std::io::Error::other(err.to_string())
             })
         }))
+    }
+}
+
+/// Accumulates bytes and extracts `completion_tokens` from any SSE `usage`
+/// JSON objects found.
+struct TokenAccumulator {
+    buffer: Vec<u8>,
+}
+
+impl TokenAccumulator {
+    fn new() -> Self {
+        Self { buffer: Vec::new() }
+    }
+
+    /// Feed new bytes into the accumulator and return extracted tokens.
+    fn feed(&mut self, chunk: &[u8]) -> i64 {
+        self.buffer.extend_from_slice(chunk);
+        self.extract_tokens()
+    }
+
+    fn extract_tokens(&mut self) -> i64 {
+        let mut found_tokens: i64 = 0;
+
+        while let Some(pos) = self
+            .buffer
+            .windows(19)
+            .position(|w| w == b"\"completion_tokens\"")
+        {
+            let after_key = pos + 19;
+            if after_key < self.buffer.len() {
+                let rest = &self.buffer[after_key..];
+                if let Some(colon_pos) = rest.iter().position(|b| *b == b':') {
+                    let after_colon = after_key + colon_pos + 1;
+                    if let Some(num_start) = rest[colon_pos + 1..]
+                        .iter()
+                        .position(|b| *b != b' ' && *b != b'\t')
+                    {
+                        let val_start = after_colon + num_start;
+                        let val_end = rest[colon_pos + 1 + num_start..]
+                            .iter()
+                            .position(|b| {
+                                *b == b',' || *b == b'}' || *b == b' ' || *b == b'\n' || *b == b'\r'
+                            })
+                            .map(|p| val_start + p)
+                            .unwrap_or(self.buffer.len());
+                        if let Ok(num_str) = std::str::from_utf8(&self.buffer[val_start..val_end]) {
+                            if let Ok(tokens) = num_str.trim().parse::<i64>() {
+                                found_tokens += tokens;
+                            }
+                        }
+                    }
+                }
+            }
+
+            self.buffer.drain(..after_key);
+        }
+
+        found_tokens
+    }
+}
+
+/// A stream wrapper that instruments SSE passthrough for token tracking.
+///
+/// Wraps the reqwest response stream directly and uses a `TokenAccumulator`
+/// to best-effort parse `usage.completion_tokens` from streaming JSON payloads.
+/// If parsing fails, tokens are silently skipped — the stream never
+/// breaks due to metrics collection.
+pub struct MetricStream {
+    inner: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>,
+    accumulator: TokenAccumulator,
+    tokens_counter: Arc<Counter>,
+    _active_guard: RequestActiveGuard,
+}
+
+impl MetricStream {
+    pub fn new(response: reqwest::Response, metrics: Arc<crate::metrics::Metrics>) -> Self {
+        Self {
+            inner: Box::pin(response.bytes_stream()),
+            accumulator: TokenAccumulator::new(),
+            tokens_counter: Arc::new(metrics.tokens_generated_total.clone()),
+            _active_guard: RequestActiveGuard::new(metrics),
+        }
+    }
+}
+
+impl Stream for MetricStream {
+    type Item = Result<Bytes, std::io::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match futures::ready!(self.inner.as_mut().poll_next(cx)) {
+            Some(Ok(chunk)) => {
+                let tokens = self.accumulator.feed(&chunk);
+                if tokens > 0 {
+                    self.tokens_counter.inc_by(tokens as f64);
+                }
+                Poll::Ready(Some(Ok(chunk)))
+            }
+            Some(Err(err)) => Poll::Ready(Some(Err(std::io::Error::other(err.to_string())))),
+            None => Poll::Ready(None),
+        }
     }
 }

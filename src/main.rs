@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use llm_qdisc_proxy::config;
 use llm_qdisc_proxy::gateway;
+use llm_qdisc_proxy::metrics;
 
 async fn healthz() -> &'static str {
     "ok"
@@ -10,9 +11,37 @@ async fn healthz() -> &'static str {
 
 pub fn create_router(state: gateway::AppState) -> Router {
     let health_router = Router::new().route("/healthz", get(healthz));
+    let metrics_router = Router::new()
+        .route("/metrics", get(metrics::endpoint::metrics_handler))
+        .with_state(state.clone());
     let gateway_router = gateway::create_router().with_state(state);
 
-    Router::new().merge(health_router).merge(gateway_router)
+    Router::new()
+        .merge(health_router)
+        .merge(metrics_router)
+        .merge(gateway_router)
+}
+
+/// Spawn a background task that periodically recomputes
+/// `llm_tokens_per_second` from the counter's rate window.
+fn spawn_token_rate_task(metrics: Arc<llm_qdisc_proxy::metrics::Metrics>) {
+    let tokens_total = metrics.tokens_generated_total.clone();
+    let tokens_per_second = metrics.tokens_per_second.clone();
+
+    tokio::spawn(async move {
+        let mut previous_count: f64 = 0.0;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let current_count = tokens_total.get();
+            let delta = if current_count >= previous_count {
+                current_count - previous_count
+            } else {
+                0.0
+            };
+            tokens_per_second.set(delta);
+            previous_count = current_count;
+        }
+    });
 }
 
 #[tokio::main]
@@ -33,12 +62,18 @@ async fn main() {
         cfg.server.bind
     };
 
+    let metrics = metrics::create_metrics();
+
     let state = gateway::AppState {
         client: gateway::build_client(),
         backend_url: Arc::new(cfg.backend.url),
+        metrics: metrics.clone(),
     };
 
     let app = create_router(state);
+
+    // Spawn background task for tokens-per-second gauge.
+    spawn_token_rate_task(metrics);
 
     tracing::info!("listening on {addr}");
 
@@ -57,9 +92,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_healthz_returns_ok() {
+        let metrics = metrics::create_metrics();
         let state = gateway::AppState {
             client: gateway::build_client(),
             backend_url: Arc::new(url::Url::parse("http://localhost:8000").unwrap()),
+            metrics: metrics.clone(),
         };
         let app = create_router(state);
         let response = app

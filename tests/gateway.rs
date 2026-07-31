@@ -155,17 +155,27 @@ impl Stream for SseStream {
 /// Build the proxy app pointing at the given backend URL.
 fn build_proxy_app(backend_url: &str) -> Router {
     use llm_qdisc_proxy::gateway;
+    use llm_qdisc_proxy::metrics;
 
+    let metrics = metrics::create_metrics();
     let state = gateway::AppState {
         client: gateway::build_client(),
         backend_url: std::sync::Arc::new(url::Url::parse(backend_url).expect("valid backend URL")),
+        metrics: metrics.clone(),
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
     let gateway_router = gateway::create_router().with_state(state.clone());
+    let metrics_router = Router::new()
+        .route(
+            "/metrics",
+            get(llm_qdisc_proxy::metrics::endpoint::metrics_handler),
+        )
+        .with_state(state.clone());
 
     Router::new()
         .merge(health_router)
+        .merge(metrics_router)
         .merge(gateway_router)
         .with_state(state)
 }
