@@ -9,6 +9,7 @@ use url::Url;
 
 use self::proxy::proxy_handler;
 use crate::config::Backpressure;
+use crate::flow::FlowRegistry;
 use crate::metrics::Metrics;
 use crate::scheduler::FifoScheduler;
 
@@ -19,6 +20,7 @@ pub struct AppState {
     pub backend_url: Arc<Url>,
     pub metrics: Arc<Metrics>,
     pub scheduler: Arc<FifoScheduler>,
+    pub flow_registry: Arc<FlowRegistry>,
     pub backpressure: Backpressure,
 }
 

@@ -21,6 +21,8 @@ config = { version = "0.15", features = ["yaml"] }
 anyhow = "1"
 humantime = "2"
 url = { version = "2", features = ["serde"] }
+dashmap = "6"
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 serial_test = "3"

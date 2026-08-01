@@ -23,6 +23,7 @@ use std::time::Duration;
 use axum::routing::get;
 use axum::Router;
 use llm_qdisc_proxy::config::{Backpressure, BackpressureMode};
+use llm_qdisc_proxy::flow::FlowRegistry;
 use llm_qdisc_proxy::gateway;
 use llm_qdisc_proxy::metrics;
 use llm_qdisc_proxy::scheduler::FifoScheduler;
@@ -70,9 +71,11 @@ const STUB_PENALTY: f64 = 0.05; // quadratic coefficient
 /// max_active_flows. Returns the Router and the metrics handle.
 fn build_proxy_app(backend_url: &str, max_active_flows: u32) -> (Router, Arc<metrics::Metrics>) {
     let m = metrics::create_metrics();
+    let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
     let scheduler = FifoScheduler::new(
         max_active_flows,
         m.clone(),
+        flow_registry.clone(),
         BackpressureMode::Blocking,
         100,
         Duration::from_secs(10),
@@ -83,6 +86,7 @@ fn build_proxy_app(backend_url: &str, max_active_flows: u32) -> (Router, Arc<met
         backend_url: Arc::new(url::Url::parse(backend_url).expect("valid backend URL")),
         metrics: m.clone(),
         scheduler: Arc::new(scheduler),
+        flow_registry,
         backpressure: Backpressure::default(),
     };
 

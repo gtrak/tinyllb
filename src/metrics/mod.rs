@@ -5,7 +5,7 @@ pub mod throughput;
 
 use std::sync::Arc;
 
-use prometheus::{CounterVec, HistogramOpts, Opts, Registry};
+use prometheus::{CounterVec, GaugeVec, HistogramOpts, Opts, Registry};
 
 /// Central metrics collector holding all Prometheus gauges, counters,
 /// and histograms for the LLM QDisc Proxy.
@@ -17,7 +17,9 @@ pub struct Metrics {
     pub registry: Registry,
 
     // -- Queue family --
-    pub queue_depth: prometheus::Gauge,
+    /// Per-flow queue depth gauge.  Labeled by `flow_id`.
+    /// Ephemeral flows aggregate to the label value `"ephemeral"`.
+    pub queue_depth: GaugeVec,
     pub queue_wait_seconds: prometheus::Histogram,
     pub active_flows: prometheus::Gauge,
 
@@ -45,9 +47,12 @@ impl Metrics {
     pub fn new() -> Self {
         let registry = Registry::new();
 
-        let queue_depth = prometheus::Gauge::new(
-            "llm_queue_depth",
-            "Current number of requests waiting in the queue",
+        let queue_depth = GaugeVec::new(
+            Opts::new(
+                "llm_queue_depth",
+                "Current number of requests waiting in the queue",
+            ),
+            &["flow_id"],
         )
         .expect("llm_queue_depth should be creatable");
 

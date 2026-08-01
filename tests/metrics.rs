@@ -11,15 +11,18 @@ use std::sync::Arc;
 use tower::ServiceExt;
 
 use llm_qdisc_proxy::config::BackpressureMode;
+use llm_qdisc_proxy::flow::FlowRegistry;
 use llm_qdisc_proxy::gateway;
 use llm_qdisc_proxy::metrics;
 
 /// Build a full proxy app with metrics for testing.
 fn build_test_app(backend_url: &str) -> Router {
     let metrics = metrics::create_metrics();
+    let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
     let scheduler = llm_qdisc_proxy::scheduler::FifoScheduler::new(
         4,
         metrics.clone(),
+        flow_registry.clone(),
         BackpressureMode::Blocking,
         100,
         std::time::Duration::from_secs(10),
@@ -30,8 +33,17 @@ fn build_test_app(backend_url: &str) -> Router {
         backend_url: Arc::new(url::Url::parse(backend_url).expect("valid backend URL")),
         metrics: metrics.clone(),
         scheduler: Arc::new(scheduler),
+        flow_registry,
         backpressure: llm_qdisc_proxy::config::Backpressure::default(),
     };
+
+    // Touch the queue_depth GaugeVec with an "ephemeral" label so it appears
+    // in the Prometheus scrape output (GaugeVec only emits samples for labels
+    // that have been accessed).
+    metrics
+        .queue_depth
+        .with_label_values(&["ephemeral"])
+        .set(0.0);
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
     let metrics_router = Router::new()
@@ -150,9 +162,12 @@ async fn test_metrics_initial_values() {
     );
 
     // Gauges should show 0 at initialization.
+    // llm_queue_depth is now a GaugeVec labeled by flow_id; the "ephemeral"
+    // label is touched in build_test_app to ensure it appears in the scrape.
     assert!(
-        body.contains("llm_queue_depth 0") || body.contains("llm_queue_depth_total 0"),
-        "llm_queue_depth should start at 0"
+        body.contains("llm_queue_depth{") || body.contains("llm_queue_depth_total"),
+        "llm_queue_depth should appear in scrape output. Body:\n{}",
+        body
     );
     assert!(
         body.contains("vllm_requests_active 0") || body.contains("vllm_requests_active_total 0"),
@@ -294,9 +309,11 @@ async fn test_streaming_tokens_count_completion_not_total() {
 
     let metrics = metrics::create_metrics();
     let metrics_clone = metrics.clone();
+    let flow_registry = Arc::new(llm_qdisc_proxy::flow::FlowRegistry::new(1.0, 50));
     let scheduler = llm_qdisc_proxy::scheduler::FifoScheduler::new(
         4,
         metrics.clone(),
+        flow_registry.clone(),
         BackpressureMode::Blocking,
         100,
         std::time::Duration::from_secs(10),
@@ -307,6 +324,7 @@ async fn test_streaming_tokens_count_completion_not_total() {
         backend_url: Arc::new(url::Url::parse(&backend_url).expect("valid backend URL")),
         metrics: metrics.clone(),
         scheduler: Arc::new(scheduler),
+        flow_registry,
         backpressure: llm_qdisc_proxy::config::Backpressure::default(),
     };
 
@@ -362,9 +380,11 @@ async fn test_active_gauge_during_streaming() {
 
     let metrics = metrics::create_metrics();
     let metrics_clone = metrics.clone();
+    let flow_registry = Arc::new(llm_qdisc_proxy::flow::FlowRegistry::new(1.0, 50));
     let scheduler = llm_qdisc_proxy::scheduler::FifoScheduler::new(
         4,
         metrics.clone(),
+        flow_registry.clone(),
         BackpressureMode::Blocking,
         100,
         std::time::Duration::from_secs(10),
@@ -375,6 +395,7 @@ async fn test_active_gauge_during_streaming() {
         backend_url: Arc::new(url::Url::parse(&backend_url).expect("valid backend URL")),
         metrics: metrics.clone(),
         scheduler: Arc::new(scheduler),
+        flow_registry,
         backpressure: llm_qdisc_proxy::config::Backpressure::default(),
     };
 
@@ -439,9 +460,11 @@ async fn test_nonstream_tokens_count_completion_not_total() {
 
     let metrics = metrics::create_metrics();
     let metrics_clone = metrics.clone();
+    let flow_registry = Arc::new(llm_qdisc_proxy::flow::FlowRegistry::new(1.0, 50));
     let scheduler = llm_qdisc_proxy::scheduler::FifoScheduler::new(
         4,
         metrics.clone(),
+        flow_registry.clone(),
         BackpressureMode::Blocking,
         100,
         std::time::Duration::from_secs(10),
@@ -452,6 +475,7 @@ async fn test_nonstream_tokens_count_completion_not_total() {
         backend_url: Arc::new(url::Url::parse(&backend_url).expect("valid backend URL")),
         metrics: metrics.clone(),
         scheduler: Arc::new(scheduler),
+        flow_registry,
         backpressure: llm_qdisc_proxy::config::Backpressure::default(),
     };
 
@@ -507,9 +531,11 @@ async fn test_active_gauge_during_nonstreaming() {
 
     let metrics = metrics::create_metrics();
     let metrics_clone = metrics.clone();
+    let flow_registry = Arc::new(llm_qdisc_proxy::flow::FlowRegistry::new(1.0, 50));
     let scheduler = llm_qdisc_proxy::scheduler::FifoScheduler::new(
         4,
         metrics.clone(),
+        flow_registry.clone(),
         BackpressureMode::Blocking,
         100,
         std::time::Duration::from_secs(10),
@@ -520,6 +546,7 @@ async fn test_active_gauge_during_nonstreaming() {
         backend_url: Arc::new(url::Url::parse(&backend_url).expect("valid backend URL")),
         metrics: metrics.clone(),
         scheduler: Arc::new(scheduler),
+        flow_registry,
         backpressure: llm_qdisc_proxy::config::Backpressure::default(),
     };
 

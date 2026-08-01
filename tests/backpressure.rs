@@ -15,6 +15,7 @@ use std::time::Duration;
 use tower::ServiceExt;
 
 use llm_qdisc_proxy::config::{Backpressure, BackpressureMode};
+use llm_qdisc_proxy::flow::FlowRegistry;
 use llm_qdisc_proxy::gateway;
 use llm_qdisc_proxy::metrics;
 use llm_qdisc_proxy::scheduler::FifoScheduler;
@@ -26,9 +27,11 @@ fn build_proxy_app_with_backpressure(
     backpressure: Backpressure,
 ) -> Router {
     let metrics = metrics::create_metrics();
+    let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
     let scheduler = FifoScheduler::new(
         max_active_flows,
         metrics.clone(),
+        flow_registry.clone(),
         backpressure.mode,
         backpressure.max_queue_depth,
         backpressure.max_wait,
@@ -39,6 +42,7 @@ fn build_proxy_app_with_backpressure(
         backend_url: Arc::new(url::Url::parse(backend_url).expect("valid backend URL")),
         metrics: metrics.clone(),
         scheduler: Arc::new(scheduler),
+        flow_registry,
         backpressure,
     };
 
@@ -131,6 +135,7 @@ async fn test_fail_fast_reject_has_retry_after() {
     let scheduler = Arc::new(FifoScheduler::new(
         1,
         m.clone(),
+        Arc::new(FlowRegistry::new(1.0, 50)),
         BackpressureMode::FailFast,
         0, // max_queue_depth=0
         Duration::from_secs(10),
@@ -138,17 +143,27 @@ async fn test_fail_fast_reject_has_retry_after() {
     ));
 
     // Occupy the single slot.
-    let _t1 = scheduler.admit().await.expect("should admit first");
+    let _t1 = scheduler
+        .admit(llm_qdisc_proxy::flow::FlowId::new("test"))
+        .await
+        .expect("should admit first");
 
     // Spawn a waiter that enters the queue (depth becomes 1).
     let s_waiter = scheduler.clone();
-    let waiter = tokio::spawn(async move { s_waiter.admit().await });
+    let waiter = tokio::spawn(async move {
+        s_waiter
+            .admit(llm_qdisc_proxy::flow::FlowId::new("test"))
+            .await
+    });
 
     // Give the waiter time to enter the queue and increment depth.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // At this point depth should be 1 (one waiter). Next admit should be rejected.
-    let rejected = match scheduler.admit().await {
+    let rejected = match scheduler
+        .admit(llm_qdisc_proxy::flow::FlowId::new("test"))
+        .await
+    {
         Ok(_) => panic!("should be rejected when depth > max_queue_depth (0)"),
         Err(e) => e,
     };
@@ -171,6 +186,7 @@ async fn test_hybrid_timeout_returns_429() {
     let scheduler = FifoScheduler::new(
         0,
         m.clone(),
+        Arc::new(FlowRegistry::new(1.0, 50)),
         BackpressureMode::Hybrid,
         100,
         Duration::from_millis(200), // short wait for test
@@ -178,7 +194,9 @@ async fn test_hybrid_timeout_returns_429() {
     );
 
     let start = std::time::Instant::now();
-    let result = scheduler.admit().await;
+    let result = scheduler
+        .admit(llm_qdisc_proxy::flow::FlowId::new("test"))
+        .await;
     let elapsed = start.elapsed();
 
     assert!(result.is_err(), "should time out after max_wait");
@@ -203,6 +221,7 @@ async fn test_hybrid_admits_when_slot_frees_before_timeout() {
     let scheduler = FifoScheduler::new(
         1,
         m.clone(),
+        Arc::new(FlowRegistry::new(1.0, 50)),
         BackpressureMode::Hybrid,
         100,
         Duration::from_secs(2),
@@ -210,12 +229,19 @@ async fn test_hybrid_admits_when_slot_frees_before_timeout() {
     );
 
     // Occupy the single slot.
-    let t1 = scheduler.admit().await.unwrap();
+    let t1 = scheduler
+        .admit(llm_qdisc_proxy::flow::FlowId::new("test"))
+        .await
+        .unwrap();
 
     // Spawn a waiter that should succeed when t1 is dropped.
     let scheduler_clone = Arc::new(scheduler);
     let scheduler_waiter = scheduler_clone.clone();
-    let joiner = tokio::spawn(async move { scheduler_waiter.admit().await });
+    let joiner = tokio::spawn(async move {
+        scheduler_waiter
+            .admit(llm_qdisc_proxy::flow::FlowId::new("test"))
+            .await
+    });
 
     // Give the waiter a moment to enter the queue.
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -309,6 +335,7 @@ async fn test_blocking_waits_until_slot_available() {
     let scheduler = FifoScheduler::new(
         1,
         m.clone(),
+        Arc::new(FlowRegistry::new(1.0, 50)),
         BackpressureMode::Blocking,
         100,
         Duration::from_secs(10),
@@ -316,12 +343,19 @@ async fn test_blocking_waits_until_slot_available() {
     );
 
     // Occupy the slot.
-    let t1 = scheduler.admit().await.unwrap();
+    let t1 = scheduler
+        .admit(llm_qdisc_proxy::flow::FlowId::new("test"))
+        .await
+        .unwrap();
 
     // Spawn a waiter.
     let scheduler_clone = Arc::new(scheduler);
     let scheduler_waiter = scheduler_clone.clone();
-    let joiner = tokio::spawn(async move { scheduler_waiter.admit().await });
+    let joiner = tokio::spawn(async move {
+        scheduler_waiter
+            .admit(llm_qdisc_proxy::flow::FlowId::new("test"))
+            .await
+    });
 
     // Give the waiter a moment to enter the queue.
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -423,6 +457,7 @@ async fn test_backpressure_rejections_metric() {
     let scheduler = FifoScheduler::new(
         1,
         m.clone(),
+        Arc::new(FlowRegistry::new(1.0, 50)),
         BackpressureMode::FailFast,
         0,
         Duration::from_secs(10),
@@ -439,6 +474,7 @@ async fn test_backpressure_rejections_metric() {
         backend_url: Arc::new(url::Url::parse(&backend_url).unwrap()),
         metrics: m.clone(),
         scheduler: Arc::new(scheduler),
+        flow_registry: Arc::new(FlowRegistry::new(1.0, 50)),
         backpressure: bp,
     };
 

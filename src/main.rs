@@ -2,6 +2,7 @@ use axum::{routing::get, Router};
 use std::sync::Arc;
 
 use llm_qdisc_proxy::config;
+use llm_qdisc_proxy::flow::FlowRegistry;
 use llm_qdisc_proxy::gateway;
 use llm_qdisc_proxy::metrics;
 
@@ -64,9 +65,15 @@ async fn main() {
 
     let metrics = metrics::create_metrics();
 
+    let flow_registry = Arc::new(FlowRegistry::new(
+        cfg.flows.default_weight,
+        cfg.flows.default_priority,
+    ));
+
     let scheduler = llm_qdisc_proxy::scheduler::FifoScheduler::new(
         cfg.scheduler.max_active_flows,
         metrics.clone(),
+        flow_registry.clone(),
         cfg.backpressure.mode,
         cfg.backpressure.max_queue_depth,
         cfg.backpressure.max_wait,
@@ -78,6 +85,7 @@ async fn main() {
         backend_url: Arc::new(cfg.backend.url),
         metrics: metrics.clone(),
         scheduler: Arc::new(scheduler),
+        flow_registry,
         backpressure: cfg.backpressure,
     };
 
@@ -105,9 +113,11 @@ mod tests {
     #[tokio::test]
     async fn test_healthz_returns_ok() {
         let metrics = metrics::create_metrics();
+        let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
         let scheduler = llm_qdisc_proxy::scheduler::FifoScheduler::new(
             4,
             metrics.clone(),
+            flow_registry.clone(),
             BackpressureMode::Blocking,
             100,
             std::time::Duration::from_secs(10),
@@ -118,6 +128,7 @@ mod tests {
             backend_url: Arc::new(url::Url::parse("http://localhost:8000").unwrap()),
             metrics: metrics.clone(),
             scheduler: Arc::new(scheduler),
+            flow_registry,
             backpressure: config::Backpressure::default(),
         };
         let app = create_router(state);

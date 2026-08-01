@@ -158,14 +158,17 @@ impl Stream for SseStream {
 /// Build the proxy app pointing at the given backend URL.
 fn build_proxy_app(backend_url: &str) -> Router {
     use llm_qdisc_proxy::config::BackpressureMode;
+    use llm_qdisc_proxy::flow::FlowRegistry;
     use llm_qdisc_proxy::gateway;
     use llm_qdisc_proxy::metrics;
     use llm_qdisc_proxy::scheduler;
 
     let metrics = metrics::create_metrics();
+    let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
     let scheduler = scheduler::FifoScheduler::new(
         4,
         metrics.clone(),
+        flow_registry.clone(),
         BackpressureMode::Blocking,
         100,
         std::time::Duration::from_secs(10),
@@ -176,6 +179,7 @@ fn build_proxy_app(backend_url: &str) -> Router {
         backend_url: std::sync::Arc::new(url::Url::parse(backend_url).expect("valid backend URL")),
         metrics: metrics.clone(),
         scheduler: std::sync::Arc::new(scheduler),
+        flow_registry,
         backpressure: llm_qdisc_proxy::config::Backpressure::default(),
     };
 
@@ -556,6 +560,7 @@ fn build_proxy_app_with_max(
     _backend_url: &str,
     max_active_flows: u32,
 ) -> (Router, Arc<LoadTestState>) {
+    use llm_qdisc_proxy::flow::FlowRegistry;
     use llm_qdisc_proxy::gateway;
     use llm_qdisc_proxy::metrics;
     use llm_qdisc_proxy::scheduler;
@@ -583,9 +588,11 @@ fn build_proxy_app_with_max(
 
     // Build the proxy.
     let metrics = metrics::create_metrics();
+    let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
     let scheduler = scheduler::FifoScheduler::new(
         max_active_flows,
         metrics.clone(),
+        flow_registry.clone(),
         llm_qdisc_proxy::config::BackpressureMode::Blocking,
         100,
         std::time::Duration::from_secs(10),
@@ -596,6 +603,7 @@ fn build_proxy_app_with_max(
         backend_url: Arc::new(url::Url::parse(&backend_url_str).expect("valid URL")),
         metrics: metrics.clone(),
         scheduler: Arc::new(scheduler),
+        flow_registry,
         backpressure: llm_qdisc_proxy::config::Backpressure::default(),
     };
 
@@ -721,9 +729,11 @@ async fn test_client_disconnect_releases_permit() {
 
     let metrics = metrics::create_metrics();
     let metrics_clone = metrics.clone();
+    let flow_registry = Arc::new(llm_qdisc_proxy::flow::FlowRegistry::new(1.0, 50));
     let scheduler = scheduler::FifoScheduler::new(
         4,
         metrics.clone(),
+        flow_registry.clone(),
         llm_qdisc_proxy::config::BackpressureMode::Blocking,
         100,
         std::time::Duration::from_secs(10),
@@ -734,6 +744,7 @@ async fn test_client_disconnect_releases_permit() {
         backend_url: Arc::new(url::Url::parse(&backend_url).expect("valid backend URL")),
         metrics: metrics.clone(),
         scheduler: Arc::new(scheduler),
+        flow_registry,
         backpressure: llm_qdisc_proxy::config::Backpressure::default(),
     };
 

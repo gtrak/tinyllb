@@ -7,6 +7,7 @@ use http_body_util::BodyExt;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use crate::flow::identify;
 use crate::gateway::error::ProxyError;
 use crate::gateway::stream::{MetricStream, RequestActiveGuard};
 use crate::scheduler::mode_label;
@@ -145,6 +146,8 @@ pub async fn proxy_handler(
     let original_path = req.uri().path().to_string();
     let query: Option<String> = req.uri().query().map(|q| q.to_string());
     let method = req.method().clone();
+    // Keep a reference to the original headers for flow ID resolution.
+    let original_headers = req.headers().clone();
     let headers = filter_headers(req.headers());
 
     // Body size guard: reject if Content-Length exceeds MAX_BODY_SIZE.
@@ -179,6 +182,9 @@ pub async fn proxy_handler(
         return Err(ProxyError::TooLarge);
     }
 
+    // Resolve the flow ID from headers + body (header takes precedence).
+    let flow_id = identify::resolve(&original_headers, &body_bytes);
+
     // Check if the request explicitly wants streaming.
     let wants_streaming = body_wants_streaming(&body_bytes);
 
@@ -188,7 +194,7 @@ pub async fn proxy_handler(
     // Admit through the scheduler: blocks until a slot is available,
     // returns a RAII ticket that releases the slot on drop.
     // Under backpressure, this may reject with 429.
-    let _ticket = match state.scheduler.admit().await {
+    let _ticket = match state.scheduler.admit(flow_id).await {
         Ok(ticket) => ticket,
         Err(rejected) => {
             // Increment backpressure rejection counter.

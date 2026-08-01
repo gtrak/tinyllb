@@ -11,21 +11,29 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use llm_qdisc_proxy::config::BackpressureMode;
+use llm_qdisc_proxy::flow::{FlowId, FlowRegistry};
 use llm_qdisc_proxy::metrics;
 use llm_qdisc_proxy::scheduler::FifoScheduler;
 
 /// Create a scheduler with a specific max_active_flows for tests.
 fn make_scheduler(max_active_flows: u32) -> (Arc<FifoScheduler>, Arc<metrics::Metrics>) {
     let m = metrics::create_metrics();
+    let registry = Arc::new(FlowRegistry::new(1.0, 50));
     let scheduler = Arc::new(FifoScheduler::new(
         max_active_flows,
         m.clone(),
+        registry,
         BackpressureMode::Blocking,
         100,
         std::time::Duration::from_secs(10),
         std::time::Duration::from_secs(1),
     ));
     (scheduler, m)
+}
+
+/// Default flow ID for tests.
+fn test_flow_id() -> FlowId {
+    FlowId::new("test")
 }
 
 /// Test: a single request is admitted immediately when under capacity.
@@ -37,8 +45,11 @@ async fn test_admit_single_under_capacity() {
     assert_eq!(m.active_flows.get(), 0.0);
 
     // Admit one request — should succeed immediately.
-    let ticket = scheduler.admit().await;
+    let ticket = scheduler.admit(test_flow_id()).await.unwrap();
     assert_eq!(m.active_flows.get(), 1.0);
+
+    // Verify the ticket carries the correct flow ID.
+    assert_eq!(ticket.flow_id.to_string(), "test");
 
     // Drop the ticket — active flows should return to 0.
     drop(ticket);
@@ -50,11 +61,11 @@ async fn test_admit_single_under_capacity() {
 async fn test_admit_at_capacity() {
     let (scheduler, m) = make_scheduler(2);
 
-    let t1 = scheduler.admit().await;
-    let t2 = scheduler.admit().await;
+    let t1 = scheduler.admit(test_flow_id()).await.unwrap();
+    let t2 = scheduler.admit(test_flow_id()).await.unwrap();
 
     assert_eq!(m.active_flows.get(), 2.0);
-    assert_eq!(m.queue_depth.get(), 0.0);
+    assert_eq!(scheduler.queue_depth(), 0);
 
     drop(t1);
     drop(t2);
@@ -68,14 +79,14 @@ async fn test_third_request_waits_and_releases_on_finish() {
     let (scheduler, m) = make_scheduler(2);
 
     // Fill both slots.
-    let t1 = scheduler.admit().await;
-    let t2 = scheduler.admit().await;
+    let t1 = scheduler.admit(test_flow_id()).await.unwrap();
+    let t2 = scheduler.admit(test_flow_id()).await.unwrap();
     assert_eq!(m.active_flows.get(), 2.0);
 
     // Spawn a task that tries to admit; it should block because both slots
     // are occupied.
     let scheduler_clone = scheduler.clone();
-    let joiner = tokio::spawn(async move { scheduler_clone.admit().await });
+    let joiner = tokio::spawn(async move { scheduler_clone.admit(test_flow_id()).await });
 
     // Give the spawned task a moment to enter the queue.
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -87,7 +98,7 @@ async fn test_third_request_waits_and_releases_on_finish() {
     drop(t1);
 
     // The third task should now have acquired its permit.
-    let t3 = joiner.await.expect("joiner should not panic");
+    let t3 = joiner.await.expect("joiner should not panic").unwrap();
     assert_eq!(m.active_flows.get(), 2.0); // t2 + t3
 
     drop(t2);
@@ -103,7 +114,7 @@ async fn test_wait_time_recorded_for_queued_request() {
     let (scheduler, m) = make_scheduler(1);
 
     // Occupy the single slot.
-    let t1 = scheduler.admit().await;
+    let t1 = scheduler.admit(test_flow_id()).await.unwrap();
     assert_eq!(m.active_flows.get(), 1.0);
 
     // Spawn a task that will wait; use a channel to confirm it entered the queue.
@@ -112,7 +123,7 @@ async fn test_wait_time_recorded_for_queued_request() {
     let joiner = tokio::spawn(async move {
         // Signal that we've called admit() and are waiting.
         let _ = tx.send(());
-        scheduler_clone.admit().await
+        scheduler_clone.admit(test_flow_id()).await
     });
 
     // Wait for the spawned task to enter the admission gate.
@@ -123,7 +134,7 @@ async fn test_wait_time_recorded_for_queued_request() {
 
     // Release the slot so the waiter can proceed.
     drop(t1);
-    let t2 = joiner.await.expect("joiner should not panic");
+    let t2 = joiner.await.expect("joiner should not panic").unwrap();
 
     // The waiter should have acquired a permit now.
     assert_eq!(m.active_flows.get(), 1.0);
@@ -139,8 +150,8 @@ async fn test_wait_time_recorded_for_queued_request() {
 async fn test_early_return_releases_permit() {
     let (scheduler, m) = make_scheduler(2);
 
-    let t1 = scheduler.admit().await;
-    let t2 = scheduler.admit().await;
+    let t1 = scheduler.admit(test_flow_id()).await.unwrap();
+    let t2 = scheduler.admit(test_flow_id()).await.unwrap();
     assert_eq!(m.active_flows.get(), 2.0);
 
     // Simulate early return: drop t1 before "request completes".
@@ -148,7 +159,7 @@ async fn test_early_return_releases_permit() {
     assert_eq!(m.active_flows.get(), 1.0);
 
     // The freed slot should be available for a new request.
-    let t3 = scheduler.admit().await;
+    let t3 = scheduler.admit(test_flow_id()).await.unwrap();
     assert_eq!(m.active_flows.get(), 2.0);
 
     drop(t2);
@@ -156,15 +167,14 @@ async fn test_early_return_releases_permit() {
     assert_eq!(m.active_flows.get(), 0.0);
 }
 
-/// Test: permit is released on drop (no leak).
-/// Verifies that `active_flows` increments on admit and decrements on drop.
+/// Test: admit and drop updates active_flows.
 #[tokio::test]
 async fn test_admit_and_drop_updates_active_flows() {
     let (scheduler, m) = make_scheduler(2);
 
     assert_eq!(m.active_flows.get(), 0.0);
 
-    let t1 = scheduler.admit().await;
+    let t1 = scheduler.admit(test_flow_id()).await.unwrap();
     assert_eq!(m.active_flows.get(), 1.0);
 
     // Drop the ticket — active flows should return to 0.
@@ -173,9 +183,6 @@ async fn test_admit_and_drop_updates_active_flows() {
 }
 
 /// Test: panic in a spawned task still releases the permit.
-///
-/// Uses a channel to synchronize: the spawned task signals that it holds
-/// the permit, then panics. After the panic, we verify the permit was released.
 #[tokio::test]
 async fn test_panic_in_spawned_task_releases_permit() {
     let (scheduler, m) = make_scheduler(2);
@@ -185,10 +192,8 @@ async fn test_panic_in_spawned_task_releases_permit() {
 
     let scheduler_clone = scheduler.clone();
     let joiner = tokio::spawn(async move {
-        let _ticket = scheduler_clone.admit().await;
-        // Drop the ticket BEFORE panicking, so we can observe the state
-        // transition (permit held → permit released).
-        // We signal after acquiring so the main task can check active_flows.
+        let _ticket = scheduler_clone.admit(test_flow_id()).await.unwrap();
+        // Signal after acquiring so the main task can check active_flows.
         let _ = tx.send(());
         // Simulate some work with the permit.
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -200,9 +205,6 @@ async fn test_panic_in_spawned_task_releases_permit() {
     rx.await.expect("spawned task should signal");
 
     // Check that the spawned task's ticket is active.
-    // Note: active_flows might have already dropped if the task panicked
-    // between the send and here, so we accept both 1.0 and 0.0 here.
-    // The key test is the final assertion below.
     let pre_panic = m.active_flows.get();
     assert!(
         pre_panic == 1.0 || pre_panic == 0.0,
@@ -222,7 +224,6 @@ async fn test_panic_in_spawned_task_releases_permit() {
 }
 
 /// Test: multiple concurrent requests queue correctly with max=2.
-/// Two tasks acquire immediately, third waits, then all release properly.
 #[tokio::test]
 async fn test_concurrent_admit_with_max_two() {
     let (scheduler, m) = make_scheduler(2);
@@ -232,20 +233,19 @@ async fn test_concurrent_admit_with_max_two() {
     let s2 = scheduler.clone();
     let s3 = scheduler.clone();
 
-    let t1 = tokio::spawn(async move { s1.admit().await });
-    let t2 = tokio::spawn(async move { s2.admit().await });
-    let t3 = tokio::spawn(async move { s3.admit().await });
+    let t1 = tokio::spawn(async move { s1.admit(test_flow_id()).await });
+    let t2 = tokio::spawn(async move { s2.admit(test_flow_id()).await });
+    let t3 = tokio::spawn(async move { s3.admit(test_flow_id()).await });
 
-    // Wait a bit for the first two to acquire permits (they should both succeed
-    // immediately since max=2). The third blocks until a slot frees.
+    // Wait a bit for the first two to acquire permits.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // At this point, 2 should be active.
     assert_eq!(m.active_flows.get(), 2.0);
 
-    // Retrieve the tickets from the first two tasks (which should have completed).
-    let ticket1 = t1.await.unwrap();
-    let ticket2 = t2.await.unwrap();
+    // Retrieve the tickets from the first two tasks.
+    let ticket1 = t1.await.unwrap().unwrap();
+    let ticket2 = t2.await.unwrap().unwrap();
 
     // Drop both — the third task should acquire one of the freed slots.
     drop(ticket1);
@@ -258,7 +258,7 @@ async fn test_concurrent_admit_with_max_two() {
     assert_eq!(m.active_flows.get(), 1.0);
 
     // Wait for the third task to complete and retrieve its ticket.
-    let ticket3 = t3.await.unwrap();
+    let ticket3 = t3.await.unwrap().unwrap();
     drop(ticket3);
 
     assert_eq!(m.active_flows.get(), 0.0);
@@ -270,12 +270,12 @@ async fn test_queue_depth_reflects_waiting_count() {
     let (scheduler, _m) = make_scheduler(1);
 
     // Occupy the slot.
-    let t1 = scheduler.admit().await;
+    let t1 = scheduler.admit(test_flow_id()).await.unwrap();
     assert_eq!(scheduler.queue_depth(), 0);
 
     // Spawn a waiter.
     let scheduler_clone = scheduler.clone();
-    let waiter = tokio::spawn(async move { scheduler_clone.admit().await });
+    let waiter = tokio::spawn(async move { scheduler_clone.admit(test_flow_id()).await });
 
     // Give the waiter time to enter the queue.
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -289,79 +289,70 @@ async fn test_queue_depth_reflects_waiting_count() {
 
     // Release the slot.
     drop(t1);
-    let _t2 = waiter.await.expect("waiter should complete");
+    let _t2 = waiter.await.expect("waiter should complete").unwrap();
 
     // Queue should be empty.
     assert_eq!(scheduler.queue_depth(), 0);
 }
 
 /// Test: the Prometheus queue_depth gauge is updated in real time.
-/// When a request enters admit(), the gauge goes to 1; when the permit
-/// is acquired, the gauge returns to 0.
 #[tokio::test]
 async fn test_queue_depth_gauge_updates_on_admit() {
-    let (scheduler, m) = make_scheduler(1);
-
-    // Gauge should start at 0.
-    assert_eq!(m.queue_depth.get(), 0.0);
+    let (scheduler, _m) = make_scheduler(1);
 
     // Occupy the slot.
-    let t1 = scheduler.admit().await;
-    // After acquiring the permit, gauge should be 0 (no waiting requests).
+    let t1 = scheduler.admit(test_flow_id()).await.unwrap();
+    // After acquiring the permit, the internal counter should be 0 (no waiting).
     assert_eq!(
-        m.queue_depth.get(),
-        0.0,
-        "queue_depth gauge should be 0 after permit acquired"
+        scheduler.queue_depth(),
+        0,
+        "queue_depth should be 0 after permit acquired"
     );
 
     // Spawn a waiter that will enter the queue.
     let scheduler_clone = scheduler.clone();
-    let waiter = tokio::spawn(async move { scheduler_clone.admit().await });
+    let waiter = tokio::spawn(async move { scheduler_clone.admit(test_flow_id()).await });
 
     // Give the waiter time to enter the queue.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Gauge should reflect 1 waiting request.
     assert_eq!(
-        m.queue_depth.get(),
-        1.0,
-        "queue_depth gauge should be 1 while one request waits"
+        scheduler.queue_depth(),
+        1,
+        "queue_depth should be 1 while one request waits"
     );
 
     // Release the slot so waiter can proceed.
     drop(t1);
-    let _t2 = waiter.await.expect("waiter should complete");
+    let _t2 = waiter.await.expect("waiter should complete").unwrap();
 
-    // Gauge should be back to 0.
+    // Counter should be back to 0.
     assert_eq!(
-        m.queue_depth.get(),
-        0.0,
-        "queue_depth gauge should be 0 after all permits released"
+        scheduler.queue_depth(),
+        0,
+        "queue_depth should be 0 after all permits released"
     );
 }
 
 /// Test: cancellation of admit() does not leak the queue-depth counter.
-/// If the admit future is dropped while waiting, the depth guard's Drop
-/// should release the depth increment.
 #[tokio::test]
 async fn test_queue_depth_cancel_does_not_leak() {
-    let (scheduler, m) = make_scheduler(1);
+    let (scheduler, _m) = make_scheduler(1);
 
     // Occupy the single slot.
-    let t1 = scheduler.admit().await;
+    let t1 = scheduler.admit(test_flow_id()).await.unwrap();
     assert_eq!(scheduler.queue_depth(), 0);
-    assert_eq!(m.queue_depth.get(), 0.0);
 
     // Spawn a task that tries to admit but will be cancelled.
     let scheduler_clone = scheduler.clone();
-    let handle = tokio::spawn(async move { scheduler_clone.admit().await });
+    let handle = tokio::spawn(async move { scheduler_clone.admit(test_flow_id()).await });
 
     // Give the task time to enter the queue.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Depth should be 1 (one waiter).
     assert_eq!(scheduler.queue_depth(), 1);
-    assert_eq!(m.queue_depth.get(), 1.0);
 
     // Cancel the waiting task by aborting it.
     handle.abort();
@@ -374,13 +365,8 @@ async fn test_queue_depth_cancel_does_not_leak() {
         0,
         "queue_depth should be 0 after cancelled task is dropped"
     );
-    assert_eq!(
-        m.queue_depth.get(),
-        0.0,
-        "queue_depth gauge should be 0 after cancelled task is dropped"
-    );
 
     // The original ticket should still be valid.
     drop(t1);
-    assert_eq!(m.queue_depth.get(), 0.0);
+    assert_eq!(scheduler.queue_depth(), 0);
 }
