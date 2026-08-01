@@ -13,11 +13,12 @@ use axum::Router;
 use std::sync::Arc;
 use tower::ServiceExt;
 
+use llm_qdisc_proxy::config::Algorithm;
 use llm_qdisc_proxy::config::BackpressureMode;
 use llm_qdisc_proxy::flow::{FlowId, FlowRegistry};
 use llm_qdisc_proxy::gateway;
 use llm_qdisc_proxy::metrics;
-use llm_qdisc_proxy::scheduler::FifoScheduler;
+use llm_qdisc_proxy::scheduler::Scheduler;
 
 /// Build a test proxy app for flow identification tests, returning both the
 /// router and the shared registry/metrics handles for assertion.
@@ -26,7 +27,8 @@ fn build_flow_test_app_with_handles(
 ) -> (Router, Arc<FlowRegistry>, Arc<metrics::Metrics>) {
     let metrics = metrics::create_metrics();
     let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
-    let scheduler = FifoScheduler::new(
+    let scheduler = Scheduler::new(
+        Algorithm::Fifo,
         4,
         metrics.clone(),
         flow_registry.clone(),

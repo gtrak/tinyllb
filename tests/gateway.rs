@@ -157,7 +157,7 @@ impl Stream for SseStream {
 
 /// Build the proxy app pointing at the given backend URL.
 fn build_proxy_app(backend_url: &str) -> Router {
-    use llm_qdisc_proxy::config::BackpressureMode;
+    use llm_qdisc_proxy::config::{Algorithm, BackpressureMode};
     use llm_qdisc_proxy::flow::FlowRegistry;
     use llm_qdisc_proxy::gateway;
     use llm_qdisc_proxy::metrics;
@@ -165,7 +165,8 @@ fn build_proxy_app(backend_url: &str) -> Router {
 
     let metrics = metrics::create_metrics();
     let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
-    let scheduler = scheduler::FifoScheduler::new(
+    let scheduler = scheduler::Scheduler::new(
+        Algorithm::Fifo,
         4,
         metrics.clone(),
         flow_registry.clone(),
@@ -590,7 +591,8 @@ fn build_proxy_app_with_max(
     // Build the proxy.
     let metrics = metrics::create_metrics();
     let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
-    let scheduler = scheduler::FifoScheduler::new(
+    let scheduler = scheduler::Scheduler::new(
+        llm_qdisc_proxy::config::Algorithm::Fifo,
         max_active_flows,
         metrics.clone(),
         flow_registry.clone(),
@@ -733,7 +735,8 @@ async fn test_client_disconnect_releases_permit() {
     let metrics = metrics::create_metrics();
     let metrics_clone = metrics.clone();
     let flow_registry = Arc::new(llm_qdisc_proxy::flow::FlowRegistry::new(1.0, 50));
-    let scheduler = scheduler::FifoScheduler::new(
+    let scheduler = scheduler::Scheduler::new(
+        llm_qdisc_proxy::config::Algorithm::Fifo,
         4,
         metrics.clone(),
         flow_registry.clone(),

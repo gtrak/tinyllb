@@ -100,25 +100,30 @@ fn remove_from_queue(queue: &Mutex<VecDeque<FlowId>>, flow_id: &FlowId) {
     }
 }
 
-/// RAII ticket returned by `FifoScheduler::admit`.
+/// RAII ticket returned by `Scheduler::admit`.
 ///
-/// Holds an `OwnedSemaphorePermit` and a reference to the shared metrics.
 /// When dropped, it:
-/// 1. Releases the semaphore permit (adding it back to the pool).
+/// 1. Releases the admission slot (semaphore permit for FIFO, internal counter for WFQ).
 /// 2. Decrements `llm_active_flows`.
+/// 3. Reports service_done for WFQ.
 ///
 /// This guarantees slot release on **all** exit paths: success, error,
 /// panic (Drop runs on unwind), and client disconnect (future handler drops).
 pub struct QueueTicket {
     /// The flow ID associated with this ticket.
     pub flow_id: FlowId,
-    _permit: tokio::sync::OwnedSemaphorePermit,
-    metrics: Arc<Metrics>,
+    /// Work unit (estimated max_tokens) for this request.
+    /// Used by WFQ to track service_done on completion.
+    pub work_unit: f64,
+    /// Combined drop handler: releases the permit and reports completion.
+    /// Wrapped in Option so it can be taken() in Drop (FnOnce can only be
+    /// called once, and Drop takes &mut self).
+    drop_handler: Option<Box<dyn Send + FnOnce()>>,
 }
 
 /// FIFO scheduler with a max-active-flows admission gate.
 ///
-/// Requests call `admit(flow_id)` which may block, reject, or timeout depending on
+/// Requests call `admit(flow_id, work_unit)` which may block, reject, or timeout depending on
 /// the configured backpressure mode. At most `max_active_flows` requests
 /// proceed simultaneously.
 ///
@@ -151,6 +156,7 @@ pub struct FifoScheduler {
 impl FifoScheduler {
     /// Create a new FIFO scheduler with the given max active flows,
     /// flow registry, and backpressure configuration.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         max_active_flows: u32,
         metrics: Arc<Metrics>,
@@ -180,15 +186,28 @@ impl FifoScheduler {
     ///   immediately. Otherwise, behave like Blocking.
     /// - **Hybrid**: wait up to `max_wait` for a permit. If the wait
     ///   exceeds `max_wait`, return `BackpressureRejected`.
-    pub async fn admit(&self, flow_id: FlowId) -> Result<QueueTicket, BackpressureRejected> {
+    pub async fn admit(
+        &self,
+        flow_id: FlowId,
+        work_unit: f64,
+    ) -> Result<QueueTicket, BackpressureRejected> {
         // Ensure the flow exists in the registry with defaults (atomic entry).
         let flow = self.registry.get_or_create(flow_id.clone());
 
         let flow_label = flow_id.metric_label().to_string();
         match self.backpressure_mode {
-            BackpressureMode::Blocking => self.admit_blocking(flow, flow_label, flow_id).await,
-            BackpressureMode::FailFast => self.admit_fail_fast(flow, flow_label, flow_id).await,
-            BackpressureMode::Hybrid => self.admit_hybrid(flow, flow_label, flow_id).await,
+            BackpressureMode::Blocking => {
+                self.admit_blocking(flow, flow_label, flow_id, work_unit)
+                    .await
+            }
+            BackpressureMode::FailFast => {
+                self.admit_fail_fast(flow, flow_label, flow_id, work_unit)
+                    .await
+            }
+            BackpressureMode::Hybrid => {
+                self.admit_hybrid(flow, flow_label, flow_id, work_unit)
+                    .await
+            }
         }
     }
 
@@ -198,6 +217,7 @@ impl FifoScheduler {
         flow: Arc<Flow>,
         flow_label: String,
         flow_id: FlowId,
+        _work_unit: f64,
     ) -> Result<QueueTicket, BackpressureRejected> {
         let enter = Instant::now();
 
@@ -218,7 +238,13 @@ impl FifoScheduler {
 
         depth_guard.consume();
         record_wait_and_active(self, enter);
-        Ok(make_ticket(flow_id, permit, self.metrics.clone()))
+        let metrics = self.metrics.clone();
+        Ok(make_ticket(flow_id, _work_unit, move || {
+            // Permit released by dropping
+            drop(permit);
+            metrics.active_flows.dec();
+            // FIFO: no service_done tracking needed
+        }))
     }
 
     /// Fail-fast mode: reject immediately if the queue is too deep.
@@ -227,6 +253,7 @@ impl FifoScheduler {
         flow: Arc<Flow>,
         flow_label: String,
         flow_id: FlowId,
+        _work_unit: f64,
     ) -> Result<QueueTicket, BackpressureRejected> {
         let depth = self.queue_depth();
         if depth > self.max_queue_depth {
@@ -235,7 +262,7 @@ impl FifoScheduler {
             return Err(BackpressureRejected { retry_after });
         }
 
-        // Otherwise proceed with blocking behavior.
+        // Otherwise proceed with blocking behavior (depth guard created inside).
         let enter = Instant::now();
 
         let mut depth_guard = DepthGuard::new(
@@ -255,7 +282,11 @@ impl FifoScheduler {
 
         depth_guard.consume();
         record_wait_and_active(self, enter);
-        Ok(make_ticket(flow_id, permit, self.metrics.clone()))
+        let metrics = self.metrics.clone();
+        Ok(make_ticket(flow_id, _work_unit, move || {
+            drop(permit);
+            metrics.active_flows.dec();
+        }))
     }
 
     /// Hybrid mode: race permit acquisition against a timeout.
@@ -264,6 +295,7 @@ impl FifoScheduler {
         flow: Arc<Flow>,
         flow_label: String,
         flow_id: FlowId,
+        _work_unit: f64,
     ) -> Result<QueueTicket, BackpressureRejected> {
         let enter = Instant::now();
 
@@ -299,7 +331,11 @@ impl FifoScheduler {
 
         depth_guard.consume();
         record_wait_and_active(self, enter);
-        Ok(make_ticket(flow_id, permit, self.metrics.clone()))
+        let metrics = self.metrics.clone();
+        Ok(make_ticket(flow_id, _work_unit, move || {
+            drop(permit);
+            metrics.active_flows.dec();
+        }))
     }
 
     /// Current number of requests inside `admit()` (waiting for a permit).
@@ -325,11 +361,24 @@ impl FifoScheduler {
     }
 }
 
+impl QueueTicket {
+    /// Disarm this ticket so its drop handler does NOT run on Drop.
+    ///
+    /// Used by the WFQ admission loop when the oneshot send fails: the receiver
+    /// is gone (timeout or abort), so we must prevent the drop handler from
+    /// decrementing `active_flows`, crediting `service_done`, and releasing the
+    /// permit. The caller is responsible for releasing the permit exactly once.
+    pub fn disarm(&mut self) {
+        self.drop_handler.take();
+    }
+}
+
 impl Drop for QueueTicket {
     fn drop(&mut self) {
-        // The permit is dropped by the `_permit` field, releasing it back
-        // to the semaphore. We also decrement the active_flows gauge here.
-        self.metrics.active_flows.dec();
+        // Take the handler out of the Option (FnOnce can only be called once).
+        if let Some(handler) = self.drop_handler.take() {
+            handler();
+        }
     }
 }
 
@@ -340,15 +389,19 @@ fn record_wait_and_active(scheduler: &FifoScheduler, enter: Instant) {
     scheduler.metrics.active_flows.inc();
 }
 
-/// Construct a `QueueTicket` from a flow ID, permit, and metrics handle.
-fn make_ticket(
+/// Construct a `QueueTicket` from a flow ID, work unit, and a drop handler closure.
+///
+/// The `drop_handler` closure is called on drop to release the permit
+/// and report completion. For FIFO this releases the semaphore permit;
+/// for WFQ it decrements the internal permit counter and increments service_done.
+pub fn make_ticket(
     flow_id: FlowId,
-    permit: tokio::sync::OwnedSemaphorePermit,
-    metrics: Arc<Metrics>,
+    work_unit: f64,
+    drop_handler: impl FnOnce() + Send + 'static,
 ) -> QueueTicket {
     QueueTicket {
         flow_id,
-        _permit: permit,
-        metrics,
+        work_unit,
+        drop_handler: Some(Box::new(drop_handler)),
     }
 }

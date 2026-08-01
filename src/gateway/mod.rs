@@ -11,7 +11,7 @@ use self::proxy::proxy_handler;
 use crate::config::Backpressure;
 use crate::flow::FlowRegistry;
 use crate::metrics::Metrics;
-use crate::scheduler::FifoScheduler;
+use crate::scheduler::Scheduler;
 
 /// Application state shared across all request handlers.
 #[derive(Clone)]
@@ -19,7 +19,7 @@ pub struct AppState {
     pub client: reqwest::Client,
     pub backend_url: Arc<Url>,
     pub metrics: Arc<Metrics>,
-    pub scheduler: Arc<FifoScheduler>,
+    pub scheduler: Arc<Scheduler>,
     pub flow_registry: Arc<FlowRegistry>,
     pub backpressure: Backpressure,
 }

@@ -13,11 +13,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use tower::ServiceExt;
 
+use llm_qdisc_proxy::config::Algorithm;
 use llm_qdisc_proxy::config::BackpressureMode;
 use llm_qdisc_proxy::flow::FlowRegistry;
 use llm_qdisc_proxy::gateway;
 use llm_qdisc_proxy::metrics;
-use llm_qdisc_proxy::scheduler;
+use llm_qdisc_proxy::scheduler::Scheduler;
 
 /// Shared atomic counter tracking concurrent in-flight requests at the stub.
 struct LoadTestState {
@@ -84,7 +85,8 @@ fn build_admin_test_app(
 
     let metrics = metrics::create_metrics();
     let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
-    let scheduler = scheduler::FifoScheduler::new(
+    let scheduler = Scheduler::new(
+        Algorithm::Fifo,
         max_active_flows,
         metrics.clone(),
         flow_registry.clone(),

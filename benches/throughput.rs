@@ -22,11 +22,11 @@ use std::time::Duration;
 
 use axum::routing::get;
 use axum::Router;
-use llm_qdisc_proxy::config::{Backpressure, BackpressureMode};
+use llm_qdisc_proxy::config::{Algorithm, Backpressure, BackpressureMode};
 use llm_qdisc_proxy::flow::FlowRegistry;
 use llm_qdisc_proxy::gateway;
 use llm_qdisc_proxy::metrics;
-use llm_qdisc_proxy::scheduler::FifoScheduler;
+use llm_qdisc_proxy::scheduler::Scheduler;
 use stub_backend::{StubConfig, StubState};
 
 /// Number of token frames per request (matches stub config).
@@ -72,7 +72,8 @@ const STUB_PENALTY: f64 = 0.05; // quadratic coefficient
 fn build_proxy_app(backend_url: &str, max_active_flows: u32) -> (Router, Arc<metrics::Metrics>) {
     let m = metrics::create_metrics();
     let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
-    let scheduler = FifoScheduler::new(
+    let scheduler = Scheduler::new(
+        Algorithm::Fifo,
         max_active_flows,
         m.clone(),
         flow_registry.clone(),

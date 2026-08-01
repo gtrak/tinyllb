@@ -19,7 +19,8 @@ use llm_qdisc_proxy::metrics;
 fn build_test_app(backend_url: &str) -> Router {
     let metrics = metrics::create_metrics();
     let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
-    let scheduler = llm_qdisc_proxy::scheduler::FifoScheduler::new(
+    let scheduler = llm_qdisc_proxy::scheduler::Scheduler::new(
+        llm_qdisc_proxy::config::Algorithm::Fifo,
         4,
         metrics.clone(),
         flow_registry.clone(),
@@ -310,7 +311,8 @@ async fn test_streaming_tokens_count_completion_not_total() {
     let metrics = metrics::create_metrics();
     let metrics_clone = metrics.clone();
     let flow_registry = Arc::new(llm_qdisc_proxy::flow::FlowRegistry::new(1.0, 50));
-    let scheduler = llm_qdisc_proxy::scheduler::FifoScheduler::new(
+    let scheduler = llm_qdisc_proxy::scheduler::Scheduler::new(
+        llm_qdisc_proxy::config::Algorithm::Fifo,
         4,
         metrics.clone(),
         flow_registry.clone(),
@@ -381,7 +383,8 @@ async fn test_active_gauge_during_streaming() {
     let metrics = metrics::create_metrics();
     let metrics_clone = metrics.clone();
     let flow_registry = Arc::new(llm_qdisc_proxy::flow::FlowRegistry::new(1.0, 50));
-    let scheduler = llm_qdisc_proxy::scheduler::FifoScheduler::new(
+    let scheduler = llm_qdisc_proxy::scheduler::Scheduler::new(
+        llm_qdisc_proxy::config::Algorithm::Fifo,
         4,
         metrics.clone(),
         flow_registry.clone(),
@@ -461,7 +464,8 @@ async fn test_nonstream_tokens_count_completion_not_total() {
     let metrics = metrics::create_metrics();
     let metrics_clone = metrics.clone();
     let flow_registry = Arc::new(llm_qdisc_proxy::flow::FlowRegistry::new(1.0, 50));
-    let scheduler = llm_qdisc_proxy::scheduler::FifoScheduler::new(
+    let scheduler = llm_qdisc_proxy::scheduler::Scheduler::new(
+        llm_qdisc_proxy::config::Algorithm::Fifo,
         4,
         metrics.clone(),
         flow_registry.clone(),
@@ -532,7 +536,8 @@ async fn test_active_gauge_during_nonstreaming() {
     let metrics = metrics::create_metrics();
     let metrics_clone = metrics.clone();
     let flow_registry = Arc::new(llm_qdisc_proxy::flow::FlowRegistry::new(1.0, 50));
-    let scheduler = llm_qdisc_proxy::scheduler::FifoScheduler::new(
+    let scheduler = llm_qdisc_proxy::scheduler::Scheduler::new(
+        llm_qdisc_proxy::config::Algorithm::Fifo,
         4,
         metrics.clone(),
         flow_registry.clone(),

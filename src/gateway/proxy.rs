@@ -87,6 +87,22 @@ fn body_wants_streaming(body: &Bytes) -> bool {
     }
 }
 
+/// Extract `max_tokens` from the request body for WFQ work unit tracking.
+/// Falls back to a default of 1024 if `max_tokens` is absent or unparseable.
+fn extract_max_tokens(body: &Bytes) -> f64 {
+    if body.is_empty() {
+        return 1024.0;
+    }
+    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) {
+        value
+            .get("max_tokens")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(1024.0)
+    } else {
+        1024.0
+    }
+}
+
 /// Build the backend URL by joining the base URL with the request path and query.
 fn build_backend_url(
     backend_url: &url::Url,
@@ -188,13 +204,16 @@ pub async fn proxy_handler(
     // Check if the request explicitly wants streaming.
     let wants_streaming = body_wants_streaming(&body_bytes);
 
+    // Extract max_tokens from the request body for WFQ work unit tracking.
+    let work_unit = extract_max_tokens(&body_bytes);
+
     // Build the backend URL, preserving the query string.
     let backend_url = build_backend_url(&state.backend_url, &original_path, query.as_deref())?;
 
     // Admit through the scheduler: blocks until a slot is available,
     // returns a RAII ticket that releases the slot on drop.
     // Under backpressure, this may reject with 429.
-    let _ticket = match state.scheduler.admit(flow_id).await {
+    let _ticket = match state.scheduler.admit(flow_id, work_unit).await {
         Ok(ticket) => ticket,
         Err(rejected) => {
             // Increment backpressure rejection counter.

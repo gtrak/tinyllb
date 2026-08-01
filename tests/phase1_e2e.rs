@@ -21,11 +21,11 @@ use std::sync::Arc;
 use std::time::Duration;
 use tower::ServiceExt;
 
-use llm_qdisc_proxy::config::{Backpressure, BackpressureMode};
+use llm_qdisc_proxy::config::{Algorithm, Backpressure, BackpressureMode};
 use llm_qdisc_proxy::flow::FlowRegistry;
 use llm_qdisc_proxy::gateway;
 use llm_qdisc_proxy::metrics;
-use llm_qdisc_proxy::scheduler::FifoScheduler;
+use llm_qdisc_proxy::scheduler::Scheduler;
 
 // ---------------------------------------------------------------------------
 // Stub backend with concurrency tracking
@@ -149,7 +149,8 @@ fn build_e2e_proxy(
 ) -> (Router, Arc<metrics::Metrics>) {
     let m = metrics::create_metrics();
     let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
-    let scheduler = FifoScheduler::new(
+    let scheduler = Scheduler::new(
+        Algorithm::Fifo,
         max_active_flows,
         m.clone(),
         flow_registry.clone(),

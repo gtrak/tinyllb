@@ -76,8 +76,8 @@ impl Default for Scheduler {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Algorithm {
-    Fifo,
     #[default]
+    Fifo,
     Wfq,
     Drr,
 }
