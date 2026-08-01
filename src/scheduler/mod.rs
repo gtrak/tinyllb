@@ -1,6 +1,9 @@
 mod backpressure;
+mod completion_bias;
 mod drr;
 mod fifo;
+mod priority;
+mod starvation;
 mod wfq;
 
 pub use backpressure::{fail_fast_retry_after, mode_label, BackpressureRejected};
@@ -9,10 +12,51 @@ pub use fifo::{make_ticket, FifoScheduler, QueueTicket};
 pub use wfq::WfqScheduler;
 
 use crate::config::Algorithm;
+use crate::config::CompletionBias;
 use crate::flow::FlowRegistry;
 use crate::metrics::Metrics;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Shared policy state for all scheduler variants.
+///
+/// Each scheduler type gets an Arc clone of the completion bias gate and
+/// the starvation timeout.
+#[allow(dead_code)]
+pub(crate) struct Policies {
+    /// Completion bias gate for checking before admit.
+    completion_bias: Arc<completion_bias::CompletionBiasGate>,
+    /// Starvation timeout for force-admit in try_select.
+    starvation_timeout: Duration,
+    /// Notify completion bias waiters when active flows change.
+    notify: Arc<tokio::sync::Notify>,
+}
+
+impl Policies {
+    fn new(
+        completion_bias: CompletionBias,
+        max_active_flows: u32,
+        starvation_timeout: Duration,
+        metrics: Arc<Metrics>,
+        registry: Arc<FlowRegistry>,
+        notify: Arc<tokio::sync::Notify>,
+    ) -> Self {
+        let gate = completion_bias::CompletionBiasGate::new(
+            completion_bias.enabled,
+            completion_bias.target_active_flows,
+            max_active_flows,
+            metrics,
+            registry,
+            notify.clone(),
+            starvation_timeout,
+        );
+        Self {
+            completion_bias: Arc::new(gate),
+            starvation_timeout,
+            notify,
+        }
+    }
+}
 
 /// Unified scheduler type that dispatches to FIFO, WFQ, or DRR based on config.
 pub enum Scheduler {
@@ -23,6 +67,10 @@ pub enum Scheduler {
 
 impl Scheduler {
     /// Create a scheduler based on the configured algorithm.
+    ///
+    /// This is the full constructor that accepts all policy parameters.
+    /// Use [`Scheduler::new_with_defaults`](Self::new_with_defaults) for
+    /// backward-compatible construction with default policy values.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         algorithm: Algorithm,
@@ -33,9 +81,21 @@ impl Scheduler {
         max_queue_depth: u32,
         max_wait: Duration,
         retry_after_base: Duration,
+        starvation_timeout: Duration,
+        completion_bias: CompletionBias,
     ) -> Self {
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let policies = Policies::new(
+            completion_bias,
+            max_active_flows,
+            starvation_timeout,
+            metrics.clone(),
+            registry.clone(),
+            notify.clone(),
+        );
+
         match algorithm {
-            Algorithm::Fifo => Self::Fifo(FifoScheduler::new(
+            Algorithm::Fifo => Self::Fifo(FifoScheduler::new_with_policies(
                 max_active_flows,
                 metrics,
                 registry,
@@ -43,8 +103,9 @@ impl Scheduler {
                 max_queue_depth,
                 max_wait,
                 retry_after_base,
+                policies,
             )),
-            Algorithm::Wfq => Self::Wfq(WfqScheduler::new(
+            Algorithm::Wfq => Self::Wfq(WfqScheduler::new_with_policies(
                 max_active_flows,
                 metrics,
                 registry,
@@ -52,8 +113,10 @@ impl Scheduler {
                 max_queue_depth,
                 max_wait,
                 retry_after_base,
+                starvation_timeout,
+                policies,
             )),
-            Algorithm::Drr => Self::Drr(DrrScheduler::new(
+            Algorithm::Drr => Self::Drr(DrrScheduler::new_with_policies(
                 max_active_flows,
                 metrics,
                 registry,
@@ -61,11 +124,45 @@ impl Scheduler {
                 max_queue_depth,
                 max_wait,
                 retry_after_base,
+                starvation_timeout,
+                policies,
             )),
         }
     }
 
+    /// Create a scheduler with default policy values.
+    ///
+    /// Backward-compatible constructor for existing test code.  Uses:
+    /// - `starvation_timeout = 300s` (effectively disabled for short tests)
+    /// - `completion_bias = default` (enabled, target = max_active_flows)
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_defaults(
+        algorithm: Algorithm,
+        max_active_flows: u32,
+        metrics: Arc<Metrics>,
+        registry: Arc<FlowRegistry>,
+        backpressure_mode: crate::config::BackpressureMode,
+        max_queue_depth: u32,
+        max_wait: Duration,
+        retry_after_base: Duration,
+    ) -> Self {
+        Self::new(
+            algorithm,
+            max_active_flows,
+            metrics,
+            registry,
+            backpressure_mode,
+            max_queue_depth,
+            max_wait,
+            retry_after_base,
+            Duration::from_secs(300),
+            CompletionBias::default(),
+        )
+    }
+
     /// Attempt to admit a request into the active set.
+    ///
+    /// Applies completion bias before delegating to the underlying scheduler.
     pub async fn admit(
         &self,
         flow_id: crate::flow::FlowId,

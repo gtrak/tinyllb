@@ -28,7 +28,7 @@ fn build_proxy_app_with_backpressure(
 ) -> Router {
     let metrics = metrics::create_metrics();
     let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
-    let scheduler = Scheduler::new(
+    let scheduler = Scheduler::new_with_defaults(
         Algorithm::Fifo,
         max_active_flows,
         metrics.clone(),
@@ -455,7 +455,7 @@ async fn test_backpressure_rejections_metric() {
     // We'll use a fresh app with a /metrics endpoint.
 
     let m = metrics::create_metrics();
-    let scheduler = Scheduler::new(
+    let scheduler = Scheduler::new_with_defaults(
         Algorithm::Fifo,
         1,
         m.clone(),

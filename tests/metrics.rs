@@ -16,10 +16,12 @@ use llm_qdisc_proxy::gateway;
 use llm_qdisc_proxy::metrics;
 
 /// Build a full proxy app with metrics for testing.
-fn build_test_app(backend_url: &str) -> Router {
+/// Returns the router and the shared `Arc<Metrics>` handle so tests can
+/// access individual collectors (e.g., to touch GaugeVec labels).
+fn build_test_app(backend_url: &str) -> (Router, Arc<llm_qdisc_proxy::metrics::Metrics>) {
     let metrics = metrics::create_metrics();
     let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
-    let scheduler = llm_qdisc_proxy::scheduler::Scheduler::new(
+    let scheduler = llm_qdisc_proxy::scheduler::Scheduler::new_with_defaults(
         llm_qdisc_proxy::config::Algorithm::Fifo,
         4,
         metrics.clone(),
@@ -55,11 +57,13 @@ fn build_test_app(backend_url: &str) -> Router {
         .with_state(state.clone());
     let gateway_router = gateway::create_router().with_state(state.clone());
 
-    Router::new()
+    let app = Router::new()
         .merge(health_router)
         .merge(metrics_router)
         .merge(gateway_router)
-        .with_state(state)
+        .with_state(state);
+
+    (app, metrics)
 }
 
 /// Collect a response body into a String.
@@ -90,9 +94,10 @@ fn assert_metric_exists(metrics_text: &str, name: &str, expected_type: &str) {
 #[tokio::test]
 async fn test_metrics_endpoint_returns_all_metrics() {
     // Use a dummy backend URL; we only need to scrape /metrics.
-    let app = build_test_app("http://127.0.0.1:59999/");
+    let (app, metrics) = build_test_app("http://127.0.0.1:59999/");
 
     let resp = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/metrics")
@@ -131,12 +136,42 @@ async fn test_metrics_endpoint_returns_all_metrics() {
     // Backend family
     assert_metric_exists(&body, "vllm_requests_active", "gauge");
     assert_metric_exists(&body, "vllm_errors_total", "counter");
+
+    // Starvation protection family (issue #12)
+    // Touch these metrics so they appear in the scrape output.
+    // GaugeVec only emits samples for labels that have been accessed.
+    metrics
+        .flow_starvation_seconds
+        .with_label_values(&["ephemeral"])
+        .set(0.0);
+    let resp2 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp2.status(), 200);
+    let body2 = collect_body_string(resp2).await;
+
+    // Starvation protection metrics should now appear.
+    assert!(
+        body2.contains("llm_flow_starvation_seconds"),
+        "llm_flow_starvation_seconds should appear in scrape output"
+    );
+    assert!(
+        body2.contains("llm_starvation_force_admits_total"),
+        "llm_starvation_force_admits_total should appear in scrape output"
+    );
 }
 
 /// Test: metrics are initialized correctly (all counters start at 0, gauges at 0).
 #[tokio::test]
 async fn test_metrics_initial_values() {
-    let app = build_test_app("http://127.0.0.1:59999/");
+    let (app, _) = build_test_app("http://127.0.0.1:59999/");
 
     let resp = app
         .oneshot(
@@ -311,7 +346,7 @@ async fn test_streaming_tokens_count_completion_not_total() {
     let metrics = metrics::create_metrics();
     let metrics_clone = metrics.clone();
     let flow_registry = Arc::new(llm_qdisc_proxy::flow::FlowRegistry::new(1.0, 50));
-    let scheduler = llm_qdisc_proxy::scheduler::Scheduler::new(
+    let scheduler = llm_qdisc_proxy::scheduler::Scheduler::new_with_defaults(
         llm_qdisc_proxy::config::Algorithm::Fifo,
         4,
         metrics.clone(),
@@ -383,7 +418,7 @@ async fn test_active_gauge_during_streaming() {
     let metrics = metrics::create_metrics();
     let metrics_clone = metrics.clone();
     let flow_registry = Arc::new(llm_qdisc_proxy::flow::FlowRegistry::new(1.0, 50));
-    let scheduler = llm_qdisc_proxy::scheduler::Scheduler::new(
+    let scheduler = llm_qdisc_proxy::scheduler::Scheduler::new_with_defaults(
         llm_qdisc_proxy::config::Algorithm::Fifo,
         4,
         metrics.clone(),
@@ -464,7 +499,7 @@ async fn test_nonstream_tokens_count_completion_not_total() {
     let metrics = metrics::create_metrics();
     let metrics_clone = metrics.clone();
     let flow_registry = Arc::new(llm_qdisc_proxy::flow::FlowRegistry::new(1.0, 50));
-    let scheduler = llm_qdisc_proxy::scheduler::Scheduler::new(
+    let scheduler = llm_qdisc_proxy::scheduler::Scheduler::new_with_defaults(
         llm_qdisc_proxy::config::Algorithm::Fifo,
         4,
         metrics.clone(),
@@ -536,7 +571,7 @@ async fn test_active_gauge_during_nonstreaming() {
     let metrics = metrics::create_metrics();
     let metrics_clone = metrics.clone();
     let flow_registry = Arc::new(llm_qdisc_proxy::flow::FlowRegistry::new(1.0, 50));
-    let scheduler = llm_qdisc_proxy::scheduler::Scheduler::new(
+    let scheduler = llm_qdisc_proxy::scheduler::Scheduler::new_with_defaults(
         llm_qdisc_proxy::config::Algorithm::Fifo,
         4,
         metrics.clone(),

@@ -28,7 +28,7 @@ async fn test_wfq_selects_higher_weight_flow_preferentially() {
     let result = tokio::time::timeout(Duration::from_secs(10), async {
         let m = metrics::create_metrics();
         let registry = Arc::new(FlowRegistry::new(1.0, 50));
-        let scheduler = Arc::new(Scheduler::new(
+        let scheduler = Arc::new(Scheduler::new_with_defaults(
             Algorithm::Wfq,
             2, // max_active_flows=2
             m.clone(),
@@ -105,7 +105,7 @@ async fn test_wfq_selects_higher_weight_flow_preferentially() {
 async fn test_wfq_fifo_tie_breaking() {
     let m = metrics::create_metrics();
     let registry = Arc::new(FlowRegistry::new(1.0, 50));
-    let scheduler = Arc::new(Scheduler::new(
+    let scheduler = Arc::new(Scheduler::new_with_defaults(
         Algorithm::Wfq,
         1, // Only 1 permit available at a time.
         m.clone(),
@@ -159,7 +159,7 @@ async fn test_wfq_no_starvation() {
     let result = tokio::time::timeout(Duration::from_secs(10), async {
         let m = metrics::create_metrics();
         let registry = Arc::new(FlowRegistry::new(1.0, 50));
-        let scheduler = Arc::new(Scheduler::new(
+        let scheduler = Arc::new(Scheduler::new_with_defaults(
             Algorithm::Wfq,
             2,
             m.clone(),
@@ -227,7 +227,7 @@ async fn test_wfq_no_starvation() {
 async fn test_wfq_zero_weight_flow_skipped() {
     let m = metrics::create_metrics();
     let registry = Arc::new(FlowRegistry::new(1.0, 50));
-    let scheduler = Arc::new(Scheduler::new(
+    let scheduler = Arc::new(Scheduler::new_with_defaults(
         Algorithm::Wfq,
         2,
         m.clone(),
@@ -294,7 +294,7 @@ async fn test_wfq_zero_weight_flow_skipped() {
 async fn test_wfq_weight_distribution() {
     let m = metrics::create_metrics();
     let registry = Arc::new(FlowRegistry::new(1.0, 50));
-    let scheduler = Arc::new(Scheduler::new(
+    let scheduler = Arc::new(Scheduler::new_with_defaults(
         Algorithm::Wfq,
         2,
         m.clone(),
@@ -372,7 +372,7 @@ async fn test_wfq_weight_distribution() {
 async fn test_wfq_queue_snapshot() {
     let m = metrics::create_metrics();
     let registry = Arc::new(FlowRegistry::new(1.0, 50));
-    let scheduler = Scheduler::new(
+    let scheduler = Scheduler::new_with_defaults(
         Algorithm::Wfq,
         1,
         m.clone(),
@@ -454,7 +454,7 @@ async fn test_wfq_e2e_weight_ratio() {
         priority: 50,
     });
 
-    let scheduler = Scheduler::new(
+    let scheduler = Scheduler::new_with_defaults(
         Algorithm::Wfq,
         2,
         m.clone(),
@@ -568,7 +568,7 @@ async fn test_wfq_cancelled_waiter_no_active_underflow() {
     let registry = Arc::new(FlowRegistry::new(1.0, 50));
     // max_active_flows=1 so the second request must wait.
     // Very short timeout ensures B times out before A's ticket is dropped.
-    let scheduler = Arc::new(Scheduler::new(
+    let scheduler = Arc::new(Scheduler::new_with_defaults(
         Algorithm::Wfq,
         1,
         m.clone(),
@@ -629,7 +629,7 @@ async fn test_wfq_cancelled_waiter_no_active_underflow() {
 async fn test_wfq_blocking_abort_no_depth_leak() {
     let m = metrics::create_metrics();
     let registry = Arc::new(FlowRegistry::new(1.0, 50));
-    let scheduler = Arc::new(Scheduler::new(
+    let scheduler = Arc::new(Scheduler::new_with_defaults(
         Algorithm::Wfq,
         1,
         m.clone(),
@@ -711,7 +711,7 @@ async fn test_wfq_weight_ratio_completed_work() {
         let m = metrics::create_metrics();
         let registry = Arc::new(FlowRegistry::new(1.0, 50));
         // max_active_flows=1: only one request active at a time.
-        let scheduler = Arc::new(Scheduler::new(
+        let scheduler = Arc::new(Scheduler::new_with_defaults(
             Algorithm::Wfq,
             1,
             m.clone(),
@@ -859,7 +859,7 @@ async fn test_wfq_tie_break_earlier_enqueued_wins() {
     let m = metrics::create_metrics();
     let registry = Arc::new(FlowRegistry::new(1.0, 50));
     // max_active_flows=1 so only one request can be active at a time.
-    let scheduler = Arc::new(Scheduler::new(
+    let scheduler = Arc::new(Scheduler::new_with_defaults(
         Algorithm::Wfq,
         1,
         m.clone(),
@@ -957,7 +957,7 @@ async fn test_wfq_sibling_cancel_does_not_kill_other() {
     let m = metrics::create_metrics();
     let registry = Arc::new(FlowRegistry::new(1.0, 50));
     // max_active_flows=1 so the second request must wait.
-    let scheduler = Arc::new(Scheduler::new(
+    let scheduler = Arc::new(Scheduler::new_with_defaults(
         Algorithm::Wfq,
         1,
         m.clone(),

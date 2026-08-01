@@ -81,6 +81,8 @@ async fn main() {
         cfg.backpressure.max_queue_depth,
         cfg.backpressure.max_wait,
         cfg.backpressure.retry_after_base,
+        cfg.scheduler.starvation_timeout,
+        cfg.scheduler.completion_bias.clone(),
     );
 
     let state = gateway::AppState {
@@ -117,7 +119,7 @@ mod tests {
     async fn test_healthz_returns_ok() {
         let metrics = metrics::create_metrics();
         let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
-        let scheduler = llm_qdisc_proxy::scheduler::Scheduler::new(
+        let scheduler = llm_qdisc_proxy::scheduler::Scheduler::new_with_defaults(
             llm_qdisc_proxy::config::Algorithm::Fifo,
             4,
             metrics.clone(),

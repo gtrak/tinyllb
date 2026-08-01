@@ -165,7 +165,7 @@ fn build_proxy_app(backend_url: &str) -> Router {
 
     let metrics = metrics::create_metrics();
     let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
-    let scheduler = scheduler::Scheduler::new(
+    let scheduler = scheduler::Scheduler::new_with_defaults(
         Algorithm::Fifo,
         4,
         metrics.clone(),
@@ -591,7 +591,7 @@ fn build_proxy_app_with_max(
     // Build the proxy.
     let metrics = metrics::create_metrics();
     let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
-    let scheduler = scheduler::Scheduler::new(
+    let scheduler = scheduler::Scheduler::new_with_defaults(
         llm_qdisc_proxy::config::Algorithm::Fifo,
         max_active_flows,
         metrics.clone(),
@@ -735,7 +735,7 @@ async fn test_client_disconnect_releases_permit() {
     let metrics = metrics::create_metrics();
     let metrics_clone = metrics.clone();
     let flow_registry = Arc::new(llm_qdisc_proxy::flow::FlowRegistry::new(1.0, 50));
-    let scheduler = scheduler::Scheduler::new(
+    let scheduler = scheduler::Scheduler::new_with_defaults(
         llm_qdisc_proxy::config::Algorithm::Fifo,
         4,
         metrics.clone(),

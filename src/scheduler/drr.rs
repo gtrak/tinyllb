@@ -14,17 +14,24 @@
 //! - Same `Pending`, `SharedState`, admission loop, RAII guard, backpressure,
 //!   queue_snapshot, ticket/disarm pattern.
 //! - Selection differs: DRR round-robin cursor with credit bookkeeping.
+//!
+//! Priority & starvation: `try_select` checks for starved flows first
+//! (force-select), then picks the highest-priority eligible flow.
+//! Ties broken by round-robin order (base DRR rule).
 
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::config::BackpressureMode;
 use crate::flow::{Flow, FlowId, FlowRegistry, QueueSnapshot};
 use crate::metrics::Metrics;
 use crate::scheduler::backpressure::{fail_fast_retry_after, BackpressureRejected};
+use crate::scheduler::completion_bias::CompletionBiasGate;
 use crate::scheduler::fifo::{make_ticket, QueueTicket};
+use crate::scheduler::priority;
+use crate::scheduler::starvation;
 
 /// Per-request entry in a flow's waiting queue.
 struct Pending {
@@ -79,6 +86,8 @@ pub struct DrrScheduler {
     retry_after_base: std::time::Duration,
     /// FIFO-ordered waiting queue for GET /queue reporting.
     waiting_queue: Arc<Mutex<VecDeque<FlowId>>>,
+    /// Completion bias gate for pre-admit checks.
+    completion_bias_gate: Arc<CompletionBiasGate>,
 }
 
 impl DrrScheduler {
@@ -93,6 +102,68 @@ impl DrrScheduler {
         max_wait: std::time::Duration,
         retry_after_base: std::time::Duration,
     ) -> Self {
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let gate = Arc::new(CompletionBiasGate::new(
+            false,
+            0,
+            max_active_flows,
+            metrics.clone(),
+            registry.clone(),
+            notify,
+            Duration::from_secs(300),
+        ));
+        Self::new_inner(
+            max_active_flows,
+            metrics,
+            registry,
+            backpressure_mode,
+            max_queue_depth,
+            max_wait,
+            retry_after_base,
+            Duration::from_secs(300),
+            gate,
+        )
+    }
+
+    /// Create a new DRR scheduler with policy hooks.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_policies(
+        max_active_flows: u32,
+        metrics: Arc<Metrics>,
+        registry: Arc<FlowRegistry>,
+        backpressure_mode: BackpressureMode,
+        max_queue_depth: u32,
+        max_wait: std::time::Duration,
+        retry_after_base: std::time::Duration,
+        starvation_timeout: Duration,
+        policies: super::Policies,
+    ) -> Self {
+        Self::new_inner(
+            max_active_flows,
+            metrics,
+            registry,
+            backpressure_mode,
+            max_queue_depth,
+            max_wait,
+            retry_after_base,
+            starvation_timeout,
+            policies.completion_bias,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_inner(
+        max_active_flows: u32,
+        metrics: Arc<Metrics>,
+        registry: Arc<FlowRegistry>,
+        backpressure_mode: BackpressureMode,
+        max_queue_depth: u32,
+        max_wait: std::time::Duration,
+        retry_after_base: std::time::Duration,
+        starvation_timeout: Duration,
+        completion_bias_gate: Arc<CompletionBiasGate>,
+    ) -> Self {
+        let notify = Arc::new(tokio::sync::Notify::new());
         let state = Arc::new(SharedState {
             inner: Mutex::new(DrrState {
                 waiting: std::collections::HashMap::new(),
@@ -100,17 +171,20 @@ impl DrrScheduler {
                 available_permits: max_active_flows,
                 next_pending_id: 0,
             }),
-            notify: Arc::new(tokio::sync::Notify::new()),
+            notify: notify.clone(),
         });
 
         // Spawn the admission loop.
         let state_clone = state.clone();
         let metrics_clone = metrics.clone();
         let registry_clone = registry.clone();
+        let gate_clone = completion_bias_gate.clone();
         tokio::spawn(Self::admission_loop(
             state_clone,
             metrics_clone,
             registry_clone,
+            starvation_timeout,
+            gate_clone,
         ));
 
         Self {
@@ -122,28 +196,22 @@ impl DrrScheduler {
             max_wait,
             retry_after_base,
             waiting_queue: Arc::new(Mutex::new(VecDeque::new())),
+            completion_bias_gate,
         }
     }
 
-    /// Background admission loop: when notified (slot freed or new request),
-    /// try to select the best flow using DRR round-robin with credit,
-    /// and wake its head waiter.
+    /// Background admission loop.
     async fn admission_loop(
         state: Arc<SharedState>,
         metrics: Arc<Metrics>,
         registry: Arc<FlowRegistry>,
+        starvation_timeout: Duration,
+        gate: Arc<CompletionBiasGate>,
     ) {
         loop {
             state.notify.notified().await;
 
-            // Keep trying to select while permits are available and flows are waiting.
-            // Each call to try_select accumulates credit for ALL waiting flows,
-            // so even if nothing is eligible yet, credit is progressing.
-            // We keep looping until no permits, no waiting flows, or no credit
-            // was accumulated (meaning all remaining flows have weight <= 0 and
-            // can never become eligible — classic DRR active-list semantics).
             loop {
-                // Check preconditions before each round.
                 let (has_permits, has_waiting) = {
                     let s = state.inner.lock().unwrap();
                     (s.available_permits > 0, !s.rr_cursor.is_empty())
@@ -152,50 +220,40 @@ impl DrrScheduler {
                     break;
                 }
 
-                let (selection, credit_accumulated) = Self::try_select(&state, &registry, &metrics);
+                let (selection, credit_accumulated) =
+                    Self::try_select(&state, &registry, &metrics, starvation_timeout);
                 match selection {
                     None => {
                         if credit_accumulated {
                             // No flow eligible this round, but credit was accumulated.
-                            // Continue the inner loop to accumulate more credit.
                         } else {
-                            // No progress possible: all flows have non-positive weight
-                            // (or no waiting flows with positive weight remain).
-                            // Classic DRR active-list semantics — break to avoid
-                            // spinning forever on zero-weight flows.
                             break;
                         }
                     }
                     Some((flow_id, pending, work_unit)) => {
-                        // Build the ticket with a drop closure that:
-                        // 1. Decrements active_flows
-                        // 2. Releases the permit
-                        // 3. Notifies the admission loop
                         let metrics_clone = metrics.clone();
                         let flow_id_for_ticket = flow_id.clone();
                         let state_clone = state.clone();
+                        let gate_clone = gate.clone();
+                        let flow_for_active = registry.get_or_create(flow_id.clone());
 
                         let ticket =
                             make_ticket(flow_id_for_ticket.clone(), work_unit, move || {
                                 metrics_clone.active_flows.dec();
+                                flow_for_active.dec_active();
 
-                                // Release the permit.
                                 {
                                     let mut s = state_clone.inner.lock().unwrap();
                                     s.available_permits += 1;
                                 }
 
-                                // notify_one stores a permit when no waiter is registered,
-                                // preventing lost-wakeup between inner-drain break and notified().await.
                                 state_clone.notify.notify_one();
+                                gate_clone.notify_waiters();
                             });
 
-                        // Send the ticket to the waiting request.
                         match pending.tx.send(ticket) {
                             Ok(()) => {}
                             Err(mut ticket) => {
-                                // Request was cancelled or timed out.  Disarm the ticket so its
-                                // drop handler does NOT run.  We only need to release the permit once.
                                 ticket.disarm();
                                 let mut s = state.inner.lock().unwrap();
                                 s.available_permits += 1;
@@ -210,22 +268,15 @@ impl DrrScheduler {
 
     /// Try to select the next flow using DRR round-robin with credit.
     ///
-    /// Algorithm per full round:
-    /// 1. For EVERY flow in the cursor, accumulate credit: `credit += floor(weight)`.
-    /// 2. Find the first flow (in RR order) whose `credit >= cost`.
-    /// 3. If found: serve it, deduct cost from credit, return selection.
-    /// 4. If not found: rotate cursor, return None (no admission this tick).
-    ///
-    /// Returns `(Option<(flow_id, pending, work_unit)>, credit_accumulated)`.
-    /// `credit_accumulated` is true if ANY flow accumulated credit this round.
-    /// When false, the caller should break the inner drain loop (no progress
-    /// is possible — all remaining flows have non-positive weight).
-    ///
-    /// When a flow's queue empties (detected in the guard), credit is reset to 0.
+    /// Selection order:
+    /// 1. Starved flows are force-selected first (bypassing credit check).
+    /// 2. Among eligible flows (credit >= cost), highest priority wins.
+    /// 3. Ties broken by round-robin order (base DRR rule).
     fn try_select(
         state: &Arc<SharedState>,
         registry: &FlowRegistry,
         metrics: &Metrics,
+        starvation_timeout: Duration,
     ) -> (Option<(FlowId, Pending, f64)>, bool) {
         let mut s = state.inner.lock().unwrap();
         if s.available_permits == 0 {
@@ -236,30 +287,87 @@ impl DrrScheduler {
             return (None, false);
         }
 
-        // Phase 1: Accumulate credit for ALL waiting flows in this round.
-        // This ensures every waiting flow gets its weight-based credit increment.
+        // Phase 1: Check for starved flows (force-select if found).
+        // Collect candidate flow IDs first to avoid borrow conflicts.
+        let starved_candidates: Vec<FlowId> = s
+            .rr_cursor
+            .iter()
+            .filter(|fid| s.waiting.get(*fid).is_some_and(|q| !q.is_empty()))
+            .cloned()
+            .collect();
+
+        for fid in &starved_candidates {
+            let flow = registry.get_or_create(fid.clone());
+            if let Some(wait) = starvation::is_starved(&flow, starvation_timeout) {
+                // Force-select this starved flow (bypass credit check).
+                starvation::record_force_admit(metrics, &flow, wait);
+
+                let selected = fid.clone();
+
+                let pending = s
+                    .waiting
+                    .get_mut(&selected)
+                    .and_then(|q| q.pop_front())
+                    .expect("starved flow should have pending entry");
+                let work_unit = pending.work_unit;
+
+                // Deduct cost from credit (force, even if credit was insufficient).
+                let new_credit = flow.credit.load(Ordering::Relaxed) - (work_unit as i64);
+                flow.credit.store(new_credit, Ordering::Relaxed);
+                metrics
+                    .flow_credit
+                    .with_label_values(&[selected.metric_label()])
+                    .set(new_credit as f64);
+
+                // If this flow's queue is now empty, clean up.
+                if s.waiting.get(&selected).is_none_or(|q| q.is_empty()) {
+                    s.waiting.remove(&selected);
+                    flow.credit.store(0, Ordering::Relaxed);
+                    metrics
+                        .flow_credit
+                        .with_label_values(&[selected.metric_label()])
+                        .set(0.0);
+                }
+
+                // Rotate cursor.
+                s.rr_cursor.retain(|id| id != &selected);
+                if s.waiting.get(&selected).is_some_and(|q| !q.is_empty()) {
+                    s.rr_cursor.push_back(selected.clone());
+                }
+
+                // Clear enqueued_at.
+                {
+                    let mut enq = flow.enqueued_at.write().unwrap();
+                    *enq = None;
+                }
+
+                s.available_permits -= 1;
+                drop(s);
+
+                return (Some((selected.clone(), pending, work_unit)), true);
+            }
+        }
+        // Drop unused idx to avoid borrow conflicts.
+        drop(starved_candidates);
+
+        // Phase 2: Accumulate credit for ALL waiting flows in this round.
         let mut eligible_flows: Vec<(usize, FlowId)> = Vec::new();
         let mut credit_accumulated = false;
 
         for (idx, flow_id) in s.rr_cursor.iter().enumerate() {
-            // Check if this flow's queue is empty.
             let queue = match s.waiting.get(flow_id) {
                 Some(q) => q,
-                None => {
-                    // Queue was removed — skip (cursor will be cleaned up later).
-                    continue;
-                }
+                None => continue,
             };
 
             if queue.is_empty() {
-                // Empty queue — will be cleaned up later.
                 continue;
             }
 
             let flow = registry.get_or_create(flow_id.clone());
             let weight_i64 = flow.weight() as i64;
             if weight_i64 <= 0 {
-                continue; // Skip zero/negative weight flows.
+                continue;
             }
 
             let current_credit = flow.credit.load(Ordering::Relaxed);
@@ -271,7 +379,6 @@ impl DrrScheduler {
                 .set(accumulated as f64);
             credit_accumulated = true;
 
-            // Check if this flow is now eligible.
             let head = queue.front().expect("queue should not be empty");
             let cost_i64 = head.work_unit as i64;
 
@@ -280,54 +387,80 @@ impl DrrScheduler {
             }
         }
 
-        // Phase 2: Select the first eligible flow in RR order.
-        if let Some((_idx, selected_flow_id)) = eligible_flows.first().cloned() {
-            let selected_flow_id_clone = selected_flow_id.clone();
+        // Phase 3: Among eligible flows, select highest priority (tie-break: RR order).
+        if !eligible_flows.is_empty() {
+            // Build candidates for priority selection.
+            let candidates: Vec<priority::FlowCandidate> = eligible_flows
+                .iter()
+                .map(|(idx, fid)| {
+                    let flow = registry.get_or_create(fid.clone());
+                    let head = s.waiting.get(fid).and_then(|q| q.front()).unwrap();
+                    priority::FlowCandidate {
+                        flow_id: fid.clone(),
+                        priority: flow.priority(),
+                        enqueued_at: head._enqueued_at,
+                        base_score: *idx as f64, // Lower index = earlier in RR = preferred
+                    }
+                })
+                .collect();
 
-            // Pop the head pending from this flow's queue.
+            let selected_flow_id =
+                priority::select_best(&candidates).expect("candidates should not be empty");
+
+            // Find the selected flow in eligible list.
+            let (_selected_idx, _) = eligible_flows
+                .iter()
+                .find(|(_, fid)| fid == &selected_flow_id)
+                .expect("selected should be in eligible list");
+
             let pending = s
                 .waiting
-                .get_mut(&selected_flow_id_clone)
+                .get_mut(&selected_flow_id)
                 .and_then(|q| q.pop_front())
                 .expect("eligible flow should have pending entry");
             let work_unit = pending.work_unit;
 
             // Deduct cost from credit.
-            let flow = registry.get_or_create(selected_flow_id_clone.clone());
+            let flow = registry.get_or_create(selected_flow_id.clone());
             let new_credit = flow.credit.load(Ordering::Relaxed) - (work_unit as i64);
             flow.credit.store(new_credit, Ordering::Relaxed);
             metrics
                 .flow_credit
-                .with_label_values(&[selected_flow_id_clone.metric_label()])
+                .with_label_values(&[selected_flow_id.metric_label()])
                 .set(new_credit as f64);
 
             // If this flow's queue is now empty, remove from cursor and reset credit.
             if s.waiting
-                .get(&selected_flow_id_clone)
+                .get(&selected_flow_id)
                 .is_none_or(|q| q.is_empty())
             {
-                s.waiting.remove(&selected_flow_id_clone);
+                s.waiting.remove(&selected_flow_id);
                 flow.credit.store(0, Ordering::Relaxed);
                 metrics
                     .flow_credit
-                    .with_label_values(&[selected_flow_id_clone.metric_label()])
+                    .with_label_values(&[selected_flow_id.metric_label()])
                     .set(0.0);
             }
 
             // Rotate: move served flow to the back of cursor (if still has requests).
-            // Remove from its current position and push back if it still has work.
-            s.rr_cursor.retain(|id| id != &selected_flow_id_clone);
+            s.rr_cursor.retain(|id| id != &selected_flow_id);
             if s.waiting
-                .get(&selected_flow_id_clone)
+                .get(&selected_flow_id)
                 .is_some_and(|q| !q.is_empty())
             {
-                s.rr_cursor.push_back(selected_flow_id_clone.clone());
+                s.rr_cursor.push_back(selected_flow_id.clone());
+            }
+
+            // Clear enqueued_at.
+            {
+                let mut enq = flow.enqueued_at.write().unwrap();
+                *enq = None;
             }
 
             s.available_permits -= 1;
             drop(s);
 
-            return (Some((selected_flow_id_clone, pending, work_unit)), true);
+            return (Some((selected_flow_id, pending, work_unit)), true);
         }
 
         // No flow eligible this round. Rotate the cursor to maintain fairness.
@@ -358,7 +491,6 @@ impl DrrScheduler {
     ) -> Result<QueueTicket, BackpressureRejected> {
         // Ensure the flow exists in the registry with defaults.
         let flow = self.registry.get_or_create(flow_id.clone());
-
         let flow_label = flow_id.metric_label().to_string();
         let enter = Instant::now();
 
@@ -386,8 +518,6 @@ impl DrrScheduler {
         work_unit: f64,
         enter: Instant,
     ) -> Result<QueueTicket, BackpressureRejected> {
-        // RAII guard ensures depth/waiting_queue cleanup on any cancellation
-        // path (task abort, client disconnect, etc.).
         let mut guard = DrrAdmitGuard::new(
             flow.clone(),
             self.metrics.clone(),
@@ -397,10 +527,12 @@ impl DrrScheduler {
             self.state.clone(),
         );
 
-        // Create the oneshot channel.
+        // Check completion bias AFTER guard creation (counts in queue_depth).
+        // Blocking mode: gate can wait indefinitely (starvation timeout handles it).
+        self.completion_bias_gate.check(&flow).await;
+
         let (tx, rx) = tokio::sync::oneshot::channel();
 
-        // Push the pending entry into the waiting queue and assign a unique ID.
         let pending_id = {
             let mut state = self.state.inner.lock().unwrap();
             let my_id = state.next_pending_id;
@@ -415,7 +547,6 @@ impl DrrScheduler {
                     _enqueued_at: enter,
                     work_unit,
                 });
-            // Add to RR cursor if not already present.
             if !state.rr_cursor.iter().any(|id| id == &flow_id) {
                 state.rr_cursor.push_back(flow_id.clone());
             }
@@ -423,25 +554,24 @@ impl DrrScheduler {
         };
         guard.set_pending_id(pending_id);
 
-        // Notify the admission loop.
+        // Set enqueued_at for starvation detection.
+        {
+            let mut enq = flow.enqueued_at.write().unwrap();
+            *enq = Some(enter);
+        }
+
         self.state.notify.notify_one();
 
-        // Wait for the admission loop to select us.
-        let ticket = rx.await.map_err(|_| {
-            // Channel closed — shouldn't happen in blocking mode.
-            // Guard will clean up depth and waiting_queue on drop.
-            BackpressureRejected {
-                retry_after: std::time::Duration::from_secs(1),
-            }
+        let ticket = rx.await.map_err(|_| BackpressureRejected {
+            retry_after: std::time::Duration::from_secs(1),
         })?;
 
-        // Consume the guard — we're now active, no further cleanup needed.
         guard.consume();
 
-        // Record wait time and active flows.
         let wait_secs = enter.elapsed().as_secs_f64();
         self.metrics.queue_wait_seconds.observe(wait_secs);
         self.metrics.active_flows.inc();
+        flow.inc_active();
 
         Ok(ticket)
     }
@@ -454,7 +584,6 @@ impl DrrScheduler {
         work_unit: f64,
         enter: Instant,
     ) -> Result<QueueTicket, BackpressureRejected> {
-        // Check depth BEFORE incrementing (matching Fifo behavior).
         let depth = self.queue_depth();
         if depth > self.max_queue_depth {
             let retry_after =
@@ -462,7 +591,6 @@ impl DrrScheduler {
             return Err(BackpressureRejected { retry_after });
         }
 
-        // Proceed with blocking behavior (depth managed inside).
         self.admit_blocking(flow, flow_label, flow_id, work_unit, enter)
             .await
     }
@@ -475,8 +603,6 @@ impl DrrScheduler {
         work_unit: f64,
         enter: Instant,
     ) -> Result<QueueTicket, BackpressureRejected> {
-        // RAII guard ensures depth/waiting_queue cleanup on any cancellation
-        // path (task abort, timeout, etc.).
         let mut guard = DrrAdmitGuard::new(
             flow.clone(),
             self.metrics.clone(),
@@ -486,10 +612,15 @@ impl DrrScheduler {
             self.state.clone(),
         );
 
-        // Create the oneshot channel.
+        // Check completion bias with a timeout equal to max_wait.
+        // If the gate blocks too long, the flow proceeds to the backpressure
+        // handler which may reject it via its own timeout.
+        tokio::time::timeout(self.max_wait, self.completion_bias_gate.check(&flow))
+            .await
+            .ok();
+
         let (tx, rx) = tokio::sync::oneshot::channel();
 
-        // Push the pending entry and assign a unique ID.
         let pending_id = {
             let mut state = self.state.inner.lock().unwrap();
             let my_id = state.next_pending_id;
@@ -504,7 +635,6 @@ impl DrrScheduler {
                     _enqueued_at: enter,
                     work_unit,
                 });
-            // Add to RR cursor if not already present.
             if !state.rr_cursor.iter().any(|id| id == &flow_id) {
                 state.rr_cursor.push_back(flow_id.clone());
             }
@@ -512,23 +642,27 @@ impl DrrScheduler {
         };
         guard.set_pending_id(pending_id);
 
+        // Set enqueued_at for starvation detection.
+        {
+            let mut enq = flow.enqueued_at.write().unwrap();
+            *enq = Some(enter);
+        }
+
         self.state.notify.notify_one();
 
-        // Race: wait for ticket OR timeout.
         let result = tokio::select!(
             biased;
             ticket = rx => {
                 match ticket {
                     Ok(t) => {
-                        // Consume the guard — we're now active.
                         guard.consume();
                         let wait_secs = enter.elapsed().as_secs_f64();
                         self.metrics.queue_wait_seconds.observe(wait_secs);
                         self.metrics.active_flows.inc();
+                        flow.inc_active();
                         Ok(t)
                     }
                     Err(_) => {
-                        // Guard will clean up on drop.
                         Err(BackpressureRejected {
                             retry_after: std::time::Duration::from_secs(1),
                         })
@@ -536,8 +670,6 @@ impl DrrScheduler {
                 }
             }
             _ = tokio::time::sleep(self.max_wait) => {
-                // Timeout: guard cleans up depth/waiting_queue on drop.
-                // The tx is dropped here, closing the channel. Admission loop will skip.
                 let depth = self.queue_depth();
                 let retry_after =
                     fail_fast_retry_after(depth, self.max_queue_depth, self.retry_after_base);
@@ -565,7 +697,6 @@ impl DrrScheduler {
     }
 
     /// Return the current credit for the given flow.
-    /// Used by tests to verify credit accumulation/consumption.
     pub fn credit(&self, flow_id: &FlowId) -> i64 {
         let flow = self.registry.get_or_create(flow_id.clone());
         flow.credit.load(Ordering::Relaxed)
@@ -573,12 +704,6 @@ impl DrrScheduler {
 }
 
 /// RAII guard for DRR blocking-mode admission.
-///
-/// Created at the start of `admit_blocking` (or `admit_hybrid`) to track
-/// the queue depth increment and waiting_queue entry.  If the guard is
-/// dropped without being consumed, it decrements depth, removes the
-/// waiting_queue entry, and removes the Pending entry from the DRR
-/// internal queue (by pending_id — NO sibling-kill).
 struct DrrAdmitGuard {
     flow: Arc<Flow>,
     metrics: Arc<Metrics>,
@@ -587,8 +712,6 @@ struct DrrAdmitGuard {
     waiting_queue: Arc<Mutex<VecDeque<FlowId>>>,
     state: Arc<SharedState>,
     active: bool,
-    /// The unique ID of this guard's Pending entry. Set to Some after the
-    /// Pending is created, so Drop can remove only this entry (not siblings).
     pending_id: Option<u64>,
 }
 
@@ -619,13 +742,10 @@ impl DrrAdmitGuard {
         }
     }
 
-    /// Set the pending ID after the Pending entry is created.
     fn set_pending_id(&mut self, id: u64) {
         self.pending_id = Some(id);
     }
 
-    /// Called when the request is admitted.  Decrements depth, removes from
-    /// waiting queue, and nullifies the guard so Drop is a no-op.
     fn consume(&mut self) {
         if !self.active {
             return;
@@ -650,7 +770,6 @@ impl Drop for DrrAdmitGuard {
             return;
         }
         self.active = false;
-        // Decrement depth and update gauge.
         let val = self
             .flow
             .depth
@@ -660,34 +779,30 @@ impl Drop for DrrAdmitGuard {
             .queue_depth
             .with_label_values(&[&self.flow_label])
             .set(val as f64);
-        // Remove from the public waiting queue.
         remove_from_queue(&self.waiting_queue, &self.flow_id);
-        // Remove ONLY this guard's Pending entry from the internal DRR queue.
-        // Using pending_id ensures sibling requests are NOT affected.
-        // If the pending was already popped by the admission loop, retain is a
-        // no-op (the ID won't be found), which is the correct behavior.
         let mut s = self.state.inner.lock().unwrap();
         if let Some(queue) = s.waiting.get_mut(&self.flow_id) {
             if let Some(my_id) = self.pending_id {
                 queue.retain(|p| p.pending_id != my_id);
             }
-            // If this flow's queue is now empty, reset its credit and remove from cursor.
             if queue.is_empty() {
                 s.waiting.remove(&self.flow_id);
-                // Reset credit to 0 when queue empties (classic DRR discipline).
                 self.flow.credit.store(0, Ordering::Relaxed);
                 self.metrics
                     .flow_credit
                     .with_label_values(&[&self.flow_label])
                     .set(0.0);
-                // Remove from RR cursor.
                 s.rr_cursor.retain(|id| id != &self.flow_id);
             }
+        }
+        // Clear enqueued_at on cancellation.
+        {
+            let mut enq = self.flow.enqueued_at.write().unwrap();
+            *enq = None;
         }
     }
 }
 
-/// Remove one occurrence of `flow_id` from the waiting queue.
 fn remove_from_queue(queue: &Mutex<VecDeque<FlowId>>, flow_id: &FlowId) {
     let mut q = queue.lock().unwrap();
     if let Some(pos) = q.iter().position(|id| id == flow_id) {

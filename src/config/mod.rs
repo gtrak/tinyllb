@@ -50,6 +50,8 @@ pub struct Scheduler {
         with = "loader::humantime_serde"
     )]
     pub starvation_timeout: Duration,
+    #[serde(default)]
+    pub completion_bias: CompletionBias,
 }
 
 impl Scheduler {
@@ -68,6 +70,36 @@ impl Default for Scheduler {
             algorithm: Algorithm::default(),
             max_active_flows: Self::default_max_active_flows(),
             starvation_timeout: Self::default_starvation_timeout(),
+            completion_bias: CompletionBias::default(),
+        }
+    }
+}
+
+/// Completion bias configuration.
+///
+/// When enabled, admission of requests for *new* flows (flows that do not
+/// currently have an in-flight request) is deferred while the number of
+/// active flows exceeds `target_active_flows`.  A value of `0` for
+/// `target_active_flows` means "use `max_active_flows`".
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CompletionBias {
+    #[serde(default = "CompletionBias::default_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub target_active_flows: u32,
+}
+
+impl CompletionBias {
+    fn default_enabled() -> bool {
+        true
+    }
+}
+
+impl Default for CompletionBias {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            target_active_flows: 0, // 0 = use max_active_flows
         }
     }
 }

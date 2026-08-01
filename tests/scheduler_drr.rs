@@ -23,7 +23,7 @@ const WORK_UNIT: f64 = 10.0;
 async fn test_drr_admit_single() {
     let m = metrics::create_metrics();
     let registry = Arc::new(FlowRegistry::new(1.0, 50));
-    let scheduler = Scheduler::new(
+    let scheduler = Scheduler::new_with_defaults(
         Algorithm::Drr,
         2,
         m.clone(),
@@ -56,7 +56,7 @@ async fn test_drr_credit_accumulation_and_consumption() {
     let result = tokio::time::timeout(Duration::from_secs(10), async {
         let m = metrics::create_metrics();
         let registry = Arc::new(FlowRegistry::new(1.0, 50));
-        let scheduler = Arc::new(Scheduler::new(
+        let scheduler = Arc::new(Scheduler::new_with_defaults(
             Algorithm::Drr,
             1,
             m.clone(),
@@ -126,7 +126,7 @@ async fn test_drr_skip_when_deficit() {
     let result = tokio::time::timeout(Duration::from_secs(10), async {
         let m = metrics::create_metrics();
         let registry = Arc::new(FlowRegistry::new(1.0, 50));
-        let scheduler = Arc::new(Scheduler::new(
+        let scheduler = Arc::new(Scheduler::new_with_defaults(
             Algorithm::Drr,
             1,
             m.clone(),
@@ -206,7 +206,7 @@ async fn test_drr_skip_when_deficit() {
 async fn test_drr_credit_reset_on_empty() {
     let m = metrics::create_metrics();
     let registry = Arc::new(FlowRegistry::new(1.0, 50));
-    let scheduler = Scheduler::new(
+    let scheduler = Scheduler::new_with_defaults(
         Algorithm::Drr,
         2,
         m.clone(),
@@ -250,7 +250,7 @@ async fn test_drr_weight_ratio_discrimination() {
     let result = tokio::time::timeout(Duration::from_secs(30), async {
         let m = metrics::create_metrics();
         let registry = Arc::new(FlowRegistry::new(1.0, 50));
-        let scheduler = Arc::new(Scheduler::new(
+        let scheduler = Arc::new(Scheduler::new_with_defaults(
             Algorithm::Drr,
             1,
             m.clone(),
@@ -363,7 +363,7 @@ async fn test_drr_weight_ratio_discrimination() {
 async fn test_drr_queue_snapshot() {
     let m = metrics::create_metrics();
     let registry = Arc::new(FlowRegistry::new(1.0, 50));
-    let scheduler = Scheduler::new(
+    let scheduler = Scheduler::new_with_defaults(
         Algorithm::Drr,
         1,
         m.clone(),
@@ -401,7 +401,7 @@ async fn test_drr_queue_snapshot() {
 async fn test_drr_fail_fast_rejection() {
     let m = metrics::create_metrics();
     let registry = Arc::new(FlowRegistry::new(1.0, 50));
-    let scheduler = Arc::new(Scheduler::new(
+    let scheduler = Arc::new(Scheduler::new_with_defaults(
         Algorithm::Drr,
         1, // Only 1 slot — forces queuing.
         m.clone(),
@@ -454,7 +454,7 @@ async fn test_drr_fail_fast_rejection() {
 async fn test_drr_hybrid_timeout() {
     let m = metrics::create_metrics();
     let registry = Arc::new(FlowRegistry::new(1.0, 50));
-    let scheduler = Scheduler::new(
+    let scheduler = Scheduler::new_with_defaults(
         Algorithm::Drr,
         1,
         m.clone(),
@@ -487,7 +487,7 @@ async fn test_drr_hybrid_timeout() {
 async fn test_drr_cancelled_waiter_no_active_underflow() {
     let m = metrics::create_metrics();
     let registry = Arc::new(FlowRegistry::new(1.0, 50));
-    let scheduler = Arc::new(Scheduler::new(
+    let scheduler = Arc::new(Scheduler::new_with_defaults(
         Algorithm::Drr,
         1,
         m.clone(),
@@ -537,7 +537,7 @@ async fn test_drr_cancelled_waiter_no_active_underflow() {
 async fn test_drr_sibling_cancel_does_not_kill_other() {
     let m = metrics::create_metrics();
     let registry = Arc::new(FlowRegistry::new(1.0, 50));
-    let scheduler = Arc::new(Scheduler::new(
+    let scheduler = Arc::new(Scheduler::new_with_defaults(
         Algorithm::Drr,
         1,
         m.clone(),
@@ -615,7 +615,7 @@ async fn test_drr_zero_weight_flow_no_wedge() {
     let result = tokio::time::timeout(Duration::from_secs(10), async {
         let m = metrics::create_metrics();
         let registry = Arc::new(FlowRegistry::new(1.0, 50));
-        let scheduler = Arc::new(Scheduler::new(
+        let scheduler = Arc::new(Scheduler::new_with_defaults(
             Algorithm::Drr,
             1,
             m.clone(),

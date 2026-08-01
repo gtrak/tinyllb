@@ -67,6 +67,8 @@ pub struct Flow {
     pub credit: AtomicI64,
     /// When this flow was most recently enqueued (for starvation detection).
     pub enqueued_at: std::sync::RwLock<Option<Instant>>,
+    /// Number of currently active (in-flight) requests for this flow.
+    pub active: AtomicU32,
 }
 
 impl Flow {
@@ -79,6 +81,7 @@ impl Flow {
             depth: AtomicU32::new(0),
             credit: AtomicI64::new(0),
             enqueued_at: std::sync::RwLock::new(None),
+            active: AtomicU32::new(0),
         }
     }
 
@@ -100,6 +103,21 @@ impl Flow {
     /// Set the priority.
     pub fn set_priority(&self, p: u32) {
         self.priority.store(p, Ordering::Relaxed);
+    }
+
+    /// Check if this flow currently has active (in-flight) requests.
+    pub fn is_active(&self) -> bool {
+        self.active.load(Ordering::Relaxed) > 0
+    }
+
+    /// Mark one request for this flow as active (admitted into the backend).
+    pub fn inc_active(&self) {
+        self.active.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Mark one request for this flow as no longer active.
+    pub fn dec_active(&self) {
+        self.active.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -185,6 +203,7 @@ impl FlowRegistry {
                 depth: AtomicU32::new(0),
                 credit: AtomicI64::new(0),
                 enqueued_at: std::sync::RwLock::new(None),
+                active: AtomicU32::new(0),
             });
             self.flows.insert(FlowId::new(id.to_string()), flow);
             true // created

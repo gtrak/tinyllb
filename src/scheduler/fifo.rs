@@ -7,6 +7,7 @@ use crate::config::BackpressureMode;
 use crate::flow::{Flow, FlowId, FlowRegistry, QueueSnapshot};
 use crate::metrics::Metrics;
 use crate::scheduler::backpressure::{fail_fast_retry_after, BackpressureRejected};
+use crate::scheduler::completion_bias::CompletionBiasGate;
 
 /// RAII guard for per-flow queue depth.
 ///
@@ -40,6 +41,11 @@ impl DepthGuard {
             .with_label_values(&[&flow_label])
             .set(val as f64);
         waiting_queue.lock().unwrap().push_back(flow_id);
+        // Set enqueued_at for starvation detection.
+        {
+            let mut enq = flow.enqueued_at.write().unwrap();
+            *enq = Some(Instant::now());
+        }
         Self {
             flow,
             metrics,
@@ -66,6 +72,12 @@ impl DepthGuard {
             .with_label_values(&[&self.flow_label])
             .set(val as f64);
 
+        // Clear enqueued_at — the flow is no longer waiting.
+        {
+            let mut enq = self.flow.enqueued_at.write().unwrap();
+            *enq = None;
+        }
+
         // Remove one occurrence of this flow from the waiting queue.
         remove_from_queue(&self.waiting_queue, &self.flow.id);
     }
@@ -89,6 +101,12 @@ impl Drop for DepthGuard {
 
         // Cancellation path: remove one occurrence from the waiting queue.
         remove_from_queue(&self.waiting_queue, &self.flow.id);
+
+        // Clear enqueued_at on cancellation.
+        {
+            let mut enq = self.flow.enqueued_at.write().unwrap();
+            *enq = None;
+        }
     }
 }
 
@@ -151,11 +169,15 @@ pub struct FifoScheduler {
     /// FIFO-ordered waiting queue for position reporting.
     /// Pushed on DepthGuard creation, popped on consume or cancellation.
     waiting_queue: Arc<Mutex<VecDeque<FlowId>>>,
+    /// Completion bias gate for pre-admit checks.
+    completion_bias_gate: Arc<CompletionBiasGate>,
 }
 
 impl FifoScheduler {
     /// Create a new FIFO scheduler with the given max active flows,
     /// flow registry, and backpressure configuration.
+    ///
+    /// Completion bias is disabled by default (starvation_timeout=300s, target=0).
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         max_active_flows: u32,
@@ -166,6 +188,16 @@ impl FifoScheduler {
         max_wait: Duration,
         retry_after_base: Duration,
     ) -> Self {
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let gate = Arc::new(CompletionBiasGate::new(
+            false, // disabled
+            0,
+            max_active_flows,
+            metrics.clone(),
+            registry.clone(),
+            notify,
+            Duration::from_secs(300),
+        ));
         Self {
             semaphore: Arc::new(tokio::sync::Semaphore::new(max_active_flows as usize)),
             metrics,
@@ -175,6 +207,33 @@ impl FifoScheduler {
             max_wait,
             retry_after_base,
             waiting_queue: Arc::new(Mutex::new(VecDeque::new())),
+            completion_bias_gate: gate,
+        }
+    }
+
+    /// Create a new FIFO scheduler with policy hooks.
+    /// Used by `Scheduler::new()` to wire in completion bias and active tracking.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_policies(
+        max_active_flows: u32,
+        metrics: Arc<Metrics>,
+        registry: Arc<FlowRegistry>,
+        backpressure_mode: BackpressureMode,
+        max_queue_depth: u32,
+        max_wait: Duration,
+        retry_after_base: Duration,
+        policies: super::Policies,
+    ) -> Self {
+        Self {
+            semaphore: Arc::new(tokio::sync::Semaphore::new(max_active_flows as usize)),
+            metrics,
+            registry,
+            backpressure_mode,
+            max_queue_depth,
+            max_wait,
+            retry_after_base,
+            waiting_queue: Arc::new(Mutex::new(VecDeque::new())),
+            completion_bias_gate: policies.completion_bias,
         }
     }
 
@@ -186,6 +245,10 @@ impl FifoScheduler {
     ///   immediately. Otherwise, behave like Blocking.
     /// - **Hybrid**: wait up to `max_wait` for a permit. If the wait
     ///   exceeds `max_wait`, return `BackpressureRejected`.
+    ///
+    /// Completion bias: each sub-method checks the gate AFTER creating the
+    /// depth guard so that flows blocked by completion bias are counted in
+    /// `queue_depth()`.
     pub async fn admit(
         &self,
         flow_id: FlowId,
@@ -193,7 +256,6 @@ impl FifoScheduler {
     ) -> Result<QueueTicket, BackpressureRejected> {
         // Ensure the flow exists in the registry with defaults (atomic entry).
         let flow = self.registry.get_or_create(flow_id.clone());
-
         let flow_label = flow_id.metric_label().to_string();
         match self.backpressure_mode {
             BackpressureMode::Blocking => {
@@ -222,12 +284,16 @@ impl FifoScheduler {
         let enter = Instant::now();
 
         let mut depth_guard = DepthGuard::new(
-            flow,
+            flow.clone(),
             self.metrics.clone(),
-            flow_label,
+            flow_label.clone(),
             self.waiting_queue.clone(),
             flow_id.clone(),
         );
+
+        // Check completion bias AFTER depth guard creation so that
+        // flows blocked at the gate are counted in queue_depth().
+        self.completion_bias_gate.check(&flow).await;
 
         let permit = self
             .semaphore
@@ -238,11 +304,19 @@ impl FifoScheduler {
 
         depth_guard.consume();
         record_wait_and_active(self, enter);
+        // Track per-flow active status.
+        flow.inc_active();
+
         let metrics = self.metrics.clone();
+        let gate = self.completion_bias_gate.clone();
+        let flow_clone = flow.clone();
         Ok(make_ticket(flow_id, _work_unit, move || {
             // Permit released by dropping
             drop(permit);
             metrics.active_flows.dec();
+            flow_clone.dec_active();
+            // Notify completion bias waiters that active count changed.
+            gate.notify_waiters();
             // FIFO: no service_done tracking needed
         }))
     }
@@ -266,12 +340,16 @@ impl FifoScheduler {
         let enter = Instant::now();
 
         let mut depth_guard = DepthGuard::new(
-            flow,
+            flow.clone(),
             self.metrics.clone(),
-            flow_label,
+            flow_label.clone(),
             self.waiting_queue.clone(),
             flow_id.clone(),
         );
+
+        // Check completion bias AFTER depth guard creation so that
+        // flows blocked at the gate are counted in queue_depth().
+        self.completion_bias_gate.check(&flow).await;
 
         let permit = self
             .semaphore
@@ -282,10 +360,16 @@ impl FifoScheduler {
 
         depth_guard.consume();
         record_wait_and_active(self, enter);
+        flow.inc_active();
+
         let metrics = self.metrics.clone();
+        let gate = self.completion_bias_gate.clone();
+        let flow_clone = flow.clone();
         Ok(make_ticket(flow_id, _work_unit, move || {
             drop(permit);
             metrics.active_flows.dec();
+            flow_clone.dec_active();
+            gate.notify_waiters();
         }))
     }
 
@@ -300,12 +384,19 @@ impl FifoScheduler {
         let enter = Instant::now();
 
         let mut depth_guard = DepthGuard::new(
-            flow,
+            flow.clone(),
             self.metrics.clone(),
-            flow_label,
+            flow_label.clone(),
             self.waiting_queue.clone(),
             flow_id.clone(),
         );
+
+        // Check completion bias with a timeout equal to max_wait.
+        // If the gate blocks too long, the flow proceeds to the backpressure
+        // handler which may reject it via its own timeout.
+        tokio::time::timeout(self.max_wait, self.completion_bias_gate.check(&flow))
+            .await
+            .ok();
 
         // Use biased select so that if both branches are ready, the acquire
         // branch wins (no spurious rejection). The `acquire_owned` future
@@ -331,10 +422,16 @@ impl FifoScheduler {
 
         depth_guard.consume();
         record_wait_and_active(self, enter);
+        flow.inc_active();
+
         let metrics = self.metrics.clone();
+        let gate = self.completion_bias_gate.clone();
+        let flow_clone = flow.clone();
         Ok(make_ticket(flow_id, _work_unit, move || {
             drop(permit);
             metrics.active_flows.dec();
+            flow_clone.dec_active();
+            gate.notify_waiters();
         }))
     }
 

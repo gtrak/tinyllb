@@ -27,7 +27,7 @@ fn build_flow_test_app_with_handles(
 ) -> (Router, Arc<FlowRegistry>, Arc<metrics::Metrics>) {
     let metrics = metrics::create_metrics();
     let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
-    let scheduler = Scheduler::new(
+    let scheduler = Scheduler::new_with_defaults(
         Algorithm::Fifo,
         4,
         metrics.clone(),
