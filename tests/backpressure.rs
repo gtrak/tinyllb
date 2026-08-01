@@ -45,6 +45,7 @@ fn build_proxy_app_with_backpressure(
         scheduler: Arc::new(scheduler),
         flow_registry,
         backpressure,
+        request_timeout: None,
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
@@ -478,6 +479,7 @@ async fn test_backpressure_rejections_metric() {
         scheduler: Arc::new(scheduler),
         flow_registry: Arc::new(FlowRegistry::new(1.0, 50)),
         backpressure: bp,
+        request_timeout: None,
     };
 
     let metrics_app = Router::new()

@@ -102,6 +102,7 @@ fn build_admin_test_app(
         scheduler: Arc::new(scheduler),
         flow_registry: flow_registry.clone(),
         backpressure: llm_qdisc_proxy::config::Backpressure::default(),
+        request_timeout: None,
     };
 
     let _ = _backend_url;

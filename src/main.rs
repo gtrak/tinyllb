@@ -92,6 +92,7 @@ async fn main() {
         scheduler: Arc::new(scheduler),
         flow_registry,
         backpressure: cfg.backpressure,
+        request_timeout: cfg.request_timeout,
     };
 
     let app = create_router(state);
@@ -136,6 +137,7 @@ mod tests {
             scheduler: Arc::new(scheduler),
             flow_registry,
             backpressure: config::Backpressure::default(),
+            request_timeout: None,
         };
         let app = create_router(state);
         let response = app

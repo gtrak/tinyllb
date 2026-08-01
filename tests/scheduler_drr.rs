@@ -103,11 +103,13 @@ async fn test_drr_credit_accumulation_and_consumption() {
 
         assert_eq!(m.active_flows.get(), 0.0);
 
-        // Credit for A should be reset to 0 (queue emptied).
+        // Credit for A: permanent credit was debited (0 - 10 = -10).
+        // The deficit (separate from permanent credit) was cleared at selection.
+        // No empty-queue reset — the permanent credit reflects the net debit.
         let credit_a = scheduler.credit(&FlowId::new("A"));
         assert_eq!(
-            credit_a, 0,
-            "credit should be 0 after queue empties, got {}",
+            credit_a, -WORK_UNIT as i64,
+            "credit should be -cost after queue empties (debit only, no reset), got {}",
             credit_a
         );
     })
@@ -201,7 +203,13 @@ async fn test_drr_skip_when_deficit() {
     assert!(result.is_ok(), "test should complete within timeout");
 }
 
-/// Test: credit resets to 0 when a flow's queue empties.
+/// Test: permanent credit is debited at selection (not reset on queue empty).
+///
+/// In the separated accounting model, flow.credit tracks the permanent
+/// accounting balance (debit at selection, restore on cancel/completion).
+/// The DRR deficit (used for eligibility) is tracked separately and cleared
+/// at selection. After admission, the permanent credit is debited but NOT
+/// reset to 0 when the queue empties.
 #[tokio::test]
 async fn test_drr_credit_reset_on_empty() {
     let m = metrics::create_metrics();
@@ -227,14 +235,17 @@ async fn test_drr_credit_reset_on_empty() {
     let ticket = scheduler.admit(FlowId::new("A"), WORK_UNIT).await.unwrap();
     drop(ticket);
 
-    // Credit should be 0 (queue emptied).
+    // Credit should be -WORK_UNIT (permanent credit debited, not reset).
+    // The empty-queue no longer resets permanent credit; it only clears deficit.
     assert_eq!(
         scheduler.credit(&FlowId::new("A")),
-        0,
-        "credit should be 0 after queue empties"
+        -(WORK_UNIT as i64),
+        "credit should be -cost after queue empties (permanent debit, no reset)"
     );
 
-    // Admit again — credit starts from 0.
+    // Admit again — deficit accumulates independently of permanent credit.
+    // The flow can be admitted even with negative permanent credit because
+    // the deficit (eligibility tracker) is separate.
     let ticket2 = scheduler.admit(FlowId::new("A"), WORK_UNIT).await.unwrap();
     drop(ticket2);
     assert_eq!(m.active_flows.get(), 0.0);

@@ -43,6 +43,10 @@ pub struct Metrics {
     pub flow_starvation_seconds: GaugeVec,
     /// Total number of force-admit events due to starvation protection.
     pub starvation_force_admits_total: prometheus::IntCounter,
+
+    // -- Request lifecycle events (PRD §6.8) --
+    /// Lifecycle events: request_started, token_received, request_completed, request_cancelled.
+    pub request_events_total: CounterVec,
 }
 
 impl Default for Metrics {
@@ -136,6 +140,15 @@ impl Metrics {
         )
         .expect("llm_starvation_force_admits_total should be creatable");
 
+        let request_events_total = CounterVec::new(
+            Opts::new(
+                "llm_request_events_total",
+                "Lifecycle events: request_started, token_received, request_completed, request_cancelled",
+            ),
+            &["event"],
+        )
+        .expect("llm_request_events_total should be creatable");
+
         // Register all collectors with the registry.
         registry
             .register(Box::new(queue_depth.clone()))
@@ -170,6 +183,9 @@ impl Metrics {
         registry
             .register(Box::new(starvation_force_admits_total.clone()))
             .expect("llm_starvation_force_admits_total registration should succeed");
+        registry
+            .register(Box::new(request_events_total.clone()))
+            .expect("llm_request_events_total registration should succeed");
 
         Metrics {
             registry,
@@ -184,6 +200,7 @@ impl Metrics {
             flow_credit,
             flow_starvation_seconds,
             starvation_force_admits_total,
+            request_events_total,
         }
     }
 }

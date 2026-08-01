@@ -166,6 +166,7 @@ fn build_e2e_proxy(
         scheduler: Arc::new(scheduler),
         flow_registry,
         backpressure,
+        request_timeout: None,
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));

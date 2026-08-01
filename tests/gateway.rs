@@ -182,6 +182,7 @@ fn build_proxy_app(backend_url: &str) -> Router {
         scheduler: std::sync::Arc::new(scheduler),
         flow_registry,
         backpressure: llm_qdisc_proxy::config::Backpressure::default(),
+        request_timeout: None,
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
@@ -608,6 +609,7 @@ fn build_proxy_app_with_max(
         scheduler: Arc::new(scheduler),
         flow_registry,
         backpressure: llm_qdisc_proxy::config::Backpressure::default(),
+        request_timeout: None,
     };
 
     let _ = _backend_url; // unused; we use the actual backend URL
@@ -752,6 +754,7 @@ async fn test_client_disconnect_releases_permit() {
         scheduler: Arc::new(scheduler),
         flow_registry,
         backpressure: llm_qdisc_proxy::config::Backpressure::default(),
+        request_timeout: None,
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));

@@ -19,6 +19,8 @@ pub enum ProxyError {
     TooLarge,
     /// Request was rejected by the backpressure mechanism.
     Rejected { retry_after: Duration },
+    /// Request exceeded the configured timeout.
+    Timeout,
 }
 
 impl fmt::Debug for ProxyError {
@@ -33,6 +35,7 @@ impl fmt::Debug for ProxyError {
             ProxyError::Rejected { retry_after } => {
                 write!(f, "Rejected {{ retry_after: {:?} }}", retry_after)
             }
+            ProxyError::Timeout => write!(f, "Timeout"),
         }
     }
 }
@@ -78,6 +81,10 @@ impl IntoResponse for ProxyError {
                     axum::http::HeaderValue::from_static("application/json"),
                 );
                 resp
+            }
+            ProxyError::Timeout => {
+                tracing::warn!("request timeout exceeded");
+                (StatusCode::REQUEST_TIMEOUT, "Request timed out").into_response()
             }
         }
     }

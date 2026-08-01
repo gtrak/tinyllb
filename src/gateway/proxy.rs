@@ -10,6 +10,7 @@ use std::sync::Arc;
 use crate::flow::identify;
 use crate::gateway::error::ProxyError;
 use crate::gateway::stream::{MetricStream, RequestActiveGuard};
+use crate::scheduler::lifecycle::LifecycleGuard;
 use crate::scheduler::mode_label;
 
 use super::AppState;
@@ -213,7 +214,9 @@ pub async fn proxy_handler(
     // Admit through the scheduler: blocks until a slot is available,
     // returns a RAII ticket that releases the slot on drop.
     // Under backpressure, this may reject with 429.
-    let _ticket = match state.scheduler.admit(flow_id, work_unit).await {
+    // Clone flow_id so we can use it for lifecycle tracking.
+    let flow_id_for_admit = flow_id.clone();
+    let _ticket = match state.scheduler.admit(flow_id_for_admit, work_unit).await {
         Ok(ticket) => ticket,
         Err(rejected) => {
             // Increment backpressure rejection counter.
@@ -228,6 +231,16 @@ pub async fn proxy_handler(
         }
     };
 
+    // Create LifecycleGuard BEFORE send so connect-phase timeouts are covered.
+    // If send() or the entire request times out, the guard drops as cancelled
+    // (emits request_cancelled, restores credit, releases slot).
+    let lifecycle = LifecycleGuard::new(
+        flow_id.clone(),
+        work_unit as i64,
+        state.scheduler.clone(),
+        state.metrics.clone(),
+    );
+
     // Build and send the request to the backend, passing raw bytes (byte-preserving).
     let mut builder = state.client.request(method, backend_url).body(body_bytes);
 
@@ -236,14 +249,39 @@ pub async fn proxy_handler(
         builder = builder.header(name, value);
     }
 
-    // Send the request to the backend.
-    let response = match builder.send().await {
-        Ok(resp) => resp,
-        Err(e) => {
-            // Network error — increment vllm_errors_total.
+    // Send the request with optional timeout.
+    // Wrapping send() in timeout covers connect + response header phase.
+    let response = if let Some(timeout) = state.request_timeout {
+        match tokio::time::timeout(timeout, builder.send()).await {
+            Ok(Ok(resp)) => Ok(resp),
+            Ok(Err(e)) => {
+                // Network error — guard drops as cancelled.
+                state.metrics.errors_total.inc();
+                Err(ProxyError::Network(e))
+            }
+            Err(_) => {
+                // Timeout — guard drops as cancelled (emit cancelled, restore credit).
+                Err(ProxyError::Timeout)
+            }
+        }
+    } else {
+        builder.send().await.map_err(|e| {
             state.metrics.errors_total.inc();
+            ProxyError::Network(e)
+        })
+    };
+
+    let response = match response {
+        Ok(r) => r,
+        Err(ProxyError::Network(e)) => {
+            // Guard drops as cancelled.
             return Err(ProxyError::Network(e));
         }
+        Err(ProxyError::Timeout) => {
+            // Guard drops as cancelled.
+            return Err(ProxyError::Timeout);
+        }
+        Err(e) => return Err(e),
     };
 
     let status = response.status();
@@ -264,6 +302,9 @@ pub async fn proxy_handler(
             state.metrics.errors_total.inc();
         }
         let body_bytes = collect_response_body(response, "error-response").await?;
+        // Backend completed (even with error status) — mark as completed
+        // with 0 delivered tokens (charges full estimated cost).
+        lifecycle.mark_completed();
         return Ok(ProxyError::BackendError {
             status,
             headers: filter_response_headers(&response_headers),
@@ -274,11 +315,19 @@ pub async fn proxy_handler(
 
     // Streaming path: if SSE or body wanted streaming, use MetricStream.
     // Do NOT forward Content-Length — axum will use chunked transfer encoding.
-    // MetricStream owns both the RequestActiveGuard and the QueueTicket so the
+    // MetricStream owns the RequestActiveGuard and the QueueTicket so the
     // admission slot stays held until the stream completes (or the client
     // disconnects), not when the handler returns.
     if is_sse || wants_streaming {
-        let stream = MetricStream::new(response, state.metrics.clone(), _ticket);
+        // Compute deadline for stream timeout (if configured).
+        let deadline = state.request_timeout.map(|t| std::time::Instant::now() + t);
+        let stream = MetricStream::new(
+            response,
+            state.metrics.clone(),
+            _ticket,
+            lifecycle,
+            deadline,
+        );
         let body = Body::from_stream(stream);
         let mut resp = Response::new(body);
         *resp.status_mut() = status;
@@ -293,7 +342,25 @@ pub async fn proxy_handler(
     // Non-streaming path: collect the full body and return with filtered headers.
     // The ticket (admission slot) is held until body collection finishes.
     let _guard = RequestActiveGuard::new(Arc::clone(&state.metrics));
-    let body_bytes = collect_response_body(response, "normal-response").await?;
+
+    // Collect the response body with optional timeout.
+    let body_bytes = if let Some(timeout) = state.request_timeout {
+        match tokio::time::timeout(timeout, collect_response_body(response, "normal-response"))
+            .await
+        {
+            Ok(Ok(body)) => body,
+            Ok(Err(e)) => {
+                // Body collection error — guard drops as cancelled.
+                return Err(e);
+            }
+            Err(_) => {
+                // Timeout during body collection — guard drops as cancelled.
+                return Err(ProxyError::Timeout);
+            }
+        }
+    } else {
+        collect_response_body(response, "normal-response").await?
+    };
 
     // Best-effort: extract completion_tokens from the JSON response.
     let completion_tokens = extract_completion_tokens(&body_bytes);
@@ -302,7 +369,13 @@ pub async fn proxy_handler(
             .metrics
             .tokens_generated_total
             .inc_by(completion_tokens as f64);
+        lifecycle.add_delivered_tokens(completion_tokens);
     }
+
+    // Mark the request as completed normally.
+    lifecycle.mark_completed();
+    // lifecycle guard drops here, emitting request_completed event and reporting
+    // accounting to the scheduler.
 
     let mut resp = Response::new(Body::from(body_bytes.to_vec()));
     *resp.status_mut() = status;

@@ -8,7 +8,9 @@
 //! Credit is per-flow, stored as `i64` in `Flow.credit: AtomicI64`.
 //! Weight (f64) is rounded to `i64` for accumulation; work_unit (f64) is
 //! rounded to `i64` for consumption.  When a flow's queue empties, its
-//! credit is reset to 0 (avoid unbounded growth).
+//! DEFICIT (eligibility credit) is reset to 0; permanent `flow.credit`
+//! is accounting-only and is not reset (it accumulates debits from
+//! selections and restores from cancels/completions).
 //!
 //! Architecture mirrors WFQ:
 //! - Same `Pending`, `SharedState`, admission loop, RAII guard, backpressure,
@@ -30,6 +32,7 @@ use crate::metrics::Metrics;
 use crate::scheduler::backpressure::{fail_fast_retry_after, BackpressureRejected};
 use crate::scheduler::completion_bias::CompletionBiasGate;
 use crate::scheduler::fifo::{make_ticket, QueueTicket};
+use crate::scheduler::lifecycle::AccountingReport;
 use crate::scheduler::priority;
 use crate::scheduler::starvation;
 
@@ -52,13 +55,18 @@ struct DrrState {
     /// Per-flow waiting queues. Each queue holds pending requests in FIFO order.
     waiting: std::collections::HashMap<FlowId, VecDeque<Pending>>,
     /// Round-robin cursor: ordered list of flow IDs that have waiting requests.
-    /// Flows are removed when their queue empties (credit reset happens in the
-    /// guard on empty-queue detection).
+    /// Flows are removed when their queue empties (their deficit is cleared
+    /// in the guard; permanent flow.credit is NOT reset).
     rr_cursor: VecDeque<FlowId>,
     /// Number of available permits (max_active_flows - currently active).
     available_permits: u32,
     /// Monotonically increasing counter for unique pending IDs.
     next_pending_id: u64,
+    /// DRR deficit credit accumulated per flow (separate from flow.credit).
+    /// Used only for eligibility decisions; cleared when a flow is selected.
+    /// This keeps flow.credit clean for accounting (debit at selection,
+    /// restore on cancel/completion).
+    deficit: std::collections::HashMap<FlowId, i64>,
 }
 
 /// Shared state for the DRR scheduler.
@@ -170,6 +178,7 @@ impl DrrScheduler {
                 rr_cursor: VecDeque::new(),
                 available_permits: max_active_flows,
                 next_pending_id: 0,
+                deficit: std::collections::HashMap::new(),
             }),
             notify: notify.clone(),
         });
@@ -319,14 +328,13 @@ impl DrrScheduler {
                     .with_label_values(&[selected.metric_label()])
                     .set(new_credit as f64);
 
-                // If this flow's queue is now empty, clean up.
+                // If this flow's queue is now empty, clean up the waiting map.
                 if s.waiting.get(&selected).is_none_or(|q| q.is_empty()) {
                     s.waiting.remove(&selected);
-                    flow.credit.store(0, Ordering::Relaxed);
-                    metrics
-                        .flow_credit
-                        .with_label_values(&[selected.metric_label()])
-                        .set(0.0);
+                    // NOTE: Do NOT reset credit to 0 here. The selection-time
+                    // debit already reduced credit by the work_unit. The restore
+                    // on cancel/completion needs to work against that debited
+                    // value, not a zeroed baseline.
                 }
 
                 // Rotate cursor.
@@ -350,19 +358,30 @@ impl DrrScheduler {
         // Drop unused idx to avoid borrow conflicts.
         drop(starved_candidates);
 
-        // Phase 2: Accumulate credit for ALL waiting flows in this round.
+        // Phase 2: Accumulate deficit credit for ALL waiting flows in this round.
+        // Deficit is tracked separately from flow.credit — flow.credit is the
+        // permanent accounting balance (modified only by debit at selection and
+        // restore on cancel/completion). The deficit is purely for DRR eligibility.
         let mut eligible_flows: Vec<(usize, FlowId)> = Vec::new();
         let mut credit_accumulated = false;
 
-        for (idx, flow_id) in s.rr_cursor.iter().enumerate() {
-            let queue = match s.waiting.get(flow_id) {
-                Some(q) => q,
+        // Collect cursor entries first to avoid borrow conflicts with deficit map.
+        let cursor_entries: Vec<(usize, FlowId)> = s
+            .rr_cursor
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (i, f.clone()))
+            .collect();
+
+        for (idx, flow_id) in cursor_entries {
+            // Get cost from the queue BEFORE mutating the deficit map.
+            let cost_i64 = match s.waiting.get(&flow_id) {
+                Some(q) if q.is_empty() => {
+                    continue;
+                }
+                Some(q) => q.front().expect("queue should not be empty").work_unit as i64,
                 None => continue,
             };
-
-            if queue.is_empty() {
-                continue;
-            }
 
             let flow = registry.get_or_create(flow_id.clone());
             let weight_i64 = flow.weight() as i64;
@@ -370,19 +389,19 @@ impl DrrScheduler {
                 continue;
             }
 
-            let current_credit = flow.credit.load(Ordering::Relaxed);
-            let accumulated = current_credit + weight_i64;
-            flow.credit.store(accumulated, Ordering::Relaxed);
+            // Accumulate into deficit (not flow.credit).
+            let deficit_entry = s.deficit.entry(flow_id.clone()).or_insert(0);
+            *deficit_entry += weight_i64;
+            credit_accumulated = true;
+
+            // Update the flow_credit metric to reflect total (permanent + deficit).
+            let permanent = flow.credit.load(Ordering::Relaxed);
             metrics
                 .flow_credit
                 .with_label_values(&[flow_id.metric_label()])
-                .set(accumulated as f64);
-            credit_accumulated = true;
+                .set((permanent + *deficit_entry) as f64);
 
-            let head = queue.front().expect("queue should not be empty");
-            let cost_i64 = head.work_unit as i64;
-
-            if accumulated >= cost_i64 {
+            if *deficit_entry >= cost_i64 {
                 eligible_flows.push((idx, flow_id.clone()));
             }
         }
@@ -420,7 +439,10 @@ impl DrrScheduler {
                 .expect("eligible flow should have pending entry");
             let work_unit = pending.work_unit;
 
-            // Deduct cost from credit.
+            // Deduct cost from PERMANENT credit (flow.credit), not deficit.
+            // The deficit was only used for eligibility; now clear it.
+            s.deficit.remove(&selected_flow_id);
+
             let flow = registry.get_or_create(selected_flow_id.clone());
             let new_credit = flow.credit.load(Ordering::Relaxed) - (work_unit as i64);
             flow.credit.store(new_credit, Ordering::Relaxed);
@@ -429,17 +451,16 @@ impl DrrScheduler {
                 .with_label_values(&[selected_flow_id.metric_label()])
                 .set(new_credit as f64);
 
-            // If this flow's queue is now empty, remove from cursor and reset credit.
+            // If this flow's queue is now empty, clean up the waiting map.
             if s.waiting
                 .get(&selected_flow_id)
                 .is_none_or(|q| q.is_empty())
             {
                 s.waiting.remove(&selected_flow_id);
-                flow.credit.store(0, Ordering::Relaxed);
-                metrics
-                    .flow_credit
-                    .with_label_values(&[selected_flow_id.metric_label()])
-                    .set(0.0);
+                // NOTE: Do NOT reset credit to 0 here. The selection-time
+                // debit already reduced credit by the work_unit. The restore
+                // on cancel/completion needs to work against that debited
+                // value, not a zeroed baseline.
             }
 
             // Rotate: move served flow to the back of cursor (if still has requests).
@@ -477,6 +498,7 @@ impl DrrScheduler {
             .collect();
         for fid in &empty_flows {
             s.waiting.remove(fid);
+            s.deficit.remove(fid);
             s.rr_cursor.retain(|id| id != fid);
         }
 
@@ -701,6 +723,40 @@ impl DrrScheduler {
         let flow = self.registry.get_or_create(flow_id.clone());
         flow.credit.load(Ordering::Relaxed)
     }
+
+    /// Report accounting for a completed or cancelled request.
+    ///
+    /// On completion: restore `estimated - delivered` so net credit = -delivered.
+    /// On cancel: restore `estimated - delivered` so net credit = `-delivered`.
+    pub fn report_accounting(&self, flow_id: &FlowId, report: AccountingReport) {
+        let flow = self.registry.get_or_create(flow_id.clone());
+        let flow_label = flow_id.metric_label().to_string();
+        match report {
+            AccountingReport::Completed {
+                delivered_tokens: _,
+                restore_cost,
+            } => {
+                // Restore estimated - delivered.
+                let current = flow.credit.load(Ordering::Relaxed);
+                let new_credit = current + restore_cost;
+                flow.credit.store(new_credit, Ordering::Relaxed);
+                self.metrics
+                    .flow_credit
+                    .with_label_values(&[&flow_label])
+                    .set(new_credit as f64);
+            }
+            AccountingReport::Cancelled { restore_cost } => {
+                // Restore estimated - delivered.
+                let current = flow.credit.load(Ordering::Relaxed);
+                let new_credit = current + restore_cost;
+                flow.credit.store(new_credit, Ordering::Relaxed);
+                self.metrics
+                    .flow_credit
+                    .with_label_values(&[&flow_label])
+                    .set(new_credit as f64);
+            }
+        }
+    }
 }
 
 /// RAII guard for DRR blocking-mode admission.
@@ -787,12 +843,17 @@ impl Drop for DrrAdmitGuard {
             }
             if queue.is_empty() {
                 s.waiting.remove(&self.flow_id);
-                self.flow.credit.store(0, Ordering::Relaxed);
+                // Clear the flow's deficit (it's no longer waiting).
+                // Do NOT reset permanent credit — it was never debited
+                // (the flow was never admitted), so it should stay as-is.
+                s.deficit.remove(&self.flow_id);
+                s.rr_cursor.retain(|id| id != &self.flow_id);
+                // Update metrics to reflect permanent credit only (no deficit).
+                let permanent = self.flow.credit.load(Ordering::Relaxed);
                 self.metrics
                     .flow_credit
                     .with_label_values(&[&self.flow_label])
-                    .set(0.0);
-                s.rr_cursor.retain(|id| id != &self.flow_id);
+                    .set(permanent as f64);
             }
         }
         // Clear enqueued_at on cancellation.

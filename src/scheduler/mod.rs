@@ -2,6 +2,7 @@ mod backpressure;
 mod completion_bias;
 mod drr;
 mod fifo;
+pub mod lifecycle;
 mod priority;
 mod starvation;
 mod wfq;
@@ -9,6 +10,7 @@ mod wfq;
 pub use backpressure::{fail_fast_retry_after, mode_label, BackpressureRejected};
 pub use drr::DrrScheduler;
 pub use fifo::{make_ticket, FifoScheduler, QueueTicket};
+pub use lifecycle::AccountingReport;
 pub use wfq::WfqScheduler;
 
 use crate::config::Algorithm;
@@ -210,6 +212,18 @@ impl Scheduler {
             Self::Fifo(_) => 0,
             Self::Wfq(_) => 0,
             Self::Drr(s) => s.credit(flow_id),
+        }
+    }
+
+    /// Report accounting for a completed or cancelled request.
+    ///
+    /// DRR adjusts per-flow credit based on actual delivered tokens.
+    /// FIFO and WFQ are no-ops (they don't use per-request credit).
+    pub fn report_accounting(&self, flow_id: &crate::flow::FlowId, report: AccountingReport) {
+        match self {
+            Self::Fifo(_) => {}
+            Self::Wfq(_) => {}
+            Self::Drr(s) => s.report_accounting(flow_id, report),
         }
     }
 }

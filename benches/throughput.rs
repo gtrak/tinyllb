@@ -89,6 +89,7 @@ fn build_proxy_app(backend_url: &str, max_active_flows: u32) -> (Router, Arc<met
         scheduler: Arc::new(scheduler),
         flow_registry,
         backpressure: Backpressure::default(),
+        request_timeout: None,
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));

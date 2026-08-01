@@ -6,6 +6,7 @@ use futures::Stream;
 use prometheus::Counter;
 use std::sync::Arc;
 
+use crate::scheduler::lifecycle::LifecycleGuard;
 use crate::scheduler::QueueTicket;
 
 /// RAII guard that decrements `vllm_requests_active` on drop.
@@ -129,12 +130,20 @@ impl TokenAccumulator {
 /// The `_queue_ticket` field holds the admission slot for the stream's
 /// entire lifetime, ensuring the slot is released when the stream ends
 /// (or the client disconnects), not when the handler returns.
+///
+/// The `lifecycle_guard` tracks whether the request completed normally
+/// and reports accounting to the scheduler on Drop (credit restoration
+/// on cancel, actual-token accounting on completion).
 pub struct MetricStream {
     inner: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>,
     accumulator: TokenAccumulator,
     tokens_counter: Arc<Counter>,
     _active_guard: RequestActiveGuard,
     _queue_ticket: QueueTicket,
+    lifecycle_guard: LifecycleGuard,
+    /// Optional deadline for request timeout. When the deadline passes,
+    /// the stream returns an error (which drops the guard as cancelled).
+    deadline: Option<std::time::Instant>,
 }
 
 impl MetricStream {
@@ -142,6 +151,8 @@ impl MetricStream {
         response: reqwest::Response,
         metrics: Arc<crate::metrics::Metrics>,
         queue_ticket: QueueTicket,
+        lifecycle_guard: LifecycleGuard,
+        deadline: Option<std::time::Instant>,
     ) -> Self {
         Self {
             inner: Box::pin(response.bytes_stream()),
@@ -149,6 +160,8 @@ impl MetricStream {
             tokens_counter: Arc::new(metrics.tokens_generated_total.clone()),
             _active_guard: RequestActiveGuard::new(metrics),
             _queue_ticket: queue_ticket,
+            lifecycle_guard,
+            deadline,
         }
     }
 }
@@ -157,16 +170,33 @@ impl Stream for MetricStream {
     type Item = Result<Bytes, std::io::Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        // Check deadline before polling. If the deadline has passed, return an
+        // error so the stream terminates and the LifecycleGuard drops as cancelled.
+        if let Some(deadline) = self.deadline {
+            if std::time::Instant::now() >= deadline {
+                return Poll::Ready(Some(Err(std::io::Error::other(
+                    "request timeout while streaming",
+                ))));
+            }
+        }
+
         match futures::ready!(self.inner.as_mut().poll_next(cx)) {
             Some(Ok(chunk)) => {
                 let tokens = self.accumulator.feed(&chunk);
                 if tokens > 0 {
                     self.tokens_counter.inc_by(tokens as f64);
+                    // Track delivered tokens for lifecycle accounting.
+                    self.lifecycle_guard.add_delivered_tokens(tokens);
+                    self.lifecycle_guard.record_token();
                 }
                 Poll::Ready(Some(Ok(chunk)))
             }
             Some(Err(err)) => Poll::Ready(Some(Err(std::io::Error::other(err.to_string())))),
-            None => Poll::Ready(None),
+            None => {
+                // Backend stream completed normally — mark for lifecycle accounting.
+                self.lifecycle_guard.mark_completed();
+                Poll::Ready(None)
+            }
         }
     }
 }

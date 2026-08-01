@@ -24,6 +24,36 @@ pub mod humantime_serde {
     }
 }
 
+/// Serde helpers for `Option<Duration>` using human-readable strings.
+pub mod humantime_serde_option {
+    use super::*;
+
+    /// Serializes an `Option<Duration>` as a human-readable string or null.
+    pub fn serialize<S>(dur: &Option<Duration>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match dur {
+            Some(d) => humantime_serde::serialize(d, serializer),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    /// Deserializes an optional human-readable duration string into `Option<Duration>`.
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Duration>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let opt: Option<String> = serde::Deserialize::deserialize(deserializer)?;
+        match opt {
+            Some(s) => humantime::parse_duration(&s)
+                .map(Some)
+                .map_err(serde::de::Error::custom),
+            None => Ok(None),
+        }
+    }
+}
+
 /// Load configuration from YAML file and environment overrides.
 ///
 /// Reads `$CONFIG_PATH` (defaults to `config.yaml`). If the file does not exist,

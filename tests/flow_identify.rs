@@ -44,6 +44,7 @@ fn build_flow_test_app_with_handles(
         scheduler: Arc::new(scheduler),
         flow_registry: flow_registry.clone(),
         backpressure: llm_qdisc_proxy::config::Backpressure::default(),
+        request_timeout: None,
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));

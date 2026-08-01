@@ -22,6 +22,9 @@ pub struct AppState {
     pub scheduler: Arc<Scheduler>,
     pub flow_registry: Arc<FlowRegistry>,
     pub backpressure: Backpressure,
+    /// Optional request-level timeout. When set, cancels forwarded requests
+    /// (both streaming and non-streaming) that exceed this duration.
+    pub request_timeout: Option<std::time::Duration>,
 }
 
 /// Create the gateway router that handles OpenAI-compatible routes.

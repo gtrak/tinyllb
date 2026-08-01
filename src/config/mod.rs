@@ -22,6 +22,11 @@ pub struct Config {
     pub metrics: Metrics,
     #[serde(default)]
     pub server: Server,
+    /// Optional request-level timeout. If set, the proxy cancels requests
+    /// that exceed this duration. Applies to the forwarded request (connect +
+    /// response body). Defaults to the reqwest client timeout (300s).
+    #[serde(default, with = "loader::humantime_serde_option")]
+    pub request_timeout: Option<Duration>,
 }
 
 /// Backend LLM service.
