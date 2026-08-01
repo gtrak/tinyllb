@@ -1,8 +1,10 @@
 mod backpressure;
+mod drr;
 mod fifo;
 mod wfq;
 
 pub use backpressure::{fail_fast_retry_after, mode_label, BackpressureRejected};
+pub use drr::DrrScheduler;
 pub use fifo::{make_ticket, FifoScheduler, QueueTicket};
 pub use wfq::WfqScheduler;
 
@@ -12,10 +14,11 @@ use crate::metrics::Metrics;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Unified scheduler type that dispatches to FIFO or WFQ based on config.
+/// Unified scheduler type that dispatches to FIFO, WFQ, or DRR based on config.
 pub enum Scheduler {
     Fifo(FifoScheduler),
     Wfq(WfqScheduler),
+    Drr(DrrScheduler),
 }
 
 impl Scheduler {
@@ -50,19 +53,15 @@ impl Scheduler {
                 max_wait,
                 retry_after_base,
             )),
-            Algorithm::Drr => {
-                // DRR not yet implemented; fall back to WFQ.
-                tracing::warn!("DRR algorithm not yet implemented, falling back to WFQ");
-                Self::Wfq(WfqScheduler::new(
-                    max_active_flows,
-                    metrics,
-                    registry,
-                    backpressure_mode,
-                    max_queue_depth,
-                    max_wait,
-                    retry_after_base,
-                ))
-            }
+            Algorithm::Drr => Self::Drr(DrrScheduler::new(
+                max_active_flows,
+                metrics,
+                registry,
+                backpressure_mode,
+                max_queue_depth,
+                max_wait,
+                retry_after_base,
+            )),
         }
     }
 
@@ -75,6 +74,7 @@ impl Scheduler {
         match self {
             Self::Fifo(s) => s.admit(flow_id, work_unit).await,
             Self::Wfq(s) => s.admit(flow_id, work_unit).await,
+            Self::Drr(s) => s.admit(flow_id, work_unit).await,
         }
     }
 
@@ -83,6 +83,7 @@ impl Scheduler {
         match self {
             Self::Fifo(s) => s.queue_depth(),
             Self::Wfq(s) => s.queue_depth(),
+            Self::Drr(s) => s.queue_depth(),
         }
     }
 
@@ -91,6 +92,7 @@ impl Scheduler {
         match self {
             Self::Fifo(s) => s.queue_snapshot(),
             Self::Wfq(s) => s.queue_snapshot(),
+            Self::Drr(s) => s.queue_snapshot(),
         }
     }
 
@@ -100,6 +102,17 @@ impl Scheduler {
         match self {
             Self::Fifo(_) => 0.0,
             Self::Wfq(s) => s.service_done(flow_id),
+            Self::Drr(_) => 0.0,
+        }
+    }
+
+    /// Return the current credit for the given flow (DRR only).
+    /// For FIFO and WFQ this always returns 0.
+    pub fn credit(&self, flow_id: &crate::flow::FlowId) -> i64 {
+        match self {
+            Self::Fifo(_) => 0,
+            Self::Wfq(_) => 0,
+            Self::Drr(s) => s.credit(flow_id),
         }
     }
 }

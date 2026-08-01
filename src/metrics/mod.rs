@@ -33,6 +33,10 @@ pub struct Metrics {
 
     // -- Backpressure family --
     pub backpressure_rejections_total: CounterVec,
+
+    // -- Scheduling family (DRR) --
+    /// Per-flow credit gauge for DRR.  Labeled by `flow_id`.
+    pub flow_credit: GaugeVec,
 }
 
 impl Default for Metrics {
@@ -102,6 +106,15 @@ impl Metrics {
         )
         .expect("llm_backpressure_rejections_total should be creatable");
 
+        let flow_credit = GaugeVec::new(
+            Opts::new(
+                "llm_flow_credit",
+                "Current DRR credit per flow (integer units)",
+            ),
+            &["flow_id"],
+        )
+        .expect("llm_flow_credit should be creatable");
+
         // Register all collectors with the registry.
         registry
             .register(Box::new(queue_depth.clone()))
@@ -127,6 +140,9 @@ impl Metrics {
         registry
             .register(Box::new(backpressure_rejections_total.clone()))
             .expect("llm_backpressure_rejections_total registration should succeed");
+        registry
+            .register(Box::new(flow_credit.clone()))
+            .expect("llm_flow_credit registration should succeed");
 
         Metrics {
             registry,
@@ -138,6 +154,7 @@ impl Metrics {
             requests_active,
             errors_total,
             backpressure_rejections_total,
+            flow_credit,
         }
     }
 }

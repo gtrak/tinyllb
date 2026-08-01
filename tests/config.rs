@@ -196,6 +196,7 @@ backend:
         cfg.backend.url
     );
     // everything else is defaults
+    assert_eq!(cfg.scheduler.algorithm, config::Algorithm::Drr);
     assert_eq!(cfg.scheduler.max_active_flows, 4);
     assert_eq!(
         cfg.scheduler.starvation_timeout,
