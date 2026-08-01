@@ -15,12 +15,14 @@ pub fn create_router(state: gateway::AppState) -> Router {
     let metrics_router = Router::new()
         .route("/metrics", get(metrics::endpoint::metrics_handler))
         .with_state(state.clone());
-    let gateway_router = gateway::create_router().with_state(state);
+    let gateway_router = gateway::create_router().with_state(state.clone());
+    let admin_router = llm_qdisc_proxy::api::create_router().with_state(state);
 
     Router::new()
         .merge(health_router)
         .merge(metrics_router)
         .merge(gateway_router)
+        .merge(admin_router)
 }
 
 /// Spawn a background task that periodically recomputes

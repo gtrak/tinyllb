@@ -191,12 +191,13 @@ fn build_proxy_app(backend_url: &str) -> Router {
             get(llm_qdisc_proxy::metrics::endpoint::metrics_handler),
         )
         .with_state(state.clone());
+    let admin_router = llm_qdisc_proxy::api::create_router().with_state(state);
 
     Router::new()
         .merge(health_router)
         .merge(metrics_router)
         .merge(gateway_router)
-        .with_state(state)
+        .merge(admin_router)
 }
 
 /// Collect a response body into bytes.
@@ -616,11 +617,13 @@ fn build_proxy_app_with_max(
             get(llm_qdisc_proxy::metrics::endpoint::metrics_handler),
         )
         .with_state(proxy_state.clone());
+    let admin_router = llm_qdisc_proxy::api::create_router().with_state(proxy_state.clone());
 
     let app = Router::new()
         .merge(health_router)
         .merge(metrics_router)
         .merge(gateway_router)
+        .merge(admin_router)
         .with_state(proxy_state);
 
     (app, load_state)

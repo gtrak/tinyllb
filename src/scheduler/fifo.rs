@@ -1,9 +1,10 @@
+use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::config::BackpressureMode;
-use crate::flow::{Flow, FlowId, FlowRegistry};
+use crate::flow::{Flow, FlowId, FlowRegistry, QueueSnapshot};
 use crate::metrics::Metrics;
 use crate::scheduler::backpressure::{fail_fast_retry_after, BackpressureRejected};
 
@@ -22,20 +23,29 @@ struct DepthGuard {
     metrics: Arc<Metrics>,
     flow_label: String,
     active: bool, // false after consume()
+    waiting_queue: Arc<Mutex<VecDeque<FlowId>>>,
 }
 
 impl DepthGuard {
-    fn new(flow: Arc<Flow>, metrics: Arc<Metrics>, flow_label: String) -> Self {
+    fn new(
+        flow: Arc<Flow>,
+        metrics: Arc<Metrics>,
+        flow_label: String,
+        waiting_queue: Arc<Mutex<VecDeque<FlowId>>>,
+        flow_id: FlowId,
+    ) -> Self {
         let val = flow.depth.fetch_add(1, Ordering::Relaxed) + 1;
         metrics
             .queue_depth
             .with_label_values(&[&flow_label])
             .set(val as f64);
+        waiting_queue.lock().unwrap().push_back(flow_id);
         Self {
             flow,
             metrics,
             flow_label,
             active: true,
+            waiting_queue,
         }
     }
 
@@ -55,6 +65,9 @@ impl DepthGuard {
             .queue_depth
             .with_label_values(&[&self.flow_label])
             .set(val as f64);
+
+        // Remove one occurrence of this flow from the waiting queue.
+        remove_from_queue(&self.waiting_queue, &self.flow.id);
     }
 }
 
@@ -73,6 +86,17 @@ impl Drop for DepthGuard {
             .queue_depth
             .with_label_values(&[&self.flow_label])
             .set(val as f64);
+
+        // Cancellation path: remove one occurrence from the waiting queue.
+        remove_from_queue(&self.waiting_queue, &self.flow.id);
+    }
+}
+
+/// Remove one occurrence of `flow_id` from the waiting queue.
+fn remove_from_queue(queue: &Mutex<VecDeque<FlowId>>, flow_id: &FlowId) {
+    let mut q = queue.lock().unwrap();
+    if let Some(pos) = q.iter().position(|id| id == flow_id) {
+        q.remove(pos);
     }
 }
 
@@ -119,6 +143,9 @@ pub struct FifoScheduler {
     max_wait: Duration,
     /// Base duration for Retry-After computation.
     retry_after_base: Duration,
+    /// FIFO-ordered waiting queue for position reporting.
+    /// Pushed on DepthGuard creation, popped on consume or cancellation.
+    waiting_queue: Arc<Mutex<VecDeque<FlowId>>>,
 }
 
 impl FifoScheduler {
@@ -141,6 +168,7 @@ impl FifoScheduler {
             max_queue_depth,
             max_wait,
             retry_after_base,
+            waiting_queue: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
@@ -173,7 +201,13 @@ impl FifoScheduler {
     ) -> Result<QueueTicket, BackpressureRejected> {
         let enter = Instant::now();
 
-        let mut depth_guard = DepthGuard::new(flow, self.metrics.clone(), flow_label);
+        let mut depth_guard = DepthGuard::new(
+            flow,
+            self.metrics.clone(),
+            flow_label,
+            self.waiting_queue.clone(),
+            flow_id.clone(),
+        );
 
         let permit = self
             .semaphore
@@ -204,7 +238,13 @@ impl FifoScheduler {
         // Otherwise proceed with blocking behavior.
         let enter = Instant::now();
 
-        let mut depth_guard = DepthGuard::new(flow, self.metrics.clone(), flow_label);
+        let mut depth_guard = DepthGuard::new(
+            flow,
+            self.metrics.clone(),
+            flow_label,
+            self.waiting_queue.clone(),
+            flow_id.clone(),
+        );
 
         let permit = self
             .semaphore
@@ -227,7 +267,13 @@ impl FifoScheduler {
     ) -> Result<QueueTicket, BackpressureRejected> {
         let enter = Instant::now();
 
-        let mut depth_guard = DepthGuard::new(flow, self.metrics.clone(), flow_label);
+        let mut depth_guard = DepthGuard::new(
+            flow,
+            self.metrics.clone(),
+            flow_label,
+            self.waiting_queue.clone(),
+            flow_id.clone(),
+        );
 
         // Use biased select so that if both branches are ready, the acquire
         // branch wins (no spurious rejection). The `acquire_owned` future
@@ -242,7 +288,8 @@ impl FifoScheduler {
 
             // Timeout: if we haven't acquired in time, reject.
                 _ = tokio::time::sleep(self.max_wait) => {
-                    // depth_guard is dropped here, correctly decrementing queue_depth.
+                    // depth_guard is dropped here, correctly decrementing queue_depth
+                    // and removing from waiting queue.
                     let depth = self.queue_depth();
                     let retry_after =
                         fail_fast_retry_after(depth, self.max_queue_depth, self.retry_after_base);
@@ -260,6 +307,21 @@ impl FifoScheduler {
     /// Sums per-flow depth counters across all registered flows.
     pub fn queue_depth(&self) -> u32 {
         self.registry.sum_depths()
+    }
+
+    /// Build a snapshot of the current queue state.
+    ///
+    /// Returns the number of active flows, the total waiting count, and a
+    /// list of per-flow positions (1-indexed) for flows currently waiting.
+    pub fn queue_snapshot(&self) -> QueueSnapshot {
+        let active = self.metrics.active_flows.get() as u64;
+        let waiting = self.queue_depth() as u64;
+
+        let queue = self.waiting_queue.lock().unwrap();
+        // Drain the lock scope.
+        let wait_ids: Vec<FlowId> = queue.iter().cloned().collect();
+
+        self.registry.queue_snapshot(active, waiting, wait_ids)
     }
 }
 

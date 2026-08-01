@@ -1,6 +1,7 @@
 pub mod identify;
 
-use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -55,10 +56,11 @@ impl std::fmt::Display for FlowId {
 pub struct Flow {
     /// Unique identifier for this flow.
     pub id: FlowId,
-    /// Weight used for weighted fair scheduling (09+).
-    pub weight: f64,
+    /// Weight used for weighted fair scheduling (09+). Stored as `f64` bits
+    /// in an `AtomicU64` so that `register` can update in place.
+    weight: AtomicU64,
     /// Priority class value (higher = more urgent, 10+).
-    pub priority: u32,
+    priority: AtomicU32,
     /// Per-flow depth: number of requests currently queued/waiting for this flow.
     pub depth: AtomicU32,
     /// Runtime credit for deficit round-robin (11+).
@@ -68,24 +70,69 @@ pub struct Flow {
 }
 
 impl Flow {
-    /// Create a new flow with default weight and priority.
+    /// Create a new flow with explicit weight and priority.
     pub fn new(id: FlowId, default_weight: f64, default_priority: u32) -> Self {
         Self {
             id,
-            weight: default_weight,
-            priority: default_priority,
+            weight: AtomicU64::new(default_weight.to_bits()),
+            priority: AtomicU32::new(default_priority),
             depth: AtomicU32::new(0),
             credit: AtomicI64::new(0),
             enqueued_at: std::sync::RwLock::new(None),
         }
     }
+
+    /// Read the current weight.
+    pub fn weight(&self) -> f64 {
+        f64::from_bits(self.weight.load(Ordering::Relaxed))
+    }
+
+    /// Set the weight.
+    pub fn set_weight(&self, w: f64) {
+        self.weight.store(w.to_bits(), Ordering::Relaxed);
+    }
+
+    /// Read the current priority.
+    pub fn priority(&self) -> u32 {
+        self.priority.load(Ordering::Relaxed)
+    }
+
+    /// Set the priority.
+    pub fn set_priority(&self, p: u32) {
+        self.priority.store(p, Ordering::Relaxed);
+    }
+}
+
+/// Registration payload for `POST /flows`.
+///
+/// Sent by the admin API to create or update a flow's weight/priority.
+#[derive(Debug, Clone)]
+pub struct FlowRegistration {
+    pub id: FlowId,
+    pub weight: f64,
+    pub priority: u32,
+}
+
+/// Per-flow entry inside a `QueueSnapshot`.
+#[derive(Debug, Clone)]
+pub struct QueueFlowEntry {
+    pub id: String,
+    pub position: u64,
+}
+
+/// Snapshot of the current queue state.
+#[derive(Debug, Clone)]
+pub struct QueueSnapshot {
+    pub active: u64,
+    pub waiting: u64,
+    pub flows: Vec<QueueFlowEntry>,
 }
 
 /// Thread-safe registry of flows, keyed by `FlowId`.
 ///
 /// Backed by a `DashMap<FlowId, Arc<Flow>>`.  `get_or_create` returns an
 /// `Arc<Flow>` for the given ID, creating one with default weight/priority
-/// if it does not already exist.
+/// if it does not already exist.  `register` upserts with explicit values.
 pub struct FlowRegistry {
     flows: DashMap<FlowId, Arc<Flow>>,
     default_weight: f64,
@@ -116,6 +163,34 @@ impl FlowRegistry {
             .clone()
     }
 
+    /// Register (upsert) a flow with explicit weight and priority.
+    ///
+    /// Returns `true` if this was a new registration, `false` if an existing
+    /// flow was updated.
+    pub fn register(&self, reg: FlowRegistration) -> bool {
+        let id = reg.id.clone();
+        let weight_bits = reg.weight.to_bits();
+        let priority = reg.priority;
+
+        // Try to get existing entry; if exists, update in place.
+        if let Some(entry) = self.flows.get_mut(&id) {
+            entry.value().weight.store(weight_bits, Ordering::Relaxed);
+            entry.value().priority.store(priority, Ordering::Relaxed);
+            false // updated
+        } else {
+            let flow = Arc::new(Flow {
+                id: reg.id,
+                weight: AtomicU64::new(weight_bits),
+                priority: AtomicU32::new(priority),
+                depth: AtomicU32::new(0),
+                credit: AtomicI64::new(0),
+                enqueued_at: std::sync::RwLock::new(None),
+            });
+            self.flows.insert(FlowId::new(id.to_string()), flow);
+            true // created
+        }
+    }
+
     /// Return the number of registered flows.
     pub fn len(&self) -> usize {
         self.flows.len()
@@ -132,6 +207,43 @@ impl FlowRegistry {
             .iter()
             .map(|entry| entry.value().depth.load(Ordering::Relaxed))
             .sum()
+    }
+
+    /// Build a snapshot of flows currently waiting (depth > 0).
+    ///
+    /// Takes `active` (from the scheduler's active gauge) and `waiting`
+    /// (total queue depth).  `flows` lists only waiting flows, ordered
+    /// by the supplied `wait_order` iterator (queue position).
+    pub fn queue_snapshot<I>(&self, active: u64, waiting: u64, wait_order: I) -> QueueSnapshot
+    where
+        I: IntoIterator<Item = FlowId>,
+    {
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut flows = Vec::new();
+        let mut position: u64 = 1;
+
+        for flow_id in wait_order {
+            let id_str = flow_id.to_string();
+            if seen.contains(&id_str) {
+                continue;
+            }
+            if let Some(entry) = self.flows.get(&flow_id) {
+                if entry.value().depth.load(Ordering::Relaxed) > 0 {
+                    seen.insert(id_str);
+                    flows.push(QueueFlowEntry {
+                        id: flow_id.to_string(),
+                        position,
+                    });
+                    position += 1;
+                }
+            }
+        }
+
+        QueueSnapshot {
+            active,
+            waiting,
+            flows,
+        }
     }
 }
 

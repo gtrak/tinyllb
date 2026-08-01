@@ -46,12 +46,13 @@ fn build_flow_test_app_with_handles(
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
     let gateway_router = gateway::create_router().with_state(state.clone());
+    let admin_router = llm_qdisc_proxy::api::create_router().with_state(state);
 
     (
         Router::new()
             .merge(health_router)
             .merge(gateway_router)
-            .with_state(state),
+            .merge(admin_router),
         flow_registry,
         metrics,
     )
@@ -207,8 +208,8 @@ fn test_flow_registry_get_or_create_defaults() {
 
     let flow = registry.get_or_create(FlowId::new("test-flow"));
     assert_eq!(flow.id.to_string(), "test-flow");
-    assert_eq!(flow.weight, 2.5);
-    assert_eq!(flow.priority, 75);
+    assert_eq!(flow.weight(), 2.5);
+    assert_eq!(flow.priority(), 75);
 
     // Verify it's the same Arc on second call.
     let flow2 = registry.get_or_create(FlowId::new("test-flow"));
@@ -294,8 +295,8 @@ async fn test_named_flow_registers_with_defaults() {
     // default_priority=50 (the values used in build_flow_test_app_with_handles).
     let flow = flow_registry.get_or_create(FlowId::new("coding-agent"));
     assert_eq!(flow.id.to_string(), "coding-agent");
-    assert_eq!(flow.weight, 1.0);
-    assert_eq!(flow.priority, 50);
+    assert_eq!(flow.weight(), 1.0);
+    assert_eq!(flow.priority(), 50);
 }
 
 /// Test: ephemeral flows aggregate to "ephemeral" label; named flows get
