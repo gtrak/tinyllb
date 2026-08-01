@@ -24,3 +24,8 @@ url = { version = "2", features = ["serde"] }
 
 [dev-dependencies]
 serial_test = "3"
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+[[bench]]
+name = "throughput"
+harness = false
