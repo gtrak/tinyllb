@@ -5,7 +5,7 @@ pub mod throughput;
 
 use std::sync::Arc;
 
-use prometheus::{HistogramOpts, Registry};
+use prometheus::{CounterVec, HistogramOpts, Opts, Registry};
 
 /// Central metrics collector holding all Prometheus gauges, counters,
 /// and histograms for the LLM QDisc Proxy.
@@ -28,6 +28,9 @@ pub struct Metrics {
     // -- Backend family --
     pub requests_active: prometheus::Gauge,
     pub errors_total: prometheus::IntCounter,
+
+    // -- Backpressure family --
+    pub backpressure_rejections_total: CounterVec,
 }
 
 impl Default for Metrics {
@@ -85,6 +88,15 @@ impl Metrics {
         )
         .expect("vllm_errors_total should be creatable");
 
+        let backpressure_rejections_total = CounterVec::new(
+            Opts::new(
+                "llm_backpressure_rejections_total",
+                "Total number of requests rejected by backpressure",
+            ),
+            &["mode"],
+        )
+        .expect("llm_backpressure_rejections_total should be creatable");
+
         // Register all collectors with the registry.
         registry
             .register(Box::new(queue_depth.clone()))
@@ -107,6 +119,9 @@ impl Metrics {
         registry
             .register(Box::new(errors_total.clone()))
             .expect("vllm_errors_total registration should succeed");
+        registry
+            .register(Box::new(backpressure_rejections_total.clone()))
+            .expect("llm_backpressure_rejections_total registration should succeed");
 
         Metrics {
             registry,
@@ -117,6 +132,7 @@ impl Metrics {
             tokens_per_second,
             requests_active,
             errors_total,
+            backpressure_rejections_total,
         }
     }
 }

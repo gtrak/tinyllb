@@ -10,13 +10,21 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use llm_qdisc_proxy::config::BackpressureMode;
 use llm_qdisc_proxy::metrics;
 use llm_qdisc_proxy::scheduler::FifoScheduler;
 
 /// Create a scheduler with a specific max_active_flows for tests.
 fn make_scheduler(max_active_flows: u32) -> (Arc<FifoScheduler>, Arc<metrics::Metrics>) {
     let m = metrics::create_metrics();
-    let scheduler = Arc::new(FifoScheduler::new(max_active_flows, m.clone()));
+    let scheduler = Arc::new(FifoScheduler::new(
+        max_active_flows,
+        m.clone(),
+        BackpressureMode::Blocking,
+        100,
+        std::time::Duration::from_secs(10),
+        std::time::Duration::from_secs(1),
+    ));
     (scheduler, m)
 }
 

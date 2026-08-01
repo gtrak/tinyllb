@@ -157,17 +157,26 @@ impl Stream for SseStream {
 
 /// Build the proxy app pointing at the given backend URL.
 fn build_proxy_app(backend_url: &str) -> Router {
+    use llm_qdisc_proxy::config::BackpressureMode;
     use llm_qdisc_proxy::gateway;
     use llm_qdisc_proxy::metrics;
     use llm_qdisc_proxy::scheduler;
 
     let metrics = metrics::create_metrics();
-    let scheduler = scheduler::FifoScheduler::new(4, metrics.clone());
+    let scheduler = scheduler::FifoScheduler::new(
+        4,
+        metrics.clone(),
+        BackpressureMode::Blocking,
+        100,
+        std::time::Duration::from_secs(10),
+        std::time::Duration::from_secs(1),
+    );
     let state = gateway::AppState {
         client: gateway::build_client(),
         backend_url: std::sync::Arc::new(url::Url::parse(backend_url).expect("valid backend URL")),
         metrics: metrics.clone(),
         scheduler: std::sync::Arc::new(scheduler),
+        backpressure: llm_qdisc_proxy::config::Backpressure::default(),
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
@@ -574,12 +583,20 @@ fn build_proxy_app_with_max(
 
     // Build the proxy.
     let metrics = metrics::create_metrics();
-    let scheduler = scheduler::FifoScheduler::new(max_active_flows, metrics.clone());
+    let scheduler = scheduler::FifoScheduler::new(
+        max_active_flows,
+        metrics.clone(),
+        llm_qdisc_proxy::config::BackpressureMode::Blocking,
+        100,
+        std::time::Duration::from_secs(10),
+        std::time::Duration::from_secs(1),
+    );
     let proxy_state = gateway::AppState {
         client: gateway::build_client(),
         backend_url: Arc::new(url::Url::parse(&backend_url_str).expect("valid URL")),
         metrics: metrics.clone(),
         scheduler: Arc::new(scheduler),
+        backpressure: llm_qdisc_proxy::config::Backpressure::default(),
     };
 
     let _ = _backend_url; // unused; we use the actual backend URL
@@ -704,12 +721,20 @@ async fn test_client_disconnect_releases_permit() {
 
     let metrics = metrics::create_metrics();
     let metrics_clone = metrics.clone();
-    let scheduler = scheduler::FifoScheduler::new(4, metrics.clone());
+    let scheduler = scheduler::FifoScheduler::new(
+        4,
+        metrics.clone(),
+        llm_qdisc_proxy::config::BackpressureMode::Blocking,
+        100,
+        std::time::Duration::from_secs(10),
+        std::time::Duration::from_secs(1),
+    );
     let state = gateway::AppState {
         client: gateway::build_client(),
         backend_url: Arc::new(url::Url::parse(&backend_url).expect("valid backend URL")),
         metrics: metrics.clone(),
         scheduler: Arc::new(scheduler),
+        backpressure: llm_qdisc_proxy::config::Backpressure::default(),
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));

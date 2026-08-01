@@ -1,10 +1,10 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use tokio::sync::Semaphore;
-
+use crate::config::BackpressureMode;
 use crate::metrics::Metrics;
+use crate::scheduler::backpressure::{fail_fast_retry_after, BackpressureRejected};
 
 /// RAII guard for the queue-depth atomic counter.
 ///
@@ -71,8 +71,9 @@ pub struct QueueTicket {
 
 /// FIFO scheduler with a max-active-flows admission gate.
 ///
-/// Requests call `admit()` which blocks until a semaphore permit is
-/// available. At most `max_active_flows` requests proceed simultaneously.
+/// Requests call `admit()` which may block, reject, or timeout depending on
+/// the configured backpressure mode. At most `max_active_flows` requests
+/// proceed simultaneously.
 ///
 /// Metrics updated:
 /// - `llm_queue_depth`: +1 when entering `admit()`, -1 when permit acquired.
@@ -85,34 +86,63 @@ pub struct FifoScheduler {
     /// Used for the `llm_queue_depth` gauge.
     queue_depth: Arc<AtomicU32>,
     /// Semaphore limiting concurrent active flows.
-    semaphore: Arc<Semaphore>,
+    semaphore: Arc<tokio::sync::Semaphore>,
     /// Shared metrics handle.
     metrics: Arc<Metrics>,
+    /// Backpressure mode.
+    backpressure_mode: BackpressureMode,
+    /// Max queue depth for fail-fast check.
+    max_queue_depth: u32,
+    /// Max wait duration for hybrid mode.
+    max_wait: Duration,
+    /// Base duration for Retry-After computation.
+    retry_after_base: Duration,
 }
 
 impl FifoScheduler {
-    /// Create a new FIFO scheduler with the given max active flows.
-    pub fn new(max_active_flows: u32, metrics: Arc<Metrics>) -> Self {
+    /// Create a new FIFO scheduler with the given max active flows and
+    /// backpressure configuration.
+    pub fn new(
+        max_active_flows: u32,
+        metrics: Arc<Metrics>,
+        backpressure_mode: BackpressureMode,
+        max_queue_depth: u32,
+        max_wait: Duration,
+        retry_after_base: Duration,
+    ) -> Self {
         Self {
             queue_depth: Arc::new(AtomicU32::new(0)),
-            semaphore: Arc::new(Semaphore::new(max_active_flows as usize)),
+            semaphore: Arc::new(tokio::sync::Semaphore::new(max_active_flows as usize)),
             metrics,
+            backpressure_mode,
+            max_queue_depth,
+            max_wait,
+            retry_after_base,
         }
     }
 
     /// Attempt to admit a request into the active set.
     ///
-    /// Blocks until a permit is available (blocking mode — issue 06 will
-    /// add fail-fast / 429 paths). On success returns a `QueueTicket` that
-    /// must be held for the duration of the forwarded request.
-    pub async fn admit(&self) -> QueueTicket {
+    /// Behavior depends on the configured backpressure mode:
+    /// - **Blocking**: queue indefinitely until a permit is available.
+    /// - **FailFast**: if queue depth > max_queue_depth, return `BackpressureRejected`
+    ///   immediately. Otherwise, behave like Blocking.
+    /// - **Hybrid**: wait up to `max_wait` for a permit. If the wait
+    ///   exceeds `max_wait`, return `BackpressureRejected`.
+    pub async fn admit(&self) -> Result<QueueTicket, BackpressureRejected> {
+        match self.backpressure_mode {
+            BackpressureMode::Blocking => self.admit_blocking().await,
+            BackpressureMode::FailFast => self.admit_fail_fast().await,
+            BackpressureMode::Hybrid => self.admit_hybrid().await,
+        }
+    }
+
+    /// Blocking mode: identical to pre-issue-06 behavior.
+    async fn admit_blocking(&self) -> Result<QueueTicket, BackpressureRejected> {
         let enter = Instant::now();
 
-        // Create a depth guard: increments queue_depth + sets gauge.
-        // If the future is cancelled, the guard's Drop decrements depth.
         let mut depth_guard = DepthGuard::new(self.queue_depth.clone(), self.metrics.clone());
 
-        // Acquire a permit. Blocks if all permits are in use.
         let permit = self
             .semaphore
             .clone()
@@ -120,27 +150,70 @@ impl FifoScheduler {
             .await
             .expect("semaphore should not be closed; we never close it");
 
-        // Permit acquired — consume the depth guard (decrement + set gauge).
         depth_guard.consume();
+        record_wait_and_active(self, enter);
+        Ok(make_ticket(permit, self.metrics.clone()))
+    }
 
-        // Record wait time from entry to permit acquisition.
-        let wait_secs = enter.elapsed().as_secs_f64();
-        self.metrics.queue_wait_seconds.observe(wait_secs);
-
-        // Active flow: increment now; QueueTicket::Drop will decrement.
-        self.metrics.active_flows.inc();
-
-        QueueTicket {
-            _permit: permit,
-            metrics: self.metrics.clone(),
+    /// Fail-fast mode: reject immediately if the queue is too deep.
+    async fn admit_fail_fast(&self) -> Result<QueueTicket, BackpressureRejected> {
+        let depth = self.queue_depth.load(Ordering::Relaxed);
+        if depth > self.max_queue_depth {
+            let retry_after =
+                fail_fast_retry_after(depth, self.max_queue_depth, self.retry_after_base);
+            return Err(BackpressureRejected { retry_after });
         }
+
+        // Otherwise proceed with blocking behavior.
+        let enter = Instant::now();
+
+        let mut depth_guard = DepthGuard::new(self.queue_depth.clone(), self.metrics.clone());
+
+        let permit = self
+            .semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("semaphore should not be closed; we never close it");
+
+        depth_guard.consume();
+        record_wait_and_active(self, enter);
+        Ok(make_ticket(permit, self.metrics.clone()))
+    }
+
+    /// Hybrid mode: race permit acquisition against a timeout.
+    async fn admit_hybrid(&self) -> Result<QueueTicket, BackpressureRejected> {
+        let enter = Instant::now();
+
+        let mut depth_guard = DepthGuard::new(self.queue_depth.clone(), self.metrics.clone());
+
+        // Use biased select so that if both branches are ready, the acquire
+        // branch wins (no spurious rejection). The `acquire_owned` future
+        // is polled first.
+        let permit = tokio::select!(
+            biased;
+
+            // Acquire the semaphore permit.
+            permit = self.semaphore.clone().acquire_owned() => {
+                permit.expect("semaphore should not be closed; we never close it")
+            }
+
+            // Timeout: if we haven't acquired in time, reject.
+            _ = tokio::time::sleep(self.max_wait) => {
+                // depth_guard is dropped here, correctly decrementing queue_depth.
+                let depth = self.queue_depth.load(Ordering::Relaxed);
+                let retry_after =
+                    fail_fast_retry_after(depth, self.max_queue_depth, self.retry_after_base);
+                return Err(BackpressureRejected { retry_after });
+            }
+        );
+
+        depth_guard.consume();
+        record_wait_and_active(self, enter);
+        Ok(make_ticket(permit, self.metrics.clone()))
     }
 
     /// Current number of requests inside `admit()` (waiting for a permit).
-    ///
-    /// Used to update `llm_queue_depth`. In practice the atomic is updated
-    /// inline (increment on entry, decrement on permit acquire) and this
-    /// accessor is primarily for observability / testing.
     pub fn queue_depth(&self) -> u32 {
         self.queue_depth.load(Ordering::Relaxed)
     }
@@ -151,5 +224,20 @@ impl Drop for QueueTicket {
         // The permit is dropped by the `_permit` field, releasing it back
         // to the semaphore. We also decrement the active_flows gauge here.
         self.metrics.active_flows.dec();
+    }
+}
+
+/// Record the wait time and increment active flows.
+fn record_wait_and_active(scheduler: &FifoScheduler, enter: Instant) {
+    let wait_secs = enter.elapsed().as_secs_f64();
+    scheduler.metrics.queue_wait_seconds.observe(wait_secs);
+    scheduler.metrics.active_flows.inc();
+}
+
+/// Construct a `QueueTicket` from a permit and metrics handle.
+fn make_ticket(permit: tokio::sync::OwnedSemaphorePermit, metrics: Arc<Metrics>) -> QueueTicket {
+    QueueTicket {
+        _permit: permit,
+        metrics,
     }
 }

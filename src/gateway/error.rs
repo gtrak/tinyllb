@@ -1,6 +1,7 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use std::fmt;
+use std::time::Duration;
 
 /// Errors that can occur while proxying requests to the backend.
 pub enum ProxyError {
@@ -16,6 +17,8 @@ pub enum ProxyError {
     Internal(String),
     /// Request body exceeds the configured limit.
     TooLarge,
+    /// Request was rejected by the backpressure mechanism.
+    Rejected { retry_after: Duration },
 }
 
 impl fmt::Debug for ProxyError {
@@ -27,6 +30,9 @@ impl fmt::Debug for ProxyError {
             ProxyError::Network(e) => write!(f, "Network({:?})", e),
             ProxyError::Internal(msg) => write!(f, "Internal({})", msg),
             ProxyError::TooLarge => write!(f, "TooLarge"),
+            ProxyError::Rejected { retry_after } => {
+                write!(f, "Rejected {{ retry_after: {:?} }}", retry_after)
+            }
         }
     }
 }
@@ -54,6 +60,24 @@ impl IntoResponse for ProxyError {
             }
             ProxyError::TooLarge => {
                 (StatusCode::PAYLOAD_TOO_LARGE, "Request body too large").into_response()
+            }
+            ProxyError::Rejected { retry_after } => {
+                // Retry-After must be integer seconds per RFC 7231.
+                let retry_secs = (retry_after.as_secs_f64().ceil()) as u64;
+                let retry_after_str = retry_secs.to_string();
+
+                let mut resp = Response::new(axum::body::Body::from(r#"{"error":"queue full"}"#));
+                *resp.status_mut() = StatusCode::TOO_MANY_REQUESTS;
+                resp.headers_mut().insert(
+                    axum::http::header::RETRY_AFTER,
+                    axum::http::HeaderValue::from_str(&retry_after_str)
+                        .expect("valid integer header value"),
+                );
+                resp.headers_mut().insert(
+                    axum::http::header::CONTENT_TYPE,
+                    axum::http::HeaderValue::from_static("application/json"),
+                );
+                resp
             }
         }
     }

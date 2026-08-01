@@ -146,10 +146,47 @@ impl Default for Priorities {
 }
 
 /// Backpressure configuration.
-#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Backpressure {
     #[serde(default)]
     pub mode: BackpressureMode,
+    #[serde(default = "Backpressure::default_max_queue_depth")]
+    pub max_queue_depth: u32,
+    #[serde(
+        default = "Backpressure::default_max_wait",
+        with = "loader::humantime_serde"
+    )]
+    pub max_wait: Duration,
+    #[serde(
+        default = "Backpressure::default_retry_after_base",
+        with = "loader::humantime_serde"
+    )]
+    pub retry_after_base: Duration,
+}
+
+impl Backpressure {
+    fn default_max_queue_depth() -> u32 {
+        100
+    }
+
+    fn default_max_wait() -> Duration {
+        Duration::from_secs(10)
+    }
+
+    fn default_retry_after_base() -> Duration {
+        Duration::from_secs(1)
+    }
+}
+
+impl Default for Backpressure {
+    fn default() -> Self {
+        Self {
+            mode: BackpressureMode::default(),
+            max_queue_depth: Self::default_max_queue_depth(),
+            max_wait: Self::default_max_wait(),
+            retry_after_base: Self::default_retry_after_base(),
+        }
+    }
 }
 
 /// Backpressure mode.

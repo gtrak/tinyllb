@@ -67,6 +67,10 @@ async fn main() {
     let scheduler = llm_qdisc_proxy::scheduler::FifoScheduler::new(
         cfg.scheduler.max_active_flows,
         metrics.clone(),
+        cfg.backpressure.mode,
+        cfg.backpressure.max_queue_depth,
+        cfg.backpressure.max_wait,
+        cfg.backpressure.retry_after_base,
     );
 
     let state = gateway::AppState {
@@ -74,6 +78,7 @@ async fn main() {
         backend_url: Arc::new(cfg.backend.url),
         metrics: metrics.clone(),
         scheduler: Arc::new(scheduler),
+        backpressure: cfg.backpressure,
     };
 
     let app = create_router(state);
@@ -94,17 +99,26 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
+    use llm_qdisc_proxy::config::BackpressureMode;
     use tower::ServiceExt;
 
     #[tokio::test]
     async fn test_healthz_returns_ok() {
         let metrics = metrics::create_metrics();
-        let scheduler = llm_qdisc_proxy::scheduler::FifoScheduler::new(4, metrics.clone());
+        let scheduler = llm_qdisc_proxy::scheduler::FifoScheduler::new(
+            4,
+            metrics.clone(),
+            BackpressureMode::Blocking,
+            100,
+            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(1),
+        );
         let state = gateway::AppState {
             client: gateway::build_client(),
             backend_url: Arc::new(url::Url::parse("http://localhost:8000").unwrap()),
             metrics: metrics.clone(),
             scheduler: Arc::new(scheduler),
+            backpressure: config::Backpressure::default(),
         };
         let app = create_router(state);
         let response = app

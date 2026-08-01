@@ -43,6 +43,9 @@ pub fn load() -> anyhow::Result<Config> {
         .set_default("priorities.agent", 50u32)?
         .set_default("priorities.background", 10u32)?
         .set_default("backpressure.mode", "blocking")?
+        .set_default("backpressure.max_queue_depth", 100u32)?
+        .set_default("backpressure.max_wait", "10s")?
+        .set_default("backpressure.retry_after_base", "1s")?
         .set_default("metrics.endpoint", "/metrics")?
         .set_default("server.bind", "0.0.0.0:8080")?
         .add_source(
@@ -68,6 +71,26 @@ fn validate(cfg: &Config) -> anyhow::Result<()> {
     }
     if cfg.flows.default_weight <= 0.0 {
         return Err(anyhow::anyhow!("default_weight must be > 0"));
+    }
+    if matches!(
+        cfg.backpressure.mode,
+        super::BackpressureMode::FailFast | super::BackpressureMode::Hybrid
+    ) && cfg.backpressure.max_queue_depth == 0
+    {
+        return Err(anyhow::anyhow!(
+            "max_queue_depth must be > 0 when backpressure mode is {} or hybrid",
+            match cfg.backpressure.mode {
+                super::BackpressureMode::FailFast => "fail_fast",
+                _ => "hybrid",
+            }
+        ));
+    }
+    if matches!(cfg.backpressure.mode, super::BackpressureMode::Hybrid)
+        && cfg.backpressure.max_wait.is_zero()
+    {
+        return Err(anyhow::anyhow!(
+            "max_wait must be > 0s when backpressure mode is hybrid"
+        ));
     }
     if !cfg.backend.url.cannot_be_a_base() {
         // has a base — but check it's absolute (has scheme)

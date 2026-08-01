@@ -8,6 +8,7 @@ use std::sync::Arc;
 use url::Url;
 
 use self::proxy::proxy_handler;
+use crate::config::Backpressure;
 use crate::metrics::Metrics;
 use crate::scheduler::FifoScheduler;
 
@@ -18,6 +19,7 @@ pub struct AppState {
     pub backend_url: Arc<Url>,
     pub metrics: Arc<Metrics>,
     pub scheduler: Arc<FifoScheduler>,
+    pub backpressure: Backpressure,
 }
 
 /// Create the gateway router that handles OpenAI-compatible routes.

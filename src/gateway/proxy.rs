@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use crate::gateway::error::ProxyError;
 use crate::gateway::stream::{MetricStream, RequestActiveGuard};
+use crate::scheduler::mode_label;
 
 use super::AppState;
 
@@ -186,7 +187,21 @@ pub async fn proxy_handler(
 
     // Admit through the scheduler: blocks until a slot is available,
     // returns a RAII ticket that releases the slot on drop.
-    let _ticket = state.scheduler.admit().await;
+    // Under backpressure, this may reject with 429.
+    let _ticket = match state.scheduler.admit().await {
+        Ok(ticket) => ticket,
+        Err(rejected) => {
+            // Increment backpressure rejection counter.
+            state
+                .metrics
+                .backpressure_rejections_total
+                .with_label_values(&[mode_label(state.backpressure.mode)])
+                .inc();
+            return Err(ProxyError::Rejected {
+                retry_after: rejected.retry_after,
+            });
+        }
+    };
 
     // Build and send the request to the backend, passing raw bytes (byte-preserving).
     let mut builder = state.client.request(method, backend_url).body(body_bytes);
