@@ -2,6 +2,8 @@
 #
 # This file is the single source of truth for the LLM QDisc Proxy.
 # Environment variables (LLM_QDISC__*) override values here.
+# Copy to config.yaml and edit, or mount as /etc/llm-qdisc/config.yaml
+# in Docker.
 
 backend:
   url: http://localhost:8000
@@ -18,3 +20,6 @@ priorities:
   interactive: 100
   agent: 50
   background: 10
+
+server:
+  bind: "0.0.0.0:8080"

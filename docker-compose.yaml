@@ -1,0 +1,64 @@
+# Example docker-compose: proxy + vLLM (single-GPU)
+#
+# The proxy forwards OpenAI-compatible requests to vLLM while applying
+# flow-aware scheduling (DRR/WFQ), backpressure, and KV-cache-aware
+# admission control.
+#
+# Usage:
+#   docker compose up -d
+#   curl localhost:8080/v1/models
+#
+# Prerequisites:
+#   - NVIDIA GPU + Container Toolkit (nvidia-container-toolkit)
+#   - Docker/Podman with GPU passthrough enabled
+#
+# Notes:
+#   - Replace the vLLM model with your actual model.
+#   - The proxy config sets backend.url to http://vllm:8000 (compose service name).
+#     Override via LLM_QDISC__BACKEND__URL env var or your own config.yaml.
+#   - For a custom config, mount your own file:
+#     volumes:
+#       - ./config.yaml:/etc/llm-qdisc/config.yaml:ro
+
+services:
+  vllm:
+    image: vllm/vllm-openai:latest
+    command: --model meta-llama/Llama-3.2-1B-Instruct
+    ports:
+      - "8000:8000"
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v1/models"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  proxy:
+    build: .
+    depends_on:
+      vllm:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      - CONFIG_PATH=/etc/llm-qdisc/config.yaml
+      # Override backend.url to point at the compose service name.
+      - LLM_QDISC__BACKEND__URL=http://vllm:8000
+    volumes:
+      # Uses the shipped example config; override with your own config.yaml.
+      - ./config.example.yaml:/etc/llm-qdisc/config.yaml:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
