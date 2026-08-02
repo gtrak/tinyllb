@@ -72,6 +72,24 @@ async fn main() {
         cfg.flows.default_priority,
     ));
 
+    // Create the backend monitor for KV-cache-aware admission.
+    let client = gateway::build_client();
+    let monitor = if cfg.kv_policy.enabled {
+        let (monitor, monitor_task) = llm_qdisc_proxy::backend::BackendMonitor::new(
+            &cfg.backend,
+            metrics.clone(),
+            client.clone(),
+        );
+        // Spawn the monitor background task (only when KV policy is enabled).
+        if let Some(task) = monitor_task {
+            tokio::spawn(task);
+        }
+        Arc::new(monitor)
+    } else {
+        // KV policy disabled — use an empty monitor (no /metrics polling).
+        Arc::new(llm_qdisc_proxy::backend::BackendMonitor::empty())
+    };
+
     let scheduler = llm_qdisc_proxy::scheduler::Scheduler::new(
         cfg.scheduler.algorithm,
         cfg.scheduler.max_active_flows,
@@ -83,10 +101,12 @@ async fn main() {
         cfg.backpressure.retry_after_base,
         cfg.scheduler.starvation_timeout,
         cfg.scheduler.completion_bias.clone(),
+        cfg.kv_policy.clone(),
+        monitor.clone(),
     );
 
     let state = gateway::AppState {
-        client: gateway::build_client(),
+        client,
         backend_url: Arc::new(cfg.backend.url),
         metrics: metrics.clone(),
         scheduler: Arc::new(scheduler),

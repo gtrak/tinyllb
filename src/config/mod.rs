@@ -27,18 +27,66 @@ pub struct Config {
     /// response body). Defaults to the reqwest client timeout (300s).
     #[serde(default, with = "loader::humantime_serde_option")]
     pub request_timeout: Option<Duration>,
+    /// KV-cache-aware admission policy.  Defaults to `enabled: false`.
+    #[serde(default)]
+    pub kv_policy: KvPolicyConfig,
 }
 
 /// Backend LLM service.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Backend {
     pub url: Url,
+    #[serde(default, with = "loader::humantime_serde")]
+    pub metrics_interval: Duration,
 }
 
 impl Default for Backend {
     fn default() -> Self {
         Self {
             url: Url::parse("http://localhost:8000").unwrap(),
+            metrics_interval: Self::default_metrics_interval(),
+        }
+    }
+}
+
+impl Backend {
+    fn default_metrics_interval() -> Duration {
+        Duration::from_secs(1)
+    }
+}
+
+/// KV-cache-aware admission policy configuration.
+///
+/// When enabled, the proxy queries vLLM's `/metrics` endpoint for KV-cache
+/// pressure and folds that into admission decisions alongside the flow-aware
+/// scheduler.  Defaults to `enabled: false` so behavior is unchanged unless
+/// explicitly configured.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct KvPolicyConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "KvPolicyConfig::default_reject_threshold")]
+    pub reject_threshold: f64,
+    #[serde(default = "KvPolicyConfig::default_delay_threshold")]
+    pub delay_threshold: f64,
+}
+
+impl KvPolicyConfig {
+    fn default_reject_threshold() -> f64 {
+        0.95
+    }
+
+    fn default_delay_threshold() -> f64 {
+        0.80
+    }
+}
+
+impl Default for KvPolicyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            reject_threshold: Self::default_reject_threshold(),
+            delay_threshold: Self::default_delay_threshold(),
         }
     }
 }

@@ -47,6 +47,14 @@ pub struct Metrics {
     // -- Request lifecycle events (PRD §6.8) --
     /// Lifecycle events: request_started, token_received, request_completed, request_cancelled.
     pub request_events_total: CounterVec,
+
+    // -- KV cache family (PRD §6.3) --
+    /// KV cache usage percentage reported by vLLM backend.
+    pub vllm_kv_cache_usage: prometheus::Gauge,
+    /// KV cache free percentage reported by vLLM backend.
+    pub vllm_kv_cache_free: prometheus::Gauge,
+    /// KV admission decisions: accept, delay, reject.
+    pub kv_admission_decisions_total: CounterVec,
 }
 
 impl Default for Metrics {
@@ -149,6 +157,27 @@ impl Metrics {
         )
         .expect("llm_request_events_total should be creatable");
 
+        let vllm_kv_cache_usage = prometheus::Gauge::new(
+            "vllm_kv_cache_usage",
+            "KV cache usage percentage reported by vLLM backend",
+        )
+        .expect("vllm_kv_cache_usage should be creatable");
+
+        let vllm_kv_cache_free = prometheus::Gauge::new(
+            "vllm_kv_cache_free",
+            "KV cache free percentage reported by vLLM backend",
+        )
+        .expect("vllm_kv_cache_free should be creatable");
+
+        let kv_admission_decisions_total = CounterVec::new(
+            Opts::new(
+                "llm_kv_admission_decisions_total",
+                "KV admission decisions: accept, delay, reject",
+            ),
+            &["decision"],
+        )
+        .expect("llm_kv_admission_decisions_total should be creatable");
+
         // Register all collectors with the registry.
         registry
             .register(Box::new(queue_depth.clone()))
@@ -186,6 +215,15 @@ impl Metrics {
         registry
             .register(Box::new(request_events_total.clone()))
             .expect("llm_request_events_total registration should succeed");
+        registry
+            .register(Box::new(vllm_kv_cache_usage.clone()))
+            .expect("vllm_kv_cache_usage registration should succeed");
+        registry
+            .register(Box::new(vllm_kv_cache_free.clone()))
+            .expect("vllm_kv_cache_free registration should succeed");
+        registry
+            .register(Box::new(kv_admission_decisions_total.clone()))
+            .expect("llm_kv_admission_decisions_total registration should succeed");
 
         Metrics {
             registry,
@@ -201,6 +239,9 @@ impl Metrics {
             flow_starvation_seconds,
             starvation_force_admits_total,
             request_events_total,
+            vllm_kv_cache_usage,
+            vllm_kv_cache_free,
+            kv_admission_decisions_total,
         }
     }
 }

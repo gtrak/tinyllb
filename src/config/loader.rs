@@ -76,8 +76,12 @@ pub fn load() -> anyhow::Result<Config> {
         .set_default("backpressure.max_queue_depth", 100u32)?
         .set_default("backpressure.max_wait", "10s")?
         .set_default("backpressure.retry_after_base", "1s")?
+        .set_default("backend.metrics_interval", "1s")?
         .set_default("metrics.endpoint", "/metrics")?
         .set_default("server.bind", "0.0.0.0:8080")?
+        .set_default("kv_policy.enabled", false)?
+        .set_default("kv_policy.reject_threshold", 0.95f64)?
+        .set_default("kv_policy.delay_threshold", 0.80f64)?
         .add_source(
             config::File::from(std::path::PathBuf::from(&config_path))
                 .format(config::FileFormat::Yaml)
@@ -131,6 +135,31 @@ fn validate(cfg: &Config) -> anyhow::Result<()> {
         }
     } else {
         return Err(anyhow::anyhow!("backend.url must be an absolute URL"));
+    }
+
+    // Validate metrics_interval.  A zero poll interval means the monitor never
+    // polls, which silently disables the KV policy when enabled.
+    if cfg.backend.metrics_interval.is_zero() {
+        return Err(anyhow::anyhow!("backend.metrics_interval must be > 0s"));
+    }
+
+    // Validate KV policy thresholds.
+    if cfg.kv_policy.enabled {
+        if cfg.kv_policy.reject_threshold <= 0.0 || cfg.kv_policy.reject_threshold > 1.0 {
+            return Err(anyhow::anyhow!(
+                "kv_policy.reject_threshold must be in (0, 1]"
+            ));
+        }
+        if cfg.kv_policy.delay_threshold < 0.0 || cfg.kv_policy.delay_threshold > 1.0 {
+            return Err(anyhow::anyhow!(
+                "kv_policy.delay_threshold must be in [0, 1]"
+            ));
+        }
+        if cfg.kv_policy.delay_threshold >= cfg.kv_policy.reject_threshold {
+            return Err(anyhow::anyhow!(
+                "kv_policy.delay_threshold must be less than reject_threshold"
+            ));
+        }
     }
     Ok(())
 }

@@ -2,6 +2,7 @@ mod backpressure;
 mod completion_bias;
 mod drr;
 mod fifo;
+mod kv_admission;
 pub mod lifecycle;
 mod priority;
 mod starvation;
@@ -10,11 +11,14 @@ mod wfq;
 pub use backpressure::{fail_fast_retry_after, mode_label, BackpressureRejected};
 pub use drr::DrrScheduler;
 pub use fifo::{make_ticket, FifoScheduler, QueueTicket};
+pub use kv_admission::KvPolicy;
 pub use lifecycle::AccountingReport;
 pub use wfq::WfqScheduler;
 
+use crate::backend::BackendMonitor;
 use crate::config::Algorithm;
 use crate::config::CompletionBias;
+use crate::config::KvPolicyConfig;
 use crate::flow::FlowRegistry;
 use crate::metrics::Metrics;
 use std::sync::Arc;
@@ -60,11 +64,22 @@ impl Policies {
     }
 }
 
-/// Unified scheduler type that dispatches to FIFO, WFQ, or DRR based on config.
-pub enum Scheduler {
+/// Internal enum for the scheduler algorithm implementation.
+enum SchedulerImpl {
     Fifo(FifoScheduler),
     Wfq(WfqScheduler),
     Drr(DrrScheduler),
+}
+
+/// Unified scheduler type that dispatches to FIFO, WFQ, or DRR based on config.
+///
+/// Wraps a shared `KvPolicy` gate that runs before the flow scheduler,
+/// enabling KV-cache-aware admission decisions.
+pub struct Scheduler {
+    /// The underlying scheduling algorithm.
+    inner: SchedulerImpl,
+    /// KV-cache-aware admission gate.  Checked before every admit.
+    kv_policy: Arc<KvPolicy>,
 }
 
 impl Scheduler {
@@ -85,6 +100,8 @@ impl Scheduler {
         retry_after_base: Duration,
         starvation_timeout: Duration,
         completion_bias: CompletionBias,
+        kv_config: KvPolicyConfig,
+        monitor: Arc<BackendMonitor>,
     ) -> Self {
         let notify = Arc::new(tokio::sync::Notify::new());
         let policies = Policies::new(
@@ -96,8 +113,18 @@ impl Scheduler {
             notify.clone(),
         );
 
-        match algorithm {
-            Algorithm::Fifo => Self::Fifo(FifoScheduler::new_with_policies(
+        let kv_policy = Arc::new(KvPolicy::new(
+            &kv_config,
+            monitor,
+            metrics.clone(),
+            backpressure_mode,
+            max_wait,
+            retry_after_base,
+            max_queue_depth,
+        ));
+
+        let inner = match algorithm {
+            Algorithm::Fifo => SchedulerImpl::Fifo(FifoScheduler::new_with_policies(
                 max_active_flows,
                 metrics,
                 registry,
@@ -107,7 +134,7 @@ impl Scheduler {
                 retry_after_base,
                 policies,
             )),
-            Algorithm::Wfq => Self::Wfq(WfqScheduler::new_with_policies(
+            Algorithm::Wfq => SchedulerImpl::Wfq(WfqScheduler::new_with_policies(
                 max_active_flows,
                 metrics,
                 registry,
@@ -118,7 +145,7 @@ impl Scheduler {
                 starvation_timeout,
                 policies,
             )),
-            Algorithm::Drr => Self::Drr(DrrScheduler::new_with_policies(
+            Algorithm::Drr => SchedulerImpl::Drr(DrrScheduler::new_with_policies(
                 max_active_flows,
                 metrics,
                 registry,
@@ -129,7 +156,9 @@ impl Scheduler {
                 starvation_timeout,
                 policies,
             )),
-        }
+        };
+
+        Self { kv_policy, inner }
     }
 
     /// Create a scheduler with default policy values.
@@ -137,6 +166,7 @@ impl Scheduler {
     /// Backward-compatible constructor for existing test code.  Uses:
     /// - `starvation_timeout = 300s` (effectively disabled for short tests)
     /// - `completion_bias = default` (enabled, target = max_active_flows)
+    /// - `kv_policy = disabled` (enabled=false)
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_defaults(
         algorithm: Algorithm,
@@ -148,6 +178,7 @@ impl Scheduler {
         max_wait: Duration,
         retry_after_base: Duration,
     ) -> Self {
+        let monitor = Arc::new(BackendMonitor::empty());
         Self::new(
             algorithm,
             max_active_flows,
@@ -159,59 +190,77 @@ impl Scheduler {
             retry_after_base,
             Duration::from_secs(300),
             CompletionBias::default(),
+            KvPolicyConfig::default(),
+            monitor,
         )
     }
 
     /// Attempt to admit a request into the active set.
     ///
-    /// Applies completion bias before delegating to the underlying scheduler.
+    /// KV policy runs first (accept/delay/reject based on KV-cache pressure).
+    /// If KV policy accepts, delegates to the underlying flow scheduler.
     pub async fn admit(
         &self,
         flow_id: crate::flow::FlowId,
         work_unit: f64,
     ) -> Result<QueueTicket, BackpressureRejected> {
-        match self {
-            Self::Fifo(s) => s.admit(flow_id, work_unit).await,
-            Self::Wfq(s) => s.admit(flow_id, work_unit).await,
-            Self::Drr(s) => s.admit(flow_id, work_unit).await,
+        // KV policy gate runs FIRST before any flow scheduling.
+        self.kv_policy.check().await?;
+        match &self.inner {
+            SchedulerImpl::Fifo(s) => s.admit(flow_id, work_unit).await,
+            SchedulerImpl::Wfq(s) => s.admit(flow_id, work_unit).await,
+            SchedulerImpl::Drr(s) => s.admit(flow_id, work_unit).await,
         }
     }
 
     /// Current number of requests waiting in the queue.
+    ///
+    /// Includes both flow-scheduler queue depth and KV-delay-waiting requests.
     pub fn queue_depth(&self) -> u32 {
-        match self {
-            Self::Fifo(s) => s.queue_depth(),
-            Self::Wfq(s) => s.queue_depth(),
-            Self::Drr(s) => s.queue_depth(),
-        }
+        let inner_depth = match &self.inner {
+            SchedulerImpl::Fifo(s) => s.queue_depth(),
+            SchedulerImpl::Wfq(s) => s.queue_depth(),
+            SchedulerImpl::Drr(s) => s.queue_depth(),
+        };
+        inner_depth + self.kv_policy.delayed_count()
     }
 
     /// Build a snapshot of the current queue state.
+    ///
+    /// Waiting count includes both flow-scheduler queue depth and KV-delay
+    /// requests so GET /queue reports all pending requests.
     pub fn queue_snapshot(&self) -> crate::flow::QueueSnapshot {
-        match self {
-            Self::Fifo(s) => s.queue_snapshot(),
-            Self::Wfq(s) => s.queue_snapshot(),
-            Self::Drr(s) => s.queue_snapshot(),
+        let inner_snapshot = match &self.inner {
+            SchedulerImpl::Fifo(s) => s.queue_snapshot(),
+            SchedulerImpl::Wfq(s) => s.queue_snapshot(),
+            SchedulerImpl::Drr(s) => s.queue_snapshot(),
+        };
+        // Add delayed count to the waiting total.
+        let delayed = self.kv_policy.delayed_count();
+        crate::flow::QueueSnapshot {
+            active: inner_snapshot.active,
+            waiting: inner_snapshot.waiting + delayed as u64,
+            flows: inner_snapshot.flows,
         }
     }
 
     /// Return the total service_done for the given flow (WFQ only).
     /// For FIFO this always returns 0.0.
     pub fn service_done(&self, flow_id: &crate::flow::FlowId) -> f64 {
-        match self {
-            Self::Fifo(_) => 0.0,
-            Self::Wfq(s) => s.service_done(flow_id),
-            Self::Drr(_) => 0.0,
+        match &self.inner {
+            SchedulerImpl::Fifo(_) => 0.0,
+            SchedulerImpl::Wfq(s) => s.service_done(flow_id),
+            SchedulerImpl::Drr(_) => 0.0,
         }
     }
 
     /// Return the current credit for the given flow (DRR only).
     /// For FIFO and WFQ this always returns 0.
     pub fn credit(&self, flow_id: &crate::flow::FlowId) -> i64 {
-        match self {
-            Self::Fifo(_) => 0,
-            Self::Wfq(_) => 0,
-            Self::Drr(s) => s.credit(flow_id),
+        match &self.inner {
+            SchedulerImpl::Fifo(_) => 0,
+            SchedulerImpl::Wfq(_) => 0,
+            SchedulerImpl::Drr(s) => s.credit(flow_id),
         }
     }
 
@@ -220,10 +269,10 @@ impl Scheduler {
     /// DRR adjusts per-flow credit based on actual delivered tokens.
     /// FIFO and WFQ are no-ops (they don't use per-request credit).
     pub fn report_accounting(&self, flow_id: &crate::flow::FlowId, report: AccountingReport) {
-        match self {
-            Self::Fifo(_) => {}
-            Self::Wfq(_) => {}
-            Self::Drr(s) => s.report_accounting(flow_id, report),
+        match &self.inner {
+            SchedulerImpl::Fifo(_) => {}
+            SchedulerImpl::Wfq(_) => {}
+            SchedulerImpl::Drr(s) => s.report_accounting(flow_id, report),
         }
     }
 }

@@ -21,7 +21,10 @@ use axum::routing::{get, post};
 use axum::Router;
 use tower::ServiceExt;
 
-use llm_qdisc_proxy::config::{Algorithm, Backpressure, BackpressureMode, CompletionBias};
+use llm_qdisc_proxy::backend::BackendMonitor;
+use llm_qdisc_proxy::config::{
+    Algorithm, Backpressure, BackpressureMode, CompletionBias, KvPolicyConfig,
+};
 use llm_qdisc_proxy::flow::FlowId;
 use llm_qdisc_proxy::gateway;
 use llm_qdisc_proxy::metrics;
@@ -133,6 +136,8 @@ fn build_e2e_proxy_with_config(
         backpressure.retry_after_base,
         starvation_timeout,
         completion_bias,
+        KvPolicyConfig::default(),
+        Arc::new(BackendMonitor::empty()),
     ));
 
     let state = gateway::AppState {

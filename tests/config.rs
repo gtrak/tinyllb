@@ -213,3 +213,32 @@ backend:
         "0.0.0.0:8080".parse::<std::net::SocketAddr>().unwrap()
     );
 }
+
+#[test]
+#[serial_test::serial]
+fn invalid_metrics_interval_zero_returns_error() {
+    let tmp = "/tmp/test_config_zero_metrics_interval.yaml";
+    std::fs::write(
+        tmp,
+        r#"
+backend:
+  url: http://localhost:8000
+  metrics_interval: 0s
+scheduler:
+  max_active_flows: 4
+  starvation_timeout: 300s
+"#,
+    )
+    .expect("write temp yaml");
+
+    let vars = no_env_overrides(&[("CONFIG_PATH", tmp)]);
+    let result = with_env(&vars, config::load);
+    std::fs::remove_file(tmp).ok();
+
+    assert!(result.is_err(), "should error on metrics_interval == 0s");
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().contains("metrics_interval"),
+        "error mentions metrics_interval: {err}"
+    );
+}
