@@ -107,16 +107,19 @@ impl StubState {
         Duration::from_millis(ms.max(1))
     }
 
+    #[allow(dead_code)]
     /// Get the peak in-flight count since last reset.
     pub fn peak_in_flight(&self) -> u32 {
         self.peak_in_flight.load(Ordering::SeqCst)
     }
 
+    #[allow(dead_code)]
     /// Get total tokens emitted.
     pub fn tokens_emitted(&self) -> u32 {
         self.total_tokens.load(Ordering::SeqCst)
     }
 
+    #[allow(dead_code)]
     /// Reset counters for a new benchmark run.
     pub fn reset(&self) {
         self.in_flight.store(0, Ordering::SeqCst);

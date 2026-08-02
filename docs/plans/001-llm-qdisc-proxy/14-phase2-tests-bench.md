@@ -45,7 +45,7 @@ only when these tests + benchmarks pass.
 5. Judge success explicitly:
    * **G2 (no starvation)**: no flow waits > `starvation_timeout`.
    * **G3 (agent-aware)**: per-flow metrics + `GET /queue` correct.
-   * **Completion bias**: completion-bias ON completes >= completion-bias OFF.
+   * **Completion bias**: completion-bias ON completes > completion-bias OFF.
 
 ## Verification
 
