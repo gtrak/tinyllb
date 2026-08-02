@@ -67,6 +67,20 @@ impl Default for BackendSnapshot {
     }
 }
 
+/// Result of parsing a Prometheus /metrics body.
+///
+/// Carries the snapshot plus per-metric found flags so callers can
+/// distinguish "metric present with value 0" from "metric absent".
+#[derive(Debug, Clone, Default)]
+pub struct ParseSnapshotResult {
+    /// Parsed snapshot values.
+    pub snapshot: BackendSnapshot,
+    /// Whether the KV usage metric was found in the body.
+    pub found_usage: bool,
+    /// Whether the KV free metric was found in the body.
+    pub found_free: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Prometheus text-format line scanner
 // ---------------------------------------------------------------------------
@@ -102,8 +116,11 @@ fn parse_prometheus_line(line: &str) -> Option<(&str, f64)> {
     Some((metric_name, value?))
 }
 
-/// Parse a Prometheus-formatted metrics body into a `BackendSnapshot`.
-fn parse_snapshot(body: &str) -> BackendSnapshot {
+/// Parse a Prometheus-formatted metrics body into a `ParseSnapshotResult`.
+///
+/// Used by the BackendMonitor poll loop and by integration tests
+/// that want to verify the live backend's /metrics output.
+pub fn parse_snapshot(body: &str) -> ParseSnapshotResult {
     let mut snapshot = BackendSnapshot::default();
     let mut found_usage = false;
     let mut found_free = false;
@@ -132,7 +149,11 @@ fn parse_snapshot(body: &str) -> BackendSnapshot {
         snapshot.kv_free = 1.0 - snapshot.kv_usage;
     }
 
-    snapshot
+    ParseSnapshotResult {
+        snapshot,
+        found_usage,
+        found_free,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -221,12 +242,12 @@ impl BackendMonitor {
             match client.get(url.clone()).send().await {
                 Ok(response) => match response.text().await {
                     Ok(body) => {
-                        let snapshot = parse_snapshot(&body);
+                        let result = parse_snapshot(&body);
                         // Update the watch channel.
-                        let _ = tx.send(snapshot.clone());
+                        let _ = tx.send(result.snapshot.clone());
                         // Update Prometheus gauges.
-                        metrics.vllm_kv_cache_usage.set(snapshot.kv_usage);
-                        metrics.vllm_kv_cache_free.set(snapshot.kv_free);
+                        metrics.vllm_kv_cache_usage.set(result.snapshot.kv_usage);
+                        metrics.vllm_kv_cache_free.set(result.snapshot.kv_free);
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "failed to read /metrics body");
@@ -371,33 +392,36 @@ vllm:num_preemptions_total 42
 # TYPE some_other_metric gauge
 some_other_metric 99.9
 "#;
-        let snapshot = parse_snapshot(body);
-        assert_eq!(snapshot.kv_usage, 0.85, "kv_usage should be 0.85");
-        assert_eq!(snapshot.preemptions, 42, "preemptions should be 42");
+        let result = parse_snapshot(body);
+        assert_eq!(result.snapshot.kv_usage, 0.85, "kv_usage should be 0.85");
+        assert_eq!(result.snapshot.preemptions, 42, "preemptions should be 42");
     }
 
     #[test]
     fn parse_snapshot_with_free_gauge() {
         let body = "vllm:gpu_cache_usage_perc 0.7\nvllm:gpu_cache_free_perc 0.3\n";
-        let snapshot = parse_snapshot(body);
-        assert_eq!(snapshot.kv_usage, 0.7);
-        assert_eq!(snapshot.kv_free, 0.3);
+        let result = parse_snapshot(body);
+        assert_eq!(result.snapshot.kv_usage, 0.7);
+        assert_eq!(result.snapshot.kv_free, 0.3);
     }
 
     #[test]
     fn parse_snapshot_metric_absent_returns_defaults() {
         let body = "some_other_metric 1.0\n";
-        let snapshot = parse_snapshot(body);
-        assert_eq!(snapshot.kv_usage, 0.0, "usage should default to 0.0");
-        assert_eq!(snapshot.kv_free, 1.0, "free should default to 1.0");
-        assert_eq!(snapshot.preemptions, 0, "preemptions should default to 0");
+        let result = parse_snapshot(body);
+        assert_eq!(result.snapshot.kv_usage, 0.0, "usage should default to 0.0");
+        assert_eq!(result.snapshot.kv_free, 1.0, "free should default to 1.0");
+        assert_eq!(
+            result.snapshot.preemptions, 0,
+            "preemptions should default to 0"
+        );
     }
 
     #[test]
     fn parse_snapshot_empty_body() {
-        let snapshot = parse_snapshot("");
-        assert_eq!(snapshot.kv_usage, 0.0);
-        assert_eq!(snapshot.kv_free, 1.0);
+        let result = parse_snapshot("");
+        assert_eq!(result.snapshot.kv_usage, 0.0);
+        assert_eq!(result.snapshot.kv_free, 1.0);
     }
 
     #[test]
@@ -408,10 +432,10 @@ vllm:gpu_cache_usage_perc not_a_number
 {missing_name} 1.0
 vllm:num_preemptions_total 7
 "#;
-        let snapshot = parse_snapshot(body);
+        let result = parse_snapshot(body);
         // First valid usage line sets 0.5, then garbage lines are skipped.
-        assert_eq!(snapshot.kv_usage, 0.5);
-        assert_eq!(snapshot.preemptions, 7);
+        assert_eq!(result.snapshot.kv_usage, 0.5);
+        assert_eq!(result.snapshot.preemptions, 7);
     }
 
     #[test]
@@ -421,9 +445,9 @@ some_histogram_sum 1234.5
 some_histogram_count 42
 vllm:num_preemptions_total 3
 "#;
-        let snapshot = parse_snapshot(body);
-        assert_eq!(snapshot.kv_usage, 0.5);
-        assert_eq!(snapshot.preemptions, 3);
+        let result = parse_snapshot(body);
+        assert_eq!(result.snapshot.kv_usage, 0.5);
+        assert_eq!(result.snapshot.preemptions, 3);
         // Histogram lines are parsed but not matched to known metrics,
         // so they don't affect the snapshot.
     }
@@ -438,19 +462,19 @@ vllm:num_preemptions_total 3
 vllm:kv_cache_usage_perc{engine="0",model_name="local"} 0.42
 vllm:num_preemptions_total{engine="0",model_name="local"} 1
 "#;
-        let snapshot = parse_snapshot(body);
+        let result = parse_snapshot(body);
         assert_eq!(
-            snapshot.kv_usage, 0.42,
+            result.snapshot.kv_usage, 0.42,
             "v1 kv_cache_usage_perc should be parsed"
         );
         // kv_free derived as 1.0 - 0.42 = 0.58 (float tolerance)
-        let kv_free = snapshot.kv_free;
+        let kv_free = result.snapshot.kv_free;
         assert!(
             (kv_free - 0.58).abs() < 1e-9,
             "kv_free should be derived from kv_usage (expected ~0.58, got {})",
             kv_free
         );
-        assert_eq!(snapshot.preemptions, 1);
+        assert_eq!(result.snapshot.preemptions, 1);
     }
 
     #[test]
@@ -459,10 +483,10 @@ vllm:num_preemptions_total{engine="0",model_name="local"} 1
         let body = r#"vllm:kv_cache_usage_perc{engine="0",model_name="local"} 0.0
 vllm:num_preemptions_total{engine="0",model_name="local"} 1.0
 "#;
-        let snapshot = parse_snapshot(body);
-        assert_eq!(snapshot.kv_usage, 0.0);
-        assert_eq!(snapshot.kv_free, 1.0);
-        assert_eq!(snapshot.preemptions, 1);
+        let result = parse_snapshot(body);
+        assert_eq!(result.snapshot.kv_usage, 0.0);
+        assert_eq!(result.snapshot.kv_free, 1.0);
+        assert_eq!(result.snapshot.preemptions, 1);
     }
 
     #[test]
@@ -470,9 +494,9 @@ vllm:num_preemptions_total{engine="0",model_name="local"} 1.0
         // If both v0 and v1 names appear (unlikely but possible in mixed
         // output), the last one wins (v1 overwrites v0).
         let body = "vllm:gpu_cache_usage_perc 0.75\nvllm:kv_cache_usage_perc 0.60\n";
-        let snapshot = parse_snapshot(body);
+        let result = parse_snapshot(body);
         assert_eq!(
-            snapshot.kv_usage, 0.60,
+            result.snapshot.kv_usage, 0.60,
             "v1 metric should overwrite v0 when both present"
         );
     }
@@ -481,10 +505,10 @@ vllm:num_preemptions_total{engine="0",model_name="local"} 1.0
     fn parse_snapshot_v0_still_works() {
         // Confirm existing v0 metric name still parses correctly.
         let body = "vllm:gpu_cache_usage_perc{model_name=\"llama-3-8b\"} 0.85\n";
-        let snapshot = parse_snapshot(body);
-        assert_eq!(snapshot.kv_usage, 0.85);
+        let result = parse_snapshot(body);
+        assert_eq!(result.snapshot.kv_usage, 0.85);
         // kv_free derived as 1.0 - 0.85 = 0.15 (float tolerance)
-        let kv_free = snapshot.kv_free;
+        let kv_free = result.snapshot.kv_free;
         assert!(
             (kv_free - 0.15).abs() < 1e-9,
             "kv_free should be ~0.15, got {}",
