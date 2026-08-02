@@ -49,7 +49,7 @@ fn spawn_token_rate_task(metrics: Arc<llm_qdisc_proxy::metrics::Metrics>) {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt().init();
+    llm_qdisc_proxy::telemetry::init();
 
     let cfg = config::load().expect("failed to load configuration");
     tracing::info!(?cfg, "config loaded");

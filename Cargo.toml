@@ -15,7 +15,7 @@ futures = "0.3"
 bytes = "1"
 prometheus = "0.14"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["fmt"] }
+tracing-subscriber = { version = "0.3", features = ["fmt", "json", "env-filter"] }
 clap = { version = "4", features = ["derive"] }
 config = { version = "0.15", features = ["yaml"] }
 anyhow = "1"

@@ -90,6 +90,8 @@ pub struct Scheduler {
     kv_policy: Arc<KvPolicy>,
     /// Flow progress tracker for predictive admit.
     flow_progress: Arc<flow_progress::FlowProgressTracker>,
+    /// Human-readable algorithm name for tracing.
+    algorithm_label: &'static str,
 }
 
 impl Scheduler {
@@ -135,6 +137,12 @@ impl Scheduler {
             max_queue_depth,
         ));
 
+        let algorithm_label = match algorithm {
+            Algorithm::Fifo => "fifo",
+            Algorithm::Wfq => "wfq",
+            Algorithm::Drr => "drr",
+        };
+
         let inner = match algorithm {
             Algorithm::Fifo => SchedulerImpl::Fifo(FifoScheduler::new_with_policies(
                 max_active_flows,
@@ -174,6 +182,7 @@ impl Scheduler {
             kv_policy,
             inner,
             flow_progress,
+            algorithm_label,
         }
     }
 
@@ -215,18 +224,49 @@ impl Scheduler {
     ///
     /// KV policy runs first (accept/delay/reject based on KV-cache pressure).
     /// If KV policy accepts, delegates to the underlying flow scheduler.
+    #[tracing::instrument(skip(self, flow_id, work_unit), fields(
+        flow_id = %flow_id,
+        queue_depth_before,
+        algorithm = self.algorithm_label,
+    ))]
     pub async fn admit(
         &self,
         flow_id: crate::flow::FlowId,
         work_unit: f64,
     ) -> Result<QueueTicket, BackpressureRejected> {
+        // Record queue depth before the admit process begins.
+        tracing::Span::current().record("queue_depth_before", self.queue_depth());
+
+        let enter = std::time::Instant::now();
+
         // KV policy gate runs FIRST before any flow scheduling.
         self.kv_policy.check().await?;
-        match &self.inner {
+        let result = match &self.inner {
             SchedulerImpl::Fifo(s) => s.admit(flow_id, work_unit).await,
             SchedulerImpl::Wfq(s) => s.admit(flow_id, work_unit).await,
             SchedulerImpl::Drr(s) => s.admit(flow_id, work_unit).await,
+        };
+
+        // Emit terminal decision event (accept or reject) inside the admit span.
+        let wait_secs = enter.elapsed().as_secs_f64();
+        match &result {
+            Ok(_) => {
+                tracing::info!(
+                    decision = "accept",
+                    wait_seconds = wait_secs,
+                    "admit decision"
+                );
+            }
+            Err(_) => {
+                tracing::info!(
+                    decision = "reject",
+                    wait_seconds = wait_secs,
+                    "admit decision"
+                );
+            }
         }
+
+        result
     }
 
     /// Current number of requests waiting in the queue.

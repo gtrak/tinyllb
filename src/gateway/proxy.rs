@@ -1,11 +1,13 @@
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::HeaderMap;
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use bytes::Bytes;
 use http_body_util::BodyExt;
 use std::collections::HashSet;
 use std::sync::Arc;
+use tracing::Span;
+use uuid::Uuid;
 
 use crate::flow::identify;
 use crate::gateway::error::ProxyError;
@@ -155,10 +157,23 @@ fn extract_completion_tokens(body: &[u8]) -> i64 {
 }
 
 /// Handle a proxied request.
+#[tracing::instrument(skip_all, fields(
+    flow_id = tracing::field::Empty,
+    request_id = tracing::field::Empty,
+    method = %req.method(),
+    path = %req.uri().path(),
+    stream = tracing::field::Empty,
+))]
 pub async fn proxy_handler(
     State(state): State<AppState>,
     req: Request<Body>,
 ) -> Result<Response<Body>, ProxyError> {
+    // Record late-bound fields (resolved inside the handler body).
+    let span = Span::current();
+
+    // Generate a unique request ID, echoed back in X-Request-ID header.
+    let request_id = Uuid::new_v4().to_string();
+    span.record("request_id", &request_id);
     // Extract all needed parts before consuming the request body.
     let original_path = req.uri().path().to_string();
     let query: Option<String> = req.uri().query().map(|q| q.to_string());
@@ -204,10 +219,12 @@ pub async fn proxy_handler(
 
     // Check if the request explicitly wants streaming.
     let wants_streaming = body_wants_streaming(&body_bytes);
+    // Record late-bound fields in the request span.
+    span.record("flow_id", flow_id.to_string());
+    span.record("stream", wants_streaming);
 
     // Extract max_tokens from the request body for WFQ work unit tracking.
     let work_unit = extract_max_tokens(&body_bytes);
-
     // Build the backend URL, preserving the query string.
     let backend_url = build_backend_url(&state.backend_url, &original_path, query.as_deref())?;
 
@@ -242,6 +259,16 @@ pub async fn proxy_handler(
         Some(state.scheduler.flow_progress_tracker()),
     );
 
+    // Measure backend forward duration.
+    let forward_start = std::time::Instant::now();
+    let bf_span = tracing::info_span!("backend_forward",
+        flow_id = %flow_id,
+        request_id = %request_id,
+        status = tracing::field::Empty,
+        duration_ms = tracing::field::Empty,
+        tokens = tracing::field::Empty,
+    );
+
     // Build and send the request to the backend, passing raw bytes (byte-preserving).
     let mut builder = state.client.request(method, backend_url).body(body_bytes);
 
@@ -252,25 +279,31 @@ pub async fn proxy_handler(
 
     // Send the request with optional timeout.
     // Wrapping send() in timeout covers connect + response header phase.
-    let response = if let Some(timeout) = state.request_timeout {
-        match tokio::time::timeout(timeout, builder.send()).await {
-            Ok(Ok(resp)) => Ok(resp),
-            Ok(Err(e)) => {
-                // Network error — guard drops as cancelled.
+    // Use Future::instrument (Send-safe) so the span is current while polled.
+    use tracing::Instrument;
+    let response = async {
+        if let Some(timeout) = state.request_timeout {
+            match tokio::time::timeout(timeout, builder.send()).await {
+                Ok(Ok(resp)) => Ok(resp),
+                Ok(Err(e)) => {
+                    // Network error — guard drops as cancelled.
+                    state.metrics.errors_total.inc();
+                    Err(ProxyError::Network(e))
+                }
+                Err(_) => {
+                    // Timeout — guard drops as cancelled (emit cancelled, restore credit).
+                    Err(ProxyError::Timeout)
+                }
+            }
+        } else {
+            builder.send().await.map_err(|e| {
                 state.metrics.errors_total.inc();
-                Err(ProxyError::Network(e))
-            }
-            Err(_) => {
-                // Timeout — guard drops as cancelled (emit cancelled, restore credit).
-                Err(ProxyError::Timeout)
-            }
+                ProxyError::Network(e)
+            })
         }
-    } else {
-        builder.send().await.map_err(|e| {
-            state.metrics.errors_total.inc();
-            ProxyError::Network(e)
-        })
-    };
+    }
+    .instrument(bf_span.clone())
+    .await;
 
     let response = match response {
         Ok(r) => r,
@@ -286,6 +319,9 @@ pub async fn proxy_handler(
     };
 
     let status = response.status();
+    let forward_duration_ms = forward_start.elapsed().as_millis();
+    bf_span.record("status", status.as_u16());
+    bf_span.record("duration_ms", forward_duration_ms);
     let response_headers = response.headers().clone();
     let content_type = response_headers
         .get(axum::http::header::CONTENT_TYPE)
@@ -306,12 +342,15 @@ pub async fn proxy_handler(
         // Backend completed (even with error status) — mark as completed
         // with 0 delivered tokens (charges full estimated cost).
         lifecycle.mark_completed();
-        return Ok(ProxyError::BackendError {
-            status,
-            headers: filter_response_headers(&response_headers),
-            body: body_bytes.to_vec(),
-        }
-        .into_response());
+        let mut resp = Response::new(Body::from(body_bytes.to_vec()));
+        *resp.status_mut() = status;
+        *resp.headers_mut() = filter_response_headers(&response_headers);
+        // Echo X-Request-ID back in response.
+        resp.headers_mut().insert(
+            axum::http::HeaderName::from_static("x-request-id"),
+            axum::http::HeaderValue::from_str(&request_id).expect("valid UUID header value"),
+        );
+        return Ok(resp);
     }
 
     // Streaming path: if SSE or body wanted streaming, use MetricStream.
@@ -337,6 +376,11 @@ pub async fn proxy_handler(
         for (name, value) in filter_response_headers_streaming(&response_headers).iter() {
             resp.headers_mut().append(name, value.clone());
         }
+        // Echo X-Request-ID back in response.
+        resp.headers_mut().insert(
+            axum::http::HeaderName::from_static("x-request-id"),
+            axum::http::HeaderValue::from_str(&request_id).expect("valid UUID header value"),
+        );
         return Ok(resp);
     }
 
@@ -372,6 +416,8 @@ pub async fn proxy_handler(
             .inc_by(completion_tokens as f64);
         lifecycle.add_delivered_tokens(completion_tokens);
     }
+    // Record tokens in backend_forward span (non-streaming path only).
+    bf_span.record("tokens", completion_tokens);
 
     // Mark the request as completed normally.
     lifecycle.mark_completed();
@@ -385,5 +431,10 @@ pub async fn proxy_handler(
     for (name, value) in filter_response_headers(&response_headers).iter() {
         resp.headers_mut().append(name, value.clone());
     }
+    // Echo X-Request-ID back in response.
+    resp.headers_mut().insert(
+        axum::http::HeaderName::from_static("x-request-id"),
+        axum::http::HeaderValue::from_str(&request_id).expect("valid UUID header value"),
+    );
     Ok(resp)
 }
