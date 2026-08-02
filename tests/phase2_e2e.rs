@@ -255,6 +255,7 @@ async fn test_weighted_fairness_wfq_ratio() {
             CompletionBias {
                 enabled: false,
                 target_active_flows: 0,
+                predictive_admit: false,
             },
         );
 
@@ -398,6 +399,7 @@ async fn test_no_starvation_interactive_completes() {
             CompletionBias {
                 enabled: false,
                 target_active_flows: 0,
+                predictive_admit: false,
             },
         );
 
@@ -521,6 +523,7 @@ async fn test_completion_bias_limits_active_flows() {
             CompletionBias {
                 enabled: true,
                 target_active_flows: 3,
+                predictive_admit: false,
             },
         );
 
@@ -615,6 +618,7 @@ async fn test_queue_endpoint_reflects_state() {
             CompletionBias {
                 enabled: false,
                 target_active_flows: 0,
+                predictive_admit: false,
             },
         );
 

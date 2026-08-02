@@ -307,6 +307,7 @@ async fn test_completion_bias_blocks_new_flow() {
             CompletionBias {
                 enabled: true,
                 target_active_flows: 2,
+                predictive_admit: false,
             },
             KvPolicyConfig::default(),
             Arc::new(BackendMonitor::empty()),
@@ -377,6 +378,7 @@ async fn test_completion_bias_allows_active_flow_requests() {
             CompletionBias {
                 enabled: true,
                 target_active_flows: 1,
+                predictive_admit: false,
             },
             KvPolicyConfig::default(),
             Arc::new(BackendMonitor::empty()),
@@ -429,6 +431,7 @@ async fn test_combined_starvation_overrides_completion_bias() {
             CompletionBias {
                 enabled: true,
                 target_active_flows: 2,
+                predictive_admit: false,
             },
             KvPolicyConfig::default(),
             Arc::new(BackendMonitor::empty()),

@@ -250,6 +250,7 @@ fn bench_completion_bias(c: &mut criterion::Criterion) {
                     CompletionBias {
                         enabled: true,
                         target_active_flows: 3,
+                        predictive_admit: false,
                     },
                 )
                 .await;
@@ -267,6 +268,7 @@ fn bench_completion_bias(c: &mut criterion::Criterion) {
                     CompletionBias {
                         enabled: false,
                         target_active_flows: 0,
+                        predictive_admit: false,
                     },
                 )
                 .await;

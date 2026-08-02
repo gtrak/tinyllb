@@ -2,6 +2,7 @@ mod backpressure;
 mod completion_bias;
 mod drr;
 mod fifo;
+mod flow_progress;
 mod kv_admission;
 pub mod lifecycle;
 mod priority;
@@ -11,6 +12,7 @@ mod wfq;
 pub use backpressure::{fail_fast_retry_after, mode_label, BackpressureRejected};
 pub use drr::DrrScheduler;
 pub use fifo::{make_ticket, FifoScheduler, QueueTicket};
+pub use flow_progress::FlowProgressTracker;
 pub use kv_admission::KvPolicy;
 pub use lifecycle::AccountingReport;
 pub use wfq::WfqScheduler;
@@ -26,8 +28,8 @@ use std::time::Duration;
 
 /// Shared policy state for all scheduler variants.
 ///
-/// Each scheduler type gets an Arc clone of the completion bias gate and
-/// the starvation timeout.
+/// Each scheduler type gets an Arc clone of the completion bias gate,
+/// the starvation timeout, and the flow progress tracker.
 #[allow(dead_code)]
 pub(crate) struct Policies {
     /// Completion bias gate for checking before admit.
@@ -36,6 +38,8 @@ pub(crate) struct Policies {
     starvation_timeout: Duration,
     /// Notify completion bias waiters when active flows change.
     notify: Arc<tokio::sync::Notify>,
+    /// Flow progress tracker for predictive admit.
+    flow_progress: Arc<flow_progress::FlowProgressTracker>,
 }
 
 impl Policies {
@@ -46,20 +50,24 @@ impl Policies {
         metrics: Arc<Metrics>,
         registry: Arc<FlowRegistry>,
         notify: Arc<tokio::sync::Notify>,
+        flow_progress: Arc<flow_progress::FlowProgressTracker>,
     ) -> Self {
         let gate = completion_bias::CompletionBiasGate::new(
             completion_bias.enabled,
             completion_bias.target_active_flows,
+            completion_bias.predictive_admit,
             max_active_flows,
             metrics,
             registry,
             notify.clone(),
             starvation_timeout,
+            flow_progress.clone(),
         );
         Self {
             completion_bias: Arc::new(gate),
             starvation_timeout,
             notify,
+            flow_progress,
         }
     }
 }
@@ -80,6 +88,8 @@ pub struct Scheduler {
     inner: SchedulerImpl,
     /// KV-cache-aware admission gate.  Checked before every admit.
     kv_policy: Arc<KvPolicy>,
+    /// Flow progress tracker for predictive admit.
+    flow_progress: Arc<flow_progress::FlowProgressTracker>,
 }
 
 impl Scheduler {
@@ -104,6 +114,7 @@ impl Scheduler {
         monitor: Arc<BackendMonitor>,
     ) -> Self {
         let notify = Arc::new(tokio::sync::Notify::new());
+        let flow_progress = Arc::new(flow_progress::FlowProgressTracker::new());
         let policies = Policies::new(
             completion_bias,
             max_active_flows,
@@ -111,6 +122,7 @@ impl Scheduler {
             metrics.clone(),
             registry.clone(),
             notify.clone(),
+            flow_progress.clone(),
         );
 
         let kv_policy = Arc::new(KvPolicy::new(
@@ -158,7 +170,11 @@ impl Scheduler {
             )),
         };
 
-        Self { kv_policy, inner }
+        Self {
+            kv_policy,
+            inner,
+            flow_progress,
+        }
     }
 
     /// Create a scheduler with default policy values.
@@ -274,5 +290,10 @@ impl Scheduler {
             SchedulerImpl::Wfq(_) => {}
             SchedulerImpl::Drr(s) => s.report_accounting(flow_id, report),
         }
+    }
+
+    /// Return a reference to the flow progress tracker for predictive admit.
+    pub fn flow_progress_tracker(&self) -> Arc<flow_progress::FlowProgressTracker> {
+        self.flow_progress.clone()
     }
 }

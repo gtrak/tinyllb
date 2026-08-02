@@ -24,9 +24,15 @@ use crate::metrics::Metrics;
 //   curl http://localhost:8000/metrics | grep vllm
 //
 // `vllm:gpu_cache_usage_perc` — fraction of KV cache blocks in use [0..1].
-// v0 engine name.  v1 engines expose `vllm:kv_cache_usage_perc` instead;
-// update this constant when upgrading to v1.
+// v0 engine name.
 pub const METRIC_KV_USAGE: &str = "vllm:gpu_cache_usage_perc";
+
+// `vllm:kv_cache_usage_perc` — v1 engine name for KV cache usage [0..1].
+//
+// v1 engines use this metric name instead of `vllm:gpu_cache_usage_perc`.
+// The parser matches both names so that v0 and v1 backends work without
+// configuration changes.
+pub const METRIC_KV_USAGE_V1: &str = "vllm:kv_cache_usage_perc";
 
 // `vllm:gpu_cache_free_perc` is the primary gauge; `kv_free` is derived
 // as `1.0 - kv_usage` when only the usage gauge is available.
@@ -100,16 +106,18 @@ fn parse_prometheus_line(line: &str) -> Option<(&str, f64)> {
 fn parse_snapshot(body: &str) -> BackendSnapshot {
     let mut snapshot = BackendSnapshot::default();
     let mut found_usage = false;
+    let mut found_free = false;
 
     for line in body.lines() {
         if let Some((name, value)) = parse_prometheus_line(line) {
             match name {
-                METRIC_KV_USAGE => {
+                METRIC_KV_USAGE | METRIC_KV_USAGE_V1 => {
                     snapshot.kv_usage = value;
                     found_usage = true;
                 }
                 METRIC_KV_FREE => {
                     snapshot.kv_free = value;
+                    found_free = true;
                 }
                 METRIC_NUM_PREEMPTION => {
                     snapshot.preemptions = value as u64;
@@ -119,11 +127,8 @@ fn parse_snapshot(body: &str) -> BackendSnapshot {
         }
     }
 
-    // Derive free from usage if the free gauge was not present.
-    if !found_usage {
-        // No usage data — keep defaults (0.0 usage / 1.0 free).
-    } else if snapshot.kv_free == 0.0 && snapshot.kv_usage < 1.0 {
-        // If free was not explicitly set but usage was, derive it.
+    // Derive free from usage if the free gauge was not present but usage was.
+    if found_usage && !found_free && snapshot.kv_usage < 1.0 {
         snapshot.kv_free = 1.0 - snapshot.kv_usage;
     }
 
@@ -421,5 +426,69 @@ vllm:num_preemptions_total 3
         assert_eq!(snapshot.preemptions, 3);
         // Histogram lines are parsed but not matched to known metrics,
         // so they don't affect the snapshot.
+    }
+
+    // ---- v1 metric name tests ----
+
+    #[test]
+    fn parse_snapshot_v1_kv_cache_usage() {
+        // v1 engine exposes `vllm:kv_cache_usage_perc` with engine label.
+        let body = r#"# HELP vllm:kv_cache_usage_perc KV cache usage.
+# TYPE vllm:kv_cache_usage_perc gauge
+vllm:kv_cache_usage_perc{engine="0",model_name="local"} 0.42
+vllm:num_preemptions_total{engine="0",model_name="local"} 1
+"#;
+        let snapshot = parse_snapshot(body);
+        assert_eq!(
+            snapshot.kv_usage, 0.42,
+            "v1 kv_cache_usage_perc should be parsed"
+        );
+        // kv_free derived as 1.0 - 0.42 = 0.58 (float tolerance)
+        let kv_free = snapshot.kv_free;
+        assert!(
+            (kv_free - 0.58).abs() < 1e-9,
+            "kv_free should be derived from kv_usage (expected ~0.58, got {})",
+            kv_free
+        );
+        assert_eq!(snapshot.preemptions, 1);
+    }
+
+    #[test]
+    fn parse_snapshot_v1_with_preemptions() {
+        // Real vLLM v1 metrics output with engine/model labels.
+        let body = r#"vllm:kv_cache_usage_perc{engine="0",model_name="local"} 0.0
+vllm:num_preemptions_total{engine="0",model_name="local"} 1.0
+"#;
+        let snapshot = parse_snapshot(body);
+        assert_eq!(snapshot.kv_usage, 0.0);
+        assert_eq!(snapshot.kv_free, 1.0);
+        assert_eq!(snapshot.preemptions, 1);
+    }
+
+    #[test]
+    fn parse_snapshot_v0_and_v1_both_present_v1_wins() {
+        // If both v0 and v1 names appear (unlikely but possible in mixed
+        // output), the last one wins (v1 overwrites v0).
+        let body = "vllm:gpu_cache_usage_perc 0.75\nvllm:kv_cache_usage_perc 0.60\n";
+        let snapshot = parse_snapshot(body);
+        assert_eq!(
+            snapshot.kv_usage, 0.60,
+            "v1 metric should overwrite v0 when both present"
+        );
+    }
+
+    #[test]
+    fn parse_snapshot_v0_still_works() {
+        // Confirm existing v0 metric name still parses correctly.
+        let body = "vllm:gpu_cache_usage_perc{model_name=\"llama-3-8b\"} 0.85\n";
+        let snapshot = parse_snapshot(body);
+        assert_eq!(snapshot.kv_usage, 0.85);
+        // kv_free derived as 1.0 - 0.85 = 0.15 (float tolerance)
+        let kv_free = snapshot.kv_free;
+        assert!(
+            (kv_free - 0.15).abs() < 1e-9,
+            "kv_free should be ~0.15, got {}",
+            kv_free
+        );
     }
 }

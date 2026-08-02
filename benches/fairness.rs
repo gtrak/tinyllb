@@ -72,6 +72,7 @@ fn build_proxy_app(
         CompletionBias {
             enabled: false,
             target_active_flows: 0,
+            predictive_admit: false,
         },
         KvPolicyConfig::default(),
         Arc::new(BackendMonitor::empty()),

@@ -103,14 +103,17 @@ impl WfqScheduler {
         retry_after_base: std::time::Duration,
     ) -> Self {
         let notify = Arc::new(tokio::sync::Notify::new());
+        let flow_progress = Arc::new(super::flow_progress::FlowProgressTracker::new());
         let gate = Arc::new(CompletionBiasGate::new(
             false,
             0,
+            false, // predictive_admit
             max_active_flows,
             metrics.clone(),
             registry.clone(),
             notify,
             Duration::from_secs(300),
+            flow_progress,
         ));
         Self::new_inner(
             max_active_flows,

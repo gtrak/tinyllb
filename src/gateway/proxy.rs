@@ -239,6 +239,7 @@ pub async fn proxy_handler(
         work_unit as i64,
         state.scheduler.clone(),
         state.metrics.clone(),
+        Some(state.scheduler.flow_progress_tracker()),
     );
 
     // Build and send the request to the backend, passing raw bytes (byte-preserving).

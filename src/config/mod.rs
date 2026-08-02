@@ -134,12 +134,21 @@ impl Default for Scheduler {
 /// currently have an in-flight request) is deferred while the number of
 /// active flows exceeds `target_active_flows`.  A value of `0` for
 /// `target_active_flows` means "use `max_active_flows`".
+///
+/// When `predictive_admit` is true, the gate also checks per-flow progress:
+/// if an active flow has delivered >= 90% of its estimated tokens, the gate
+/// allows a new flow through (predictive admit) before the active flow finishes.
+/// This is OFF by default.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CompletionBias {
     #[serde(default = "CompletionBias::default_enabled")]
     pub enabled: bool,
     #[serde(default)]
     pub target_active_flows: u32,
+    /// Predictive admit: allow pre-admit when an active flow is near done
+    /// (delivered >= 90% of estimated). OFF by default.
+    #[serde(default)]
+    pub predictive_admit: bool,
 }
 
 impl CompletionBias {
@@ -153,6 +162,7 @@ impl Default for CompletionBias {
         Self {
             enabled: true,
             target_active_flows: 0, // 0 = use max_active_flows
+            predictive_admit: false,
         }
     }
 }
