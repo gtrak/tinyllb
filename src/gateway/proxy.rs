@@ -191,6 +191,103 @@ fn extract_completion_tokens(body: &[u8]) -> i64 {
         .unwrap_or(0)
 }
 
+/// Reconcile the request body's `messages` against the stored transcript and
+/// return a body with the messages substituted by `[Head + Compressed + Live]`.
+///
+/// Skips: internal compressor requests (`X-LLM-Internal: compressor` header),
+/// non-JSON bodies, bodies without a `messages` array. Fails open: on any
+/// error, returns the original body unchanged.
+async fn rewrite_messages(
+    ctx: &crate::context::ContextState,
+    body: &bytes::Bytes,
+    flow_id: &str,
+    headers: &axum::http::HeaderMap,
+) -> bytes::Bytes {
+    // Skip internal compressor requests to prevent infinite recursion.
+    if headers
+        .get("x-llm-internal")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v == "compressor")
+        .unwrap_or(false)
+    {
+        return body.clone();
+    }
+
+    // Parse the body as JSON. If not JSON or no messages field, return unchanged.
+    let mut value: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => return body.clone(),
+    };
+
+    // Only process if there's a messages array.
+    let messages = match value.get("messages").and_then(|m| m.as_array()) {
+        Some(m) => m.clone(),
+        None => return body.clone(),
+    };
+
+    // Reconcile under the per-flow lock.
+    let result = match ctx
+        .with_flow_lock(flow_id, async {
+            crate::context::reconcile::reconcile(
+                flow_id,
+                &messages,
+                ctx.store.as_ref(),
+                ctx.estimator.as_ref(),
+                &ctx.config,
+            )
+            .await
+        })
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(
+                flow_id = %flow_id,
+                error = %e,
+                "context compression reconcile failed, forwarding original body"
+            );
+            return body.clone();
+        }
+    };
+
+    // Rewrite the messages array in the JSON body.
+    value["messages"] = serde_json::Value::Array(result.forwarded_messages);
+
+    // Serialize back to bytes.
+    let new_body = match serde_json::to_vec(&value) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to re-serialize rewritten body");
+            return body.clone();
+        }
+    };
+
+    tracing::debug!(
+        flow_id = %flow_id,
+        forwarded_tokens = result.total_est_tokens,
+        raw_tokens = result.total_raw_est_tokens,
+        needs_compression = result.needs_compression,
+        transcript_reset = result.transcript_reset,
+        "context compression applied"
+    );
+
+    // Trigger compression if needed.
+    if result.needs_compression {
+        if let Some((start, end)) = result.compress_turn_range {
+            let job = crate::context::CompressionJob {
+                flow_id: flow_id.to_string(),
+                turn_range_start: start,
+                turn_range_end: end,
+                enqueued_at: std::time::Instant::now(),
+            };
+            let _ = ctx.trigger_compression(job);
+        }
+    }
+
+    bytes::Bytes::from(new_body)
+}
+
+
 // @lat: [[gateway#Reverse Proxy Request Handling]]
 /// Handle a proxied request.
 #[tracing::instrument(skip_all, fields(
@@ -261,6 +358,16 @@ pub async fn proxy_handler(
 
     // Extract max_tokens from the request body for WFQ work unit tracking.
     let work_unit = extract_max_tokens(&body_bytes);
+
+    // --- Context compression ---
+    // Reconcile the messages array against the stored transcript and
+    // substitute [Head + Compressed + Live]. Fail open on any error.
+    let body_bytes = if let Some(ref ctx) = state.context {
+        rewrite_messages(ctx, &body_bytes, &flow_id.to_string(), &original_headers).await
+    } else {
+        body_bytes
+    };
+
     // Build the backend URL, preserving the query string.
     let backend_url = build_backend_url(&state.backend_url, &original_path, query.as_deref())?;
 
@@ -531,5 +638,83 @@ mod tests {
     fn unparseable_body_untouched() {
         assert!(inject("not json").is_none());
         assert!(inject("").is_none());
+    }
+
+    // -- Helper for rewrite_messages tests --
+    async fn make_test_ctx() -> (
+        crate::context::ContextState,
+        tokio::sync::mpsc::Receiver<crate::context::CompressionJob>,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        let policy = crate::config::ContextPolicy {
+            enabled: true,
+            compress_threshold: 100_000,
+            head_keep_turns: 3,
+            live_keep_turns: 6,
+            compress_chunk_turns: 8,
+            store_path: format!(
+                "{}/test_ctx_{}_{}.db",
+                std::env::temp_dir().to_string_lossy(),
+                std::process::id(),
+                uuid::Uuid::new_v4().simple()
+            ),
+            ..Default::default()
+        };
+        (
+            crate::context::ContextState::new(policy, tx)
+                .await
+                .unwrap(),
+            rx,
+        )
+    }
+
+    async fn rewrite_body(body: &str, headers: &HeaderMap) -> bytes::Bytes {
+        let (ctx, _rx) = make_test_ctx().await;
+        let body_bytes = bytes::Bytes::from(body.to_string());
+        rewrite_messages(&ctx, &body_bytes, "test-flow", headers).await
+    }
+
+    #[tokio::test]
+    async fn rewrite_skips_internal_requests() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-llm-internal",
+            axum::http::HeaderValue::from_static("compressor"),
+        );
+        let body = r#"{"model":"x","messages":[{"role":"user","content":"hi"}]}"#;
+        let result = rewrite_body(body, &headers).await;
+        let result_str = String::from_utf8(result.to_vec()).unwrap();
+        assert_eq!(result_str, body, "internal request body must be unchanged");
+    }
+
+    #[tokio::test]
+    async fn rewrite_no_messages_field() {
+        let headers = HeaderMap::new();
+        let body = r#"{"model":"x"}"#;
+        let result = rewrite_body(body, &headers).await;
+        let result_str = String::from_utf8(result.to_vec()).unwrap();
+        assert_eq!(result_str, body, "body without messages must be unchanged");
+    }
+
+    #[tokio::test]
+    async fn rewrite_non_json_body() {
+        let headers = HeaderMap::new();
+        let body = "not json";
+        let result = rewrite_body(body, &headers).await;
+        let result_str = String::from_utf8(result.to_vec()).unwrap();
+        assert_eq!(result_str, body, "non-JSON body must be unchanged");
+    }
+
+    #[tokio::test]
+    async fn rewrite_preserves_other_fields() {
+        let headers = HeaderMap::new();
+        let body = r#"{"model":"x","messages":[{"role":"user","content":"hi"}],"temperature":0.7,"max_tokens":128}"#;
+        let result = rewrite_body(body, &headers).await;
+        let v: serde_json::Value = serde_json::from_slice(&result).unwrap();
+        assert_eq!(v["model"], "x");
+        assert_eq!(v["temperature"], 0.7);
+        assert_eq!(v["max_tokens"], 128);
+        assert!(v["messages"].is_array());
+        assert_eq!(v["messages"].as_array().unwrap().len(), 1);
     }
 }
