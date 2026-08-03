@@ -390,3 +390,89 @@ async fn test_ephemeral_aggregation_and_named_flow_metric_label() {
         }
     }
 }
+
+/// Test: X-Session-Id header resolves to a stable, non-ephemeral flow ID.
+///
+/// Verifies that the standard x-session-id header is honored by resolve() and
+/// produces a flow_id that is not ephemeral.
+#[tokio::test]
+async fn test_x_session_id_resolves_to_stable_flow() {
+    use bytes::Bytes;
+    use llm_qdisc_proxy::flow::identify;
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "X-Session-Id",
+        HeaderValue::from_static("integ-session"),
+    );
+    let body = Bytes::from_static(r#"{"model":"llama-2"}"#.as_bytes());
+
+    let id = identify::resolve(&headers, &body);
+    assert_eq!(id.to_string(), "integ-session");
+    assert!(!id.is_ephemeral());
+}
+
+/// Test: x-session-affinity header resolves to a stable, non-ephemeral flow ID.
+#[tokio::test]
+async fn test_x_session_affinity_resolves_to_stable_flow() {
+    use bytes::Bytes;
+    use llm_qdisc_proxy::flow::identify;
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-session-affinity",
+        HeaderValue::from_static("integ-affinity"),
+    );
+    let body = Bytes::from_static(r#"{"model":"llama-2"}"#.as_bytes());
+
+    let id = identify::resolve(&headers, &body);
+    assert_eq!(id.to_string(), "integ-affinity");
+    assert!(!id.is_ephemeral());
+}
+
+/// Test: two requests with the same X-Session-Id resolve to the same flow ID.
+///
+/// Regression test: before session fingerprinting, each request would get a
+/// unique ephemeral ID even within the same agentic session.
+#[tokio::test]
+async fn test_same_session_id_yields_same_flow() {
+    use bytes::Bytes;
+    use llm_qdisc_proxy::flow::identify;
+
+    let session = "shared-session-id";
+
+    // First request
+    let mut headers1 = HeaderMap::new();
+    headers1.insert("x-session-id", HeaderValue::from_static(session));
+    let body1 = Bytes::from_static(r#"{"model":"llama-2"}"#.as_bytes());
+    let id1 = identify::resolve(&headers1, &body1);
+
+    // Second request, same session header, different body
+    let mut headers2 = HeaderMap::new();
+    headers2.insert("x-session-id", HeaderValue::from_static(session));
+    let body2 =
+        Bytes::from(r#"{"model":"llama-2","messages":[{"role":"user","content":"turn 2"}]}"#.as_bytes());
+    let id2 = identify::resolve(&headers2, &body2);
+
+    assert_eq!(id1, id2);
+    assert_eq!(id1.to_string(), session);
+    assert!(!id1.is_ephemeral());
+}
+
+/// Test: x-claude-code-session-id resolves to stable flow ID.
+#[tokio::test]
+async fn test_claude_code_session_id_resolves_to_stable_flow() {
+    use bytes::Bytes;
+    use llm_qdisc_proxy::flow::identify;
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-claude-code-session-id",
+        HeaderValue::from_static("claude-ses-123"),
+    );
+    let body = Bytes::from_static(r#"{"model":"llama-2"}"#.as_bytes());
+
+    let id = identify::resolve(&headers, &body);
+    assert_eq!(id.to_string(), "claude-ses-123");
+    assert!(!id.is_ephemeral());
+}

@@ -48,7 +48,9 @@ via `Span::current().record()` after resolution inside the handler body.
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `flow_id` | String | Resolved flow identifier (header, metadata, or ephemeral). Late-bound. |
+| `flow_id` | String | Resolved flow identifier — `X-LLM-Flow-ID`, harness session headers
+|           |        | (`x-claude-code-session-id`, `x-session-id`, `x-session-affinity`,
+|           |        | `x-client-request-id`, `session_id`), `metadata.flow_id`, or ephemeral UUID. Late-bound. |
 | `request_id` | String | UUID v4 generated per-request; echoed in `X-Request-ID` header. |
 | `method` | String | HTTP method (e.g. `POST`). |
 | `path` | String | Request path (e.g. `/v1/chat/completions`). |
