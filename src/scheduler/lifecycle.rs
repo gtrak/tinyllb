@@ -44,6 +44,7 @@ pub mod event {
 /// handled independently by the ticket's own drop handler. Instead, the
 /// guard tracks whether the request completed normally and reports
 /// accounting/credit restoration accordingly.
+// @lat: [[scheduler_policies#Request Lifecycle and Credit Restoration]]
 pub struct LifecycleGuard {
     /// Flow ID for this request.
     flow_id: FlowId,

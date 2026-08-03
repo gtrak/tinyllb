@@ -1,3 +1,4 @@
+// @lat: [[app#Library Crate Module Declarations]]
 pub mod api;
 pub mod backend;
 pub mod config;

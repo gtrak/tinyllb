@@ -6,6 +6,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use url::Url;
 
+// @lat: [[config#Configuration Contract]]
 /// Top-level proxy configuration.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Config {

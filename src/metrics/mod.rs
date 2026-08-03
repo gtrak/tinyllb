@@ -13,6 +13,7 @@ use prometheus::{CounterVec, GaugeVec, HistogramOpts, Opts, Registry};
 /// Stored as `Arc<Metrics>` inside `AppState` so every request handler
 /// can access the same registry.  Later issues (05 FIFO, 06 backpressure,
 /// 08 flows) only register new collectors into this shared registry.
+// @lat: [[metrics#Metrics Registry]]
 pub struct Metrics {
     pub registry: Registry,
 

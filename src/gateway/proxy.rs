@@ -191,6 +191,7 @@ fn extract_completion_tokens(body: &[u8]) -> i64 {
         .unwrap_or(0)
 }
 
+// @lat: [[gateway#Reverse Proxy Request Handling]]
 /// Handle a proxied request.
 #[tracing::instrument(skip_all, fields(
     flow_id = tracing::field::Empty,

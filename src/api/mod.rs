@@ -11,6 +11,7 @@ use crate::gateway::AppState;
 /// Mounts:
 /// - `POST /flows` — register (or update) a flow's weight/priority.
 /// - `GET /queue` — current queue depth, active count, per-flow positions.
+// @lat: [[api#Admin API Router Assembly]]
 pub fn create_router() -> Router<AppState> {
     Router::new()
         .route("/flows", post(flows::register_handler))

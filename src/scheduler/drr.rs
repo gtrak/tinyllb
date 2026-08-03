@@ -77,6 +77,7 @@ struct SharedState {
 }
 
 /// DRR scheduler with per-flow deficit round-robin credit bookkeeping.
+// @lat: [[scheduler#Deficit Round Robin Discipline]]
 pub struct DrrScheduler {
     /// Shared state, cloned as Arc for the admission loop and ticket closures.
     state: Arc<SharedState>,

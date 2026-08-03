@@ -33,6 +33,7 @@ pub struct FlowCandidate {
 /// 3. Further ties broken by earliest `enqueued_at` (FIFO).
 ///
 /// Returns the flow_id of the selected candidate, or `None` if no candidates.
+// @lat: [[scheduler_policies#Priority-Aware Flow Selection]]
 pub fn select_best(candidates: &[FlowCandidate]) -> Option<FlowId> {
     let mut best: Option<&FlowCandidate> = None;
 

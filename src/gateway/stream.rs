@@ -120,6 +120,7 @@ impl TokenAccumulator {
     }
 }
 
+// @lat: [[gateway#Streaming Passthrough and Token Accounting]]
 /// A stream wrapper that instruments SSE passthrough for token tracking.
 ///
 /// Wraps the reqwest response stream directly and uses a `TokenAccumulator`

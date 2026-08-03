@@ -21,6 +21,7 @@ struct ProgressEntry {
 /// Updated by LifecycleGuard (or the stream layer) when requests start,
 /// deliver tokens, or end. The completion bias gate queries this to
 /// decide whether any active flow is "near done."
+// @lat: [[admission#Per-Flow Token Progress Tracking]]
 pub struct FlowProgressTracker {
     entries: DashMap<crate::flow::FlowId, ProgressEntry>,
 }

@@ -22,6 +22,7 @@ use super::FlowId;
 /// Empty or whitespace-only header values fall through to the next source.
 ///
 /// Returns the resolved `FlowId`.
+// @lat: [[flow#Flow Identification]]
 pub fn resolve(headers: &HeaderMap, body: &Bytes) -> FlowId {
     // 1. Check the X-LLM-Flow-ID header first (highest precedence).
     if let Some(header_id) = extract_flow_id_from_header(headers) {

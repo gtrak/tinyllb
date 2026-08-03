@@ -54,6 +54,7 @@ pub enum KVMDecision {
 /// Delayed requests are counted in `queue_depth()` and `queue_snapshot()`
 /// via `delayed_count`. This ensures the failfast `max_queue_depth` check
 /// sees them and GET /queue reports them as waiting.
+// @lat: [[admission#KV-Cache-Aware Admission Gate]]
 pub struct KvPolicy {
     /// Whether KV policy is enabled.
     enabled: bool,

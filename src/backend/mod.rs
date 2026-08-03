@@ -120,6 +120,7 @@ fn parse_prometheus_line(line: &str) -> Option<(&str, f64)> {
 ///
 /// Used by the BackendMonitor poll loop and by integration tests
 /// that want to verify the live backend's /metrics output.
+// @lat: [[backend#vLLM Metrics Parsing]]
 pub fn parse_snapshot(body: &str) -> ParseSnapshotResult {
     let mut snapshot = BackendSnapshot::default();
     let mut found_usage = false;
@@ -165,6 +166,7 @@ pub fn parse_snapshot(body: &str) -> ParseSnapshotResult {
 /// Uses `tokio::sync::watch` for single-writer / multi-reader semantics.
 /// The sender is consumed by the monitor loop; receivers are cloned for
 /// the scheduler, tests, etc.
+// @lat: [[backend#Backend KV-Cache Monitor]]
 #[derive(Clone)]
 pub struct BackendMonitor {
     /// Receiver half for reading the latest snapshot.

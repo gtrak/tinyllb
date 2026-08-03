@@ -54,6 +54,7 @@ pub mod humantime_serde_option {
     }
 }
 
+// @lat: [[config#Configuration Loading and Validation]]
 /// Load configuration from YAML file and environment overrides.
 ///
 /// Reads `$CONFIG_PATH` (defaults to `config.yaml`). If the file does not exist,

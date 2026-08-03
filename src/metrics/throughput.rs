@@ -1,3 +1,4 @@
+// @lat: [[metrics#Metric Family Contracts]]
 // Throughput-family metrics module.
 //
 // Metrics registered in `Metrics::new()` (src/metrics/mod.rs):

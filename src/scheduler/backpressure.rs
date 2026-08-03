@@ -2,6 +2,7 @@ use std::time::Duration;
 
 /// Error returned when a request is rejected due to backpressure.
 #[derive(Debug, Clone)]
+// @lat: [[admission#Backpressure and Admission Rejection]]
 pub struct BackpressureRejected {
     /// Suggested retry-after duration for the client.
     pub retry_after: Duration,

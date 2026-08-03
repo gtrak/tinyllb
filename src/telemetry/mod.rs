@@ -19,6 +19,7 @@
 /// OpenTelemetry export is scaffolded as a commented-out `init_otlp()` stub
 /// below — the codebase uses `tracing` spans throughout, so an OTLP exporter
 /// can be wired up later without rewriting call sites.
+// @lat: [[telemetry#Telemetry Initialization]]
 pub fn init() {
     let json_mode = std::env::var("LLM_QDISC_LOG_JSON")
         .map(|v| v == "1")

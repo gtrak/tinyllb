@@ -28,6 +28,7 @@ pub struct FlowPosition {
 ///
 /// Returns the current queue state including active count,
 /// waiting count, and per-flow positions.
+// @lat: [[api#Queue Status Endpoint]]
 pub async fn queue_handler(State(state): State<AppState>) -> Json<QueueResponse> {
     let snapshot = state.scheduler.queue_snapshot();
     Json(QueueResponse {

@@ -25,6 +25,7 @@ pub fn record_force_admit(metrics: &Metrics, flow: &Flow, wait: Duration) {
 /// Check if a flow is currently starved (enqueued for longer than the timeout).
 ///
 /// Returns `Some(wait_duration)` if starved, `None` otherwise.
+// @lat: [[scheduler_policies#Starvation Protection]]
 pub fn is_starved(flow: &Flow, timeout: Duration) -> Option<Duration> {
     let enqueued_at = flow.enqueued_at.read().unwrap();
     if let Some(queued_at) = *enqueued_at {

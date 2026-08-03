@@ -12,6 +12,7 @@ use dashmap::DashMap;
 /// Internally a `String`, but `FlowId` is a distinct type to prevent
 /// accidental misuse (e.g. passing a raw string where a flow is expected).
 #[derive(Clone, PartialEq, Eq, Hash)]
+// @lat: [[flow#Flow Identifier Contract]]
 pub struct FlowId(String);
 
 impl FlowId {
@@ -151,6 +152,7 @@ pub struct QueueSnapshot {
 /// Backed by a `DashMap<FlowId, Arc<Flow>>`.  `get_or_create` returns an
 /// `Arc<Flow>` for the given ID, creating one with default weight/priority
 /// if it does not already exist.  `register` upserts with explicit values.
+// @lat: [[flow#Flow Registry and State]]
 pub struct FlowRegistry {
     flows: DashMap<FlowId, Arc<Flow>>,
     default_weight: f64,

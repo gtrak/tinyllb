@@ -3,6 +3,7 @@ use axum::response::{IntoResponse, Response};
 use std::fmt;
 use std::time::Duration;
 
+// @lat: [[gateway#Proxy Error Model]]
 /// Errors that can occur while proxying requests to the backend.
 pub enum ProxyError {
     /// The backend returned an HTTP error (4xx/5xx). Contains status, headers, body.

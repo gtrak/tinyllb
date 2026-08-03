@@ -83,6 +83,7 @@ enum SchedulerImpl {
 ///
 /// Wraps a shared `KvPolicy` gate that runs before the flow scheduler,
 /// enabling KV-cache-aware admission decisions.
+// @lat: [[scheduler#Scheduler Facade and Policy Selection]]
 pub struct Scheduler {
     /// The underlying scheduling algorithm.
     inner: SchedulerImpl,

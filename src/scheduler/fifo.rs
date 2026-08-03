@@ -151,6 +151,7 @@ pub struct QueueTicket {
 ///   clock from entry to acquire). Instantaneous grants observe ~0.
 /// - `llm_active_flows`: +1 inside `QueueTicket` on permit acquire,
 ///   -1 when the ticket is dropped.
+// @lat: [[scheduler#FIFO Queueing Discipline]]
 pub struct FifoScheduler {
     /// Semaphore limiting concurrent active flows.
     semaphore: Arc<tokio::sync::Semaphore>,

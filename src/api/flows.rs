@@ -32,6 +32,7 @@ pub struct RegisterFlowResponse {
 /// Upserts a flow into the registry with explicit weight/priority.
 /// Returns `201 Created` for new flows, `200 OK` for updates.
 /// Returns `400 Bad Request` if validation fails.
+// @lat: [[api#Flow Registration Endpoint]]
 pub async fn register_handler(
     State(state): State<AppState>,
     Json(req): Json<RegisterFlowRequest>,

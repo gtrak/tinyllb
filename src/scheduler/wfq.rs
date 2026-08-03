@@ -69,6 +69,7 @@ struct SharedState {
 }
 
 /// WFQ scheduler with per-flow weighted fair queuing.
+// @lat: [[scheduler#Weighted Fair Queueing Discipline]]
 pub struct WfqScheduler {
     /// Shared state, cloned as Arc for the admission loop and ticket closures.
     state: Arc<SharedState>,

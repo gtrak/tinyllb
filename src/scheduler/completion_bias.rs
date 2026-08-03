@@ -26,6 +26,7 @@ use crate::scheduler::flow_progress::FlowProgressTracker;
 const PREDICTIVE_ADMIT_THRESHOLD: f64 = 0.9;
 
 /// Pre-admission gate that enforces completion bias.
+// @lat: [[scheduler_policies#Completion Bias Gate]]
 pub struct CompletionBiasGate {
     /// Whether completion bias is enabled.
     enabled: bool,

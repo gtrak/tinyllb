@@ -9,6 +9,7 @@ use crate::gateway::AppState;
 ///
 /// Returns `200 OK` with `text/plain; version=0.0.4` per the OpenMetrics
 /// specification.
+// @lat: [[metrics#Prometheus Export Endpoint]]
 pub async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
     let encoder = TextEncoder::new();
     let metric_families = state.metrics.registry.gather();
