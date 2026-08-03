@@ -23,3 +23,17 @@ priorities:
 
 server:
   bind: "0.0.0.0:8080"
+  tps_window_secs: 10
+
+context_policy:
+  enabled: false                # set true to activate context compression
+  compress_threshold: 100000    # est. tokens to trigger compression
+  head_keep_turns: 3            # turns kept verbatim at start (prefix-cache anchor)
+  live_keep_turns: 6            # turns kept verbatim at end (recent context)
+  compress_chunk_turns: 8       # turns folded into each compressed summary
+  summary_max_tokens: 2048      # max tokens for sidecar summarization
+  store_path: "~/.local/share/llm-qdisc/transcripts.db"
+  tokenizer_path: null          # path to tokenizer.json for accurate token counts
+  sidecar_request_timeout: 60s
+  compression_retries: 3
+  prompt_template_path: null    # optional custom summarization prompt

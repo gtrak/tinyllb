@@ -90,6 +90,41 @@ fn body_wants_streaming(body: &Bytes) -> bool {
     }
 }
 
+/// Inject `stream_options.include_usage: true` into a streaming request body.
+///
+/// vLLM (and OpenAI-compatible backends) only emit a final `usage` chunk in an
+/// SSE stream when the client asks for it. Without it, the proxy never sees
+/// `completion_tokens` and undercounts streaming traffic. Forcing it here keeps
+/// token accounting correct regardless of client behavior.
+///
+/// Returns `Some` with the modified body when injection is needed, `None`
+/// otherwise (non-streaming, already requested, or unparseable body).
+fn inject_include_usage(body: &Bytes) -> Option<Bytes> {
+    let mut value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let obj = value.as_object_mut()?;
+    // Only touch streaming requests.
+    if obj.get("stream").and_then(|v| v.as_bool()) != Some(true) {
+        return None;
+    }
+    // Already requesting usage — nothing to do.
+    if obj
+        .get("stream_options")
+        .and_then(|o| o.get("include_usage"))
+        .and_then(|v| v.as_bool())
+        == Some(true)
+    {
+        return None;
+    }
+    obj.entry("stream_options")
+        .and_modify(|o| {
+            if let Some(map) = o.as_object_mut() {
+                map.insert("include_usage".to_string(), serde_json::Value::Bool(true));
+            }
+        })
+        .or_insert_with(|| serde_json::json!({ "include_usage": true }));
+    Some(serde_json::to_vec(&value).ok()?.into())
+}
+
 /// Extract `max_tokens` from the request body for WFQ work unit tracking.
 /// Falls back to a default of 1024 if `max_tokens` is absent or unparseable.
 fn extract_max_tokens(body: &Bytes) -> f64 {
@@ -228,6 +263,20 @@ pub async fn proxy_handler(
     // Build the backend URL, preserving the query string.
     let backend_url = build_backend_url(&state.backend_url, &original_path, query.as_deref())?;
 
+    // Force `stream_options.include_usage` on streaming requests so the
+    // backend always reports a final usage chunk (token accounting depends on
+    // it). Only forwarded requests are modified; the client-facing body is
+    // unaffected. When modified, the forwarded Content-Length must be dropped
+    // (reqwest recomputes it from the new body).
+    let mut headers = headers;
+    let mut builder = state.client.request(method, backend_url);
+    if let Some(injected) = inject_include_usage(&body_bytes) {
+        headers.remove(axum::http::header::CONTENT_LENGTH);
+        builder = builder.body(injected);
+    } else {
+        builder = builder.body(body_bytes);
+    }
+
     // Admit through the scheduler: blocks until a slot is available,
     // returns a RAII ticket that releases the slot on drop.
     // Under backpressure, this may reject with 429.
@@ -270,8 +319,6 @@ pub async fn proxy_handler(
     );
 
     // Build and send the request to the backend, passing raw bytes (byte-preserving).
-    let mut builder = state.client.request(method, backend_url).body(body_bytes);
-
     // Apply filtered headers.
     for (name, value) in headers.iter() {
         builder = builder.header(name, value);
@@ -437,4 +484,51 @@ pub async fn proxy_handler(
         axum::http::HeaderValue::from_str(&request_id).expect("valid UUID header value"),
     );
     Ok(resp)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn inject(body: &str) -> Option<String> {
+        inject_include_usage(&Bytes::from(body.to_string()))
+            .map(|b| String::from_utf8(b.to_vec()).unwrap())
+    }
+
+    #[test]
+    fn streaming_without_options_gets_include_usage() {
+        let out = inject(r#"{"model":"local","stream":true,"max_tokens":10}"#).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["stream_options"]["include_usage"], true);
+        assert_eq!(v["stream"], true);
+        assert_eq!(v["max_tokens"], 10);
+    }
+
+    #[test]
+    fn streaming_with_include_usage_preserved() {
+        let body = r#"{"model":"local","stream":true,"stream_options":{"include_usage":true}}"#;
+        assert!(inject(body).is_none(), "no re-encode when already set");
+    }
+
+    #[test]
+    fn streaming_merges_other_stream_options() {
+        let body =
+            r#"{"model":"local","stream":true,"stream_options":{"chunk":{"some":"opt"}}}"#;
+        let out = inject(body).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["stream_options"]["include_usage"], true);
+        assert_eq!(v["stream_options"]["chunk"]["some"], "opt");
+    }
+
+    #[test]
+    fn non_streaming_untouched() {
+        let body = r#"{"model":"local","stream":false,"max_tokens":10}"#;
+        assert!(inject(body).is_none(), "non-streaming bodies must pass through");
+    }
+
+    #[test]
+    fn unparseable_body_untouched() {
+        assert!(inject("not json").is_none());
+        assert!(inject("").is_none());
+    }
 }

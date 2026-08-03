@@ -26,12 +26,16 @@ pub fn create_router(state: gateway::AppState) -> Router {
 }
 
 /// Spawn a background task that periodically recomputes
-/// `llm_tokens_per_second` from the counter's rate window.
-fn spawn_token_rate_task(metrics: Arc<llm_qdisc_proxy::metrics::Metrics>) {
+/// `llm_tokens_per_second` as a rolling average of the counter's per-second
+/// deltas over `window_secs`. This smooths the lumpy updates that occur when
+/// tokens are credited in a batch at request completion.
+pub fn spawn_token_rate_task(metrics: &Arc<llm_qdisc_proxy::metrics::Metrics>, window_secs: u64) {
     let tokens_total = metrics.tokens_generated_total.clone();
     let tokens_per_second = metrics.tokens_per_second.clone();
+    let window_secs = window_secs.max(1);
 
     tokio::spawn(async move {
+        let mut samples: Vec<f64> = Vec::with_capacity(window_secs as usize);
         let mut previous_count: f64 = 0.0;
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -41,8 +45,14 @@ fn spawn_token_rate_task(metrics: Arc<llm_qdisc_proxy::metrics::Metrics>) {
             } else {
                 0.0
             };
-            tokens_per_second.set(delta);
             previous_count = current_count;
+
+            samples.push(delta);
+            if samples.len() > window_secs as usize {
+                samples.remove(0);
+            }
+            let sum: f64 = samples.iter().sum();
+            tokens_per_second.set(sum / samples.len() as f64);
         }
     });
 }
@@ -117,8 +127,8 @@ async fn main() {
 
     let app = create_router(state);
 
-    // Spawn background task for tokens-per-second gauge.
-    spawn_token_rate_task(metrics);
+    // Spawn background task for tokens-per-second gauge (rolling average).
+    spawn_token_rate_task(&metrics, cfg.server.tps_window_secs);
 
     tracing::info!("listening on {addr}");
 

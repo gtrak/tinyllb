@@ -30,6 +30,9 @@ pub struct Config {
     /// KV-cache-aware admission policy.  Defaults to `enabled: false`.
     #[serde(default)]
     pub kv_policy: KvPolicyConfig,
+    /// Context-compression policy.  Defaults to `enabled: false`.
+    #[serde(default)]
+    pub context_policy: ContextPolicy,
 }
 
 /// Backend LLM service.
@@ -87,6 +90,97 @@ impl Default for KvPolicyConfig {
             enabled: false,
             reject_threshold: Self::default_reject_threshold(),
             delay_threshold: Self::default_delay_threshold(),
+        }
+    }
+}
+
+/// Context-compression policy configuration.
+///
+/// When enabled, the proxy compresses conversation context by summarizing
+/// older turns via a sidecar and persists transcripts to a SQLite store.
+/// Defaults to `enabled: false` so behavior is unchanged unless explicitly
+/// configured.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ContextPolicy {
+    #[serde(default = "ContextPolicy::default_enabled")]
+    pub enabled: bool,
+    #[serde(default = "ContextPolicy::default_compress_threshold")]
+    pub compress_threshold: usize,
+    #[serde(default = "ContextPolicy::default_head_keep_turns")]
+    pub head_keep_turns: usize,
+    #[serde(default = "ContextPolicy::default_live_keep_turns")]
+    pub live_keep_turns: usize,
+    #[serde(default = "ContextPolicy::default_compress_chunk_turns")]
+    pub compress_chunk_turns: usize,
+    #[serde(default = "ContextPolicy::default_summary_max_tokens")]
+    pub summary_max_tokens: usize,
+    #[serde(default = "ContextPolicy::default_store_path")]
+    pub store_path: String,
+    #[serde(default)]
+    pub tokenizer_path: Option<String>,
+    #[serde(
+        default = "ContextPolicy::default_sidecar_request_timeout",
+        with = "loader::humantime_serde"
+    )]
+    pub sidecar_request_timeout: Duration,
+    #[serde(default = "ContextPolicy::default_compression_retries")]
+    pub compression_retries: u32,
+    #[serde(default)]
+    pub prompt_template_path: Option<String>,
+}
+
+impl ContextPolicy {
+    fn default_enabled() -> bool {
+        false
+    }
+
+    fn default_compress_threshold() -> usize {
+        100_000
+    }
+
+    fn default_head_keep_turns() -> usize {
+        3
+    }
+
+    fn default_live_keep_turns() -> usize {
+        6
+    }
+
+    fn default_compress_chunk_turns() -> usize {
+        8
+    }
+
+    fn default_summary_max_tokens() -> usize {
+        2048
+    }
+
+    fn default_store_path() -> String {
+        "~/.local/share/llm-qdisc/transcripts.db".to_string()
+    }
+
+    fn default_sidecar_request_timeout() -> Duration {
+        Duration::from_secs(60)
+    }
+
+    fn default_compression_retries() -> u32 {
+        3
+    }
+}
+
+impl Default for ContextPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            compress_threshold: Self::default_compress_threshold(),
+            head_keep_turns: Self::default_head_keep_turns(),
+            live_keep_turns: Self::default_live_keep_turns(),
+            compress_chunk_turns: Self::default_compress_chunk_turns(),
+            summary_max_tokens: Self::default_summary_max_tokens(),
+            store_path: Self::default_store_path(),
+            tokenizer_path: None,
+            sidecar_request_timeout: Self::default_sidecar_request_timeout(),
+            compression_retries: Self::default_compression_retries(),
+            prompt_template_path: None,
         }
     }
 }
@@ -320,11 +414,18 @@ impl Default for Metrics {
 pub struct Server {
     #[serde(default = "Server::default_bind")]
     pub bind: SocketAddr,
+    /// Rolling window (seconds) used to smooth `llm_tokens_per_second`.
+    #[serde(default = "Server::default_tps_window_secs")]
+    pub tps_window_secs: u64,
 }
 
 impl Server {
     fn default_bind() -> SocketAddr {
         "0.0.0.0:8080".parse().unwrap()
+    }
+
+    fn default_tps_window_secs() -> u64 {
+        10
     }
 }
 
@@ -332,6 +433,7 @@ impl Default for Server {
     fn default() -> Self {
         Self {
             bind: Self::default_bind(),
+            tps_window_secs: Self::default_tps_window_secs(),
         }
     }
 }
