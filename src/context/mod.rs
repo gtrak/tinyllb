@@ -31,12 +31,15 @@ pub struct ContextState {
     flow_locks: dashmap::DashMap<String, Arc<Mutex<()>>>,
     pub compression_tx: Option<mpsc::Sender<CompressionJob>>,
     pub prompt_builder: Arc<crate::context::prompt::PromptBuilder>,
+    /// Shared metrics handle for instrumentation.
+    pub metrics: Arc<crate::metrics::Metrics>,
 }
 
 impl ContextState {
     pub async fn new(
         config: ContextPolicy,
         compression_tx: mpsc::Sender<CompressionJob>,
+        metrics: Arc<crate::metrics::Metrics>,
     ) -> anyhow::Result<Self> {
         // Create parent directory for the DB file if it doesn't exist.
         if let Some(parent) = std::path::Path::new(&config.store_path).parent() {
@@ -55,6 +58,7 @@ impl ContextState {
             flow_locks: dashmap::DashMap::new(),
             compression_tx: Some(compression_tx),
             prompt_builder,
+            metrics,
         })
     }
 

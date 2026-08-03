@@ -121,7 +121,7 @@ async fn main() {
     let context_state: Option<Arc<llm_qdisc_proxy::context::ContextState>> = if cfg.context_policy.enabled {
         match async {
             let (tx, rx) = tokio::sync::mpsc::channel::<llm_qdisc_proxy::context::CompressionJob>(64);
-            let state = Arc::new(llm_qdisc_proxy::context::ContextState::new(cfg.context_policy.clone(), tx).await?);
+            let state = Arc::new(llm_qdisc_proxy::context::ContextState::new(cfg.context_policy.clone(), tx, metrics.clone()).await?);
             let n = state.find_flows_needing_compression().await?;
             if n > 0 { tracing::info!(n, "enqueued compression jobs for over-threshold flows at startup"); }
             // Spawn the compression worker (consumes jobs from the channel).

@@ -271,6 +271,18 @@ async fn rewrite_messages(
         "context compression applied"
     );
 
+    // Update context gauges. Use "ephemeral" label for ephemeral flows.
+    let flow_label =
+        if flow_id.starts_with("ephemeral-") { "ephemeral" } else { flow_id };
+    ctx.metrics
+        .context_estimated_tokens
+        .with_label_values(&[flow_label])
+        .set(result.total_est_tokens as f64);
+    ctx.metrics
+        .context_raw_estimated_tokens
+        .with_label_values(&[flow_label])
+        .set(result.total_raw_est_tokens as f64);
+
     // Trigger compression if needed.
     if result.needs_compression {
         if let Some((start, end)) = result.compress_turn_range {
@@ -661,7 +673,7 @@ mod tests {
             ..Default::default()
         };
         (
-            crate::context::ContextState::new(policy, tx)
+            crate::context::ContextState::new(policy, tx, std::sync::Arc::new(crate::metrics::Metrics::new()))
                 .await
                 .unwrap(),
             rx,

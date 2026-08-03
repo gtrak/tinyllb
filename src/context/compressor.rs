@@ -47,12 +47,17 @@ impl CompressionWorker {
     pub async fn run(mut self) {
         tracing::info!("context compression worker started");
         while let Some(job) = self.rx.recv().await {
+            // Record queue depth before processing each job.
+            self.ctx.metrics.context_compression_queue_depth
+                .set(self.rx.len() as f64);
+
             if let Err(e) = self.process_job(&job).await {
                 tracing::warn!(
                     flow_id = %job.flow_id,
                     error = %e,
                     "compression job failed"
                 );
+                self.ctx.metrics.context_compression_errors_total.inc();
             }
         }
         tracing::info!("context compression worker stopped");
@@ -118,6 +123,9 @@ impl CompressionWorker {
             .ctx
             .prompt_builder
             .build(&messages_to_compress, turn_start, turn_end);
+
+        // Time the sidecar call.
+        let sidecar_start = std::time::Instant::now();
 
         // Call the sidecar (direct to vLLM backend).
         let summary_text = self
@@ -196,6 +204,36 @@ impl CompressionWorker {
             summary_tokens,
             "compression job completed"
         );
+
+        // Record compression metrics.
+        self.ctx.metrics.context_compression_events_total.inc();
+        let tokens_saved = raw_tokens.saturating_sub(summary_tokens);
+        self.ctx
+            .metrics
+            .context_compression_tokens_saved_total
+            .inc_by(tokens_saved as u64 as f64);
+        self.ctx
+            .metrics
+            .context_compression_sidecar_latency
+            .observe(sidecar_start.elapsed().as_secs_f64());
+        self.ctx
+            .metrics
+            .context_compression_turns_per_event
+            .observe((turn_end - turn_start) as f64);
+
+        let flow_label =
+            if job.flow_id.starts_with("ephemeral-") { "ephemeral" } else { job.flow_id.as_str() };
+        self.ctx
+            .metrics
+            .context_compressed_segments
+            .with_label_values(&[flow_label])
+            .set(meta.compressed_count as f64);
+        self.ctx
+            .metrics
+            .context_estimated_tokens
+            .with_label_values(&[flow_label])
+            .set(meta.total_est_tokens as f64);
+
         Ok(())
     }
 
@@ -370,7 +408,8 @@ mod tests {
         config: ContextPolicy,
     ) -> (ContextState, mpsc::Receiver<CompressionJob>) {
         let (tx, rx) = mpsc::channel::<CompressionJob>(16);
-        let state = ContextState::new(config, tx).await.expect("new context state");
+        let metrics = Arc::new(crate::metrics::Metrics::new());
+        let state = ContextState::new(config, tx, metrics).await.expect("new context state");
         (state, rx)
     }
 
