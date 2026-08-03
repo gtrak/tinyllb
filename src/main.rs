@@ -121,19 +121,20 @@ async fn main() {
     let context_state: Option<Arc<llm_qdisc_proxy::context::ContextState>> = if cfg.context_policy.enabled {
         match async {
             let (tx, rx) = tokio::sync::mpsc::channel::<llm_qdisc_proxy::context::CompressionJob>(64);
-            let state = llm_qdisc_proxy::context::ContextState::new(cfg.context_policy.clone(), tx).await?;
+            let state = Arc::new(llm_qdisc_proxy::context::ContextState::new(cfg.context_policy.clone(), tx).await?);
             let n = state.find_flows_needing_compression().await?;
             if n > 0 { tracing::info!(n, "enqueued compression jobs for over-threshold flows at startup"); }
-            // Hold rx for now — the worker (issue 09) will consume it. Dropping rx
-            // would close the channel; keep it alive by spawning a no-op task.
-            tokio::spawn(async move {
-                // Placeholder consumer: drains and logs until issue 09 adds the real worker.
-                let mut rx = rx;
-                while let Some(job) = rx.recv().await {
-                    tracing::debug!(flow_id = %job.flow_id, "dropping startup compression job (worker not yet implemented)");
-                }
-            });
-            anyhow::Ok(Some(Arc::new(state)))
+            // Spawn the compression worker (consumes jobs from the channel).
+            // Sidecar requests go directly to the vLLM backend (not through the
+            // proxy) to avoid self-referential HTTP.
+            let worker = llm_qdisc_proxy::context::compressor::CompressionWorker::new(
+                rx,
+                Arc::clone(&state),
+                cfg.backend.url.clone(),
+                client.clone(),
+            );
+            tokio::spawn(async move { worker.run().await });
+            anyhow::Ok(Some(state))
         }.await {
             Ok(s) => s,
             Err(e) => {

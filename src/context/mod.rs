@@ -1,3 +1,4 @@
+pub mod compressor;
 pub mod estimator;
 pub mod prompt;
 pub mod reconcile;
@@ -28,7 +29,8 @@ pub struct ContextState {
     pub estimator: Arc<TokenEstimator>,
     pub config: ContextPolicy,
     flow_locks: dashmap::DashMap<String, Arc<Mutex<()>>>,
-    pub compression_tx: mpsc::Sender<CompressionJob>,
+    pub compression_tx: Option<mpsc::Sender<CompressionJob>>,
+    pub prompt_builder: Arc<crate::context::prompt::PromptBuilder>,
 }
 
 impl ContextState {
@@ -44,12 +46,15 @@ impl ContextState {
         }
         let store = Arc::new(crate::context::store::SqliteStore::open(&config.store_path).await?);
         let estimator = Arc::new(TokenEstimator::new(config.tokenizer_path.as_deref()));
+        let prompt_builder =
+            Arc::new(crate::context::prompt::PromptBuilder::new(&config));
         Ok(Self {
             store,
             estimator,
             config,
             flow_locks: dashmap::DashMap::new(),
-            compression_tx,
+            compression_tx: Some(compression_tx),
+            prompt_builder,
         })
     }
 
@@ -75,7 +80,10 @@ impl ContextState {
         if !self.config.enabled {
             return Ok(());
         }
-        match self.compression_tx.try_send(job) {
+        let tx = self.compression_tx.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("compression channel closed")
+        })?;
+        match tx.try_send(job) {
             Ok(()) => Ok(()),
             Err(mpsc::error::TrySendError::Full(_)) => {
                 tracing::warn!("compression channel full, dropping job (will retry on next request)");
@@ -85,6 +93,13 @@ impl ContextState {
                 Err(anyhow::anyhow!("compression channel closed"))
             }
         }
+    }
+
+    /// Close the compression channel by dropping the sender.
+    /// After calling this, the worker will exit once it processes remaining jobs.
+    #[allow(dead_code)]
+    pub(crate) fn close_compression_channel(&mut self) {
+        self.compression_tx = None;
     }
 
     /// At startup, enqueue compression jobs for all flows whose estimated
