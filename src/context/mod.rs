@@ -1,4 +1,5 @@
 pub mod estimator;
+pub mod prompt;
 pub mod reconcile;
 pub mod segment;
 pub mod store;
