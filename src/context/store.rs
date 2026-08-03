@@ -76,6 +76,9 @@ pub trait TranscriptStore: Send + Sync {
 
     /// Delete all segments and metadata for a flow.
     async fn delete_transcript(&self, flow_id: &str) -> anyhow::Result<()>;
+
+    /// List metadata for all flows, ordered by flow_id.
+    async fn list_all_meta(&self) -> anyhow::Result<Vec<TranscriptMeta>>;
 }
 
 /// SQLite-backed implementation of `TranscriptStore`.
@@ -383,6 +386,33 @@ impl TranscriptStore for SqliteStore {
 
         Ok(())
     }
+
+    async fn list_all_meta(&self) -> anyhow::Result<Vec<TranscriptMeta>> {
+        let rows = sqlx::query(
+            "SELECT flow_id, head_turns, live_turns, compressed_count, \
+             last_compressed_turn, total_est_tokens, total_raw_est_tokens, updated_at \
+             FROM transcript_meta ORDER BY flow_id"
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to list all transcript meta")?;
+
+        let metas: Vec<TranscriptMeta> = rows
+            .iter()
+            .map(|r| TranscriptMeta {
+                flow_id: r.get(0),
+                head_turns: r.get(1),
+                live_turns: r.get(2),
+                compressed_count: r.get(3),
+                last_compressed_turn: r.get(4),
+                total_est_tokens: r.get(5),
+                total_raw_est_tokens: r.get(6),
+                updated_at: r.get(7),
+            })
+            .collect();
+
+        Ok(metas)
+    }
 }
 
 #[cfg(test)]
@@ -637,5 +667,66 @@ mod tests {
         assert_eq!(fetched2.head_turns, 10);
         assert_eq!(fetched2.total_est_tokens, 1000);
         assert_eq!(fetched2.updated_at, "2025-06-01T00:00:00Z");
+    }
+
+    #[tokio::test]
+    async fn test_list_all_meta() {
+        let store = new_store().await;
+
+        // Insert 3 flows with distinct metadata.
+        store.upsert_meta(&TranscriptMeta {
+            flow_id: "alpha".to_string(),
+            head_turns: 2,
+            live_turns: 3,
+            compressed_count: 1,
+            last_compressed_turn: 5,
+            total_est_tokens: 300,
+            total_raw_est_tokens: 500,
+            updated_at: "2025-01-01T00:00:00Z".to_string(),
+        })
+        .await
+        .expect("upsert alpha");
+
+        store.upsert_meta(&TranscriptMeta {
+            flow_id: "beta".to_string(),
+            head_turns: 4,
+            live_turns: 5,
+            compressed_count: 2,
+            last_compressed_turn: 10,
+            total_est_tokens: 800,
+            total_raw_est_tokens: 1200,
+            updated_at: "2025-02-01T00:00:00Z".to_string(),
+        })
+        .await
+        .expect("upsert beta");
+
+        store.upsert_meta(&TranscriptMeta {
+            flow_id: "gamma".to_string(),
+            head_turns: 1,
+            live_turns: 2,
+            compressed_count: 0,
+            last_compressed_turn: 0,
+            total_est_tokens: 150,
+            total_raw_est_tokens: 150,
+            updated_at: "2025-03-01T00:00:00Z".to_string(),
+        })
+        .await
+        .expect("upsert gamma");
+
+        let metas = store.list_all_meta().await.expect("list all meta");
+        assert_eq!(metas.len(), 3);
+
+        // Should be ordered by flow_id alphabetically.
+        assert_eq!(metas[0].flow_id, "alpha");
+        assert_eq!(metas[0].total_est_tokens, 300);
+        assert_eq!(metas[0].total_raw_est_tokens, 500);
+
+        assert_eq!(metas[1].flow_id, "beta");
+        assert_eq!(metas[1].total_est_tokens, 800);
+        assert_eq!(metas[1].compressed_count, 2);
+
+        assert_eq!(metas[2].flow_id, "gamma");
+        assert_eq!(metas[2].total_est_tokens, 150);
+        assert_eq!(metas[2].live_turns, 2);
     }
 }
