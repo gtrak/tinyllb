@@ -7,3 +7,5 @@ pub mod gateway;
 pub mod metrics;
 pub mod scheduler;
 pub mod telemetry;
+
+pub use context::estimator::TokenEstimator;
