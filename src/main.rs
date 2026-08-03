@@ -10,6 +10,7 @@ async fn healthz() -> &'static str {
     "ok"
 }
 
+// @lat: [[app#Application Composition and Startup]]
 pub fn create_router(state: gateway::AppState) -> Router {
     let health_router = Router::new().route("/healthz", get(healthz));
     let metrics_router = Router::new()
@@ -29,6 +30,7 @@ pub fn create_router(state: gateway::AppState) -> Router {
 /// `llm_tokens_per_second` as a rolling average of the counter's per-second
 /// deltas over `window_secs`. This smooths the lumpy updates that occur when
 /// tokens are credited in a batch at request completion.
+// @lat: [[app#Token Rate Gauge Task]]
 pub fn spawn_token_rate_task(metrics: &Arc<llm_qdisc_proxy::metrics::Metrics>, window_secs: u64) {
     let tokens_total = metrics.tokens_generated_total.clone();
     let tokens_per_second = metrics.tokens_per_second.clone();

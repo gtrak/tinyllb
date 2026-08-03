@@ -13,6 +13,7 @@ use crate::flow::FlowRegistry;
 use crate::metrics::Metrics;
 use crate::scheduler::Scheduler;
 
+// @lat: [[gateway#Gateway Application State]]
 /// Application state shared across all request handlers.
 #[derive(Clone)]
 pub struct AppState {
@@ -27,6 +28,7 @@ pub struct AppState {
     pub request_timeout: Option<std::time::Duration>,
 }
 
+// @lat: [[gateway#Reverse Proxy Request Handling]]
 /// Create the gateway router that handles OpenAI-compatible routes.
 ///
 /// Mounts:
