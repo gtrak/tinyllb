@@ -240,6 +240,7 @@ fn build_proxy_with_fifo(backend_url: &str) -> (Router, Arc<metrics::Metrics>) {
         flow_registry,
         backpressure: Backpressure::default(),
         request_timeout: None,
+        context: None,
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
@@ -284,6 +285,7 @@ fn build_proxy_with_drr(backend_url: &str) -> (Router, Arc<metrics::Metrics>, Ar
         flow_registry,
         backpressure: Backpressure::default(),
         request_timeout: None,
+        context: None,
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
@@ -749,6 +751,7 @@ fn build_proxy_with_drr_and_timeout(
         flow_registry,
         backpressure: Backpressure::default(),
         request_timeout: Some(timeout),
+        context: None,
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));

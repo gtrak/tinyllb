@@ -45,6 +45,7 @@ fn build_flow_test_app_with_handles(
         flow_registry: flow_registry.clone(),
         backpressure: llm_qdisc_proxy::config::Backpressure::default(),
         request_timeout: None,
+        context: None,
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));

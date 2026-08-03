@@ -39,6 +39,7 @@ fn build_test_app(backend_url: &str) -> (Router, Arc<llm_qdisc_proxy::metrics::M
         flow_registry,
         backpressure: llm_qdisc_proxy::config::Backpressure::default(),
         request_timeout: None,
+        context: None,
     };
 
     // Touch the queue_depth GaugeVec with an "ephemeral" label so it appears
@@ -365,6 +366,7 @@ async fn test_streaming_tokens_count_completion_not_total() {
         flow_registry,
         backpressure: llm_qdisc_proxy::config::Backpressure::default(),
         request_timeout: None,
+        context: None,
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
@@ -438,6 +440,7 @@ async fn test_active_gauge_during_streaming() {
         flow_registry,
         backpressure: llm_qdisc_proxy::config::Backpressure::default(),
         request_timeout: None,
+        context: None,
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
@@ -520,6 +523,7 @@ async fn test_nonstream_tokens_count_completion_not_total() {
         flow_registry,
         backpressure: llm_qdisc_proxy::config::Backpressure::default(),
         request_timeout: None,
+        context: None,
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
@@ -593,6 +597,7 @@ async fn test_active_gauge_during_nonstreaming() {
         flow_registry,
         backpressure: llm_qdisc_proxy::config::Backpressure::default(),
         request_timeout: None,
+        context: None,
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));

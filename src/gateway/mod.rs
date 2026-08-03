@@ -9,6 +9,7 @@ use url::Url;
 
 use self::proxy::proxy_handler;
 use crate::config::Backpressure;
+use crate::context::ContextState;
 use crate::flow::FlowRegistry;
 use crate::metrics::Metrics;
 use crate::scheduler::Scheduler;
@@ -26,6 +27,7 @@ pub struct AppState {
     /// Optional request-level timeout. When set, cancels forwarded requests
     /// (both streaming and non-streaming) that exceed this duration.
     pub request_timeout: Option<std::time::Duration>,
+    pub context: Option<Arc<ContextState>>,
 }
 
 // @lat: [[gateway#Reverse Proxy Request Handling]]

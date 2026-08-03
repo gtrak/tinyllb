@@ -102,6 +102,7 @@ fn build_proxy_app(
         flow_registry,
         backpressure: Backpressure::default(),
         request_timeout: None,
+        context: None,
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));

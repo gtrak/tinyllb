@@ -473,6 +473,7 @@ async fn test_wfq_e2e_weight_ratio() {
         flow_registry,
         backpressure: llm_qdisc_proxy::config::Backpressure::default(),
         request_timeout: None,
+        context: None,
     };
 
     let health_router =

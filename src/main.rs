@@ -117,6 +117,34 @@ async fn main() {
         monitor.clone(),
     );
 
+    // Initialize context-compression state when enabled.
+    let context_state: Option<Arc<llm_qdisc_proxy::context::ContextState>> = if cfg.context_policy.enabled {
+        match async {
+            let (tx, rx) = tokio::sync::mpsc::channel::<llm_qdisc_proxy::context::CompressionJob>(64);
+            let state = llm_qdisc_proxy::context::ContextState::new(cfg.context_policy.clone(), tx).await?;
+            let n = state.find_flows_needing_compression().await?;
+            if n > 0 { tracing::info!(n, "enqueued compression jobs for over-threshold flows at startup"); }
+            // Hold rx for now — the worker (issue 09) will consume it. Dropping rx
+            // would close the channel; keep it alive by spawning a no-op task.
+            tokio::spawn(async move {
+                // Placeholder consumer: drains and logs until issue 09 adds the real worker.
+                let mut rx = rx;
+                while let Some(job) = rx.recv().await {
+                    tracing::debug!(flow_id = %job.flow_id, "dropping startup compression job (worker not yet implemented)");
+                }
+            });
+            anyhow::Ok(Some(Arc::new(state)))
+        }.await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!(error = %e, "failed to initialize context state, continuing without compression");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let state = gateway::AppState {
         client,
         backend_url: Arc::new(cfg.backend.url),
@@ -125,6 +153,7 @@ async fn main() {
         flow_registry,
         backpressure: cfg.backpressure,
         request_timeout: cfg.request_timeout,
+        context: context_state,
     };
 
     let app = create_router(state);
@@ -170,6 +199,7 @@ mod tests {
             flow_registry,
             backpressure: config::Backpressure::default(),
             request_timeout: None,
+            context: None,
         };
         let app = create_router(state);
         let response = app

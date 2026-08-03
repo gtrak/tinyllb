@@ -167,6 +167,7 @@ fn build_e2e_proxy(
         flow_registry,
         backpressure,
         request_timeout: None,
+        context: None,
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));

@@ -205,6 +205,7 @@ fn build_drr_proxy(backend_url: &str) -> (Router, Arc<metrics::Metrics>, Arc<Sch
         flow_registry,
         backpressure: Backpressure::default(),
         request_timeout: None,
+        context: None,
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
