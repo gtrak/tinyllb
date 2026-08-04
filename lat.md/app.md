@@ -102,7 +102,7 @@ This concept covers process initialization and router composition only; it delib
 The composition exposes a router-construction surface, a port-resolution surface governed by environment-variable gates, and observable initialization ordering.
 
 - Router construction accepts fully wired application state and returns a composed HTTP router ready to serve requests.
-- Port resolution uses a gated precedence: if `LLM_QDISC__SERVER__BIND` is set, the configured bind address is used unconditionally; otherwise `PORT` acts as an override parsed as `0.0.0.0:<port>`; absent both, the configured bind address is used.
+- Port resolution uses a gated precedence: if `TINYLLB__SERVER__BIND` is set, the configured bind address is used unconditionally; otherwise `PORT` acts as an override parsed as `0.0.0.0:<port>`; absent both, the configured bind address is used.
 - The health endpoint responds with HTTP 200 and body `"ok"` regardless of internal application state.
 - Application state is shared read-only across all sub-routers except the health endpoint.
 - Telemetry is initialized before configuration loading; it is the first observable startup step.
@@ -134,7 +134,7 @@ Design decisions reflect operational requirements for a deployment-dispatcher ro
 - Always-success health endpoint enables external health probes independent of backend state.
 - Fixed sub-router ordering provides predictable routing precedence for consumers.
 - Mandatory configuration loading prevents degraded or partial startup states.
-- Gated port resolution supports both container orchestration (`PORT`) and explicit binding (`LLM_QDISC__SERVER__BIND`) without ambiguity.
+- Gated port resolution supports both container orchestration (`PORT`) and explicit binding (`TINYLLB__SERVER__BIND`) without ambiguity.
 - Telemetry-first initialization ensures all startup failures are observable.
 
 ## Related

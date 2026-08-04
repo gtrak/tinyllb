@@ -1,10 +1,10 @@
 //! Phase 3 live integration tests (issue 17).
 //!
 //! Full-stack tests against a **real vLLM backend**, gated behind
-//! `LLM_QDISC_LIVE_TESTS=1`. When the env var is not set, all tests are
+//! `TINYLLB_LIVE_TESTS=1`. When the env var is not set, all tests are
 //! `#[ignore]`d and skipped so CI stays green without a GPU backend.
 //!
-//! Backend URL from `LLM_QDISC_BACKEND_URL`, default `http://gary-agents:1234`.
+//! Backend URL from `TINYLLB_BACKEND_URL`, default `http://gary-agents:1234`.
 //!
 //! Tests:
 //! - API compatibility: proxy /v1/models returns same model list as direct.
@@ -27,11 +27,11 @@ use bytes::Bytes;
 use futures::StreamExt;
 use tower::ServiceExt;
 
-use llm_qdisc_proxy::config::{Algorithm, Backpressure, BackpressureMode, Priorities};
-use llm_qdisc_proxy::flow::FlowRegistry;
-use llm_qdisc_proxy::gateway;
-use llm_qdisc_proxy::metrics;
-use llm_qdisc_proxy::scheduler::Scheduler;
+use tinyllb::config::{Algorithm, Backpressure, BackpressureMode, Priorities};
+use tinyllb::flow::FlowRegistry;
+use tinyllb::gateway;
+use tinyllb::metrics;
+use tinyllb::scheduler::Scheduler;
 
 // ---------------------------------------------------------------------------
 // Env config
@@ -42,12 +42,12 @@ const DEFAULT_BACKEND_URL: &str = "http://gary-agents:1234";
 
 /// Read backend URL from env or use default.
 fn backend_url() -> String {
-    std::env::var("LLM_QDISC_BACKEND_URL").unwrap_or_else(|_| DEFAULT_BACKEND_URL.to_string())
+    std::env::var("TINYLLB_BACKEND_URL").unwrap_or_else(|_| DEFAULT_BACKEND_URL.to_string())
 }
 
 /// Check if live tests are enabled.
 fn live_tests_enabled() -> bool {
-    std::env::var("LLM_QDISC_LIVE_TESTS").as_deref() == Ok("1")
+    std::env::var("TINYLLB_LIVE_TESTS").as_deref() == Ok("1")
 }
 
 // ---------------------------------------------------------------------------
@@ -81,7 +81,7 @@ fn build_live_proxy(
         priorities: Priorities::default(),
         request_timeout: None,
         context: None,
-        retry_policy: llm_qdisc_proxy::config::RetryPolicy::default(),
+        retry_policy: tinyllb::config::RetryPolicy::default(),
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
@@ -89,10 +89,10 @@ fn build_live_proxy(
     let metrics_router = Router::new()
         .route(
             "/metrics",
-            get(llm_qdisc_proxy::metrics::endpoint::metrics_handler),
+            get(tinyllb::metrics::endpoint::metrics_handler),
         )
         .with_state(state.clone());
-    let admin_router = llm_qdisc_proxy::api::create_router().with_state(state.clone());
+    let admin_router = tinyllb::api::create_router().with_state(state.clone());
 
     let app = Router::new()
         .merge(health_router)
@@ -147,7 +147,7 @@ async fn preflight() {
         Err(e) => {
             panic!(
                 "Preflight: cannot reach backend {} — {}. \n\
-                 Set LLM_QDISC_BACKEND_URL to point to a running vLLM. \n\
+                 Set TINYLLB_BACKEND_URL to point to a running vLLM. \n\
                  Backend was: {}",
                 url, e, url
             );
@@ -613,7 +613,7 @@ async fn test_kv_monitor_live_metrics() {
     let body = resp.text().await.expect("read metrics body");
 
     // Parse the metrics body using the known parser.
-    let result = llm_qdisc_proxy::backend::parse_snapshot(&body);
+    let result = tinyllb::backend::parse_snapshot(&body);
 
     // PROOF: the KV usage metric was actually found in the live /metrics body.
     // Without this, defaults (0.0, 1.0) satisfy the range check vacuously.

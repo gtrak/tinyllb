@@ -106,7 +106,7 @@ call before the existing backpressure gate.
   priority_live.rs`, see 06).
 - Manual verification: replay the 2026-08-03 contention pattern
   (e.g. via `hey` or `k6` with 2 slow flows + 8 fast flows) and
-  inspect `journalctl --user -u llm-qdisc-proxy` to confirm slow
+  inspect `journalctl --user -u tinyllb` to confirm slow
   flows see `priority=100` and fast flows see `priority=10` in the
   `admit` debug log lines.
 

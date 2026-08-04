@@ -8,10 +8,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use llm_qdisc_proxy::config::{Algorithm, BackpressureMode};
-use llm_qdisc_proxy::flow::{FlowId, FlowRegistry};
-use llm_qdisc_proxy::metrics;
-use llm_qdisc_proxy::scheduler::Scheduler;
+use tinyllb::config::{Algorithm, BackpressureMode};
+use tinyllb::flow::{FlowId, FlowRegistry};
+use tinyllb::metrics;
+use tinyllb::scheduler::Scheduler;
 
 /// Default work unit for tests.
 const WORK_UNIT: f64 = 1024.0;
@@ -40,12 +40,12 @@ async fn test_wfq_selects_higher_weight_flow_preferentially() {
         ));
 
         // Register flows with different weights.
-        registry.register(llm_qdisc_proxy::flow::FlowRegistration {
+        registry.register(tinyllb::flow::FlowRegistration {
             id: FlowId::new("A"),
             weight: 10.0,
             priority: 50,
         });
-        registry.register(llm_qdisc_proxy::flow::FlowRegistration {
+        registry.register(tinyllb::flow::FlowRegistration {
             id: FlowId::new("B"),
             weight: 1.0,
             priority: 50,
@@ -117,12 +117,12 @@ async fn test_wfq_fifo_tie_breaking() {
     ));
 
     // Register flows.
-    registry.register(llm_qdisc_proxy::flow::FlowRegistration {
+    registry.register(tinyllb::flow::FlowRegistration {
         id: FlowId::new("first"),
         weight: 1.0,
         priority: 50,
     });
-    registry.register(llm_qdisc_proxy::flow::FlowRegistration {
+    registry.register(tinyllb::flow::FlowRegistration {
         id: FlowId::new("second"),
         weight: 1.0,
         priority: 50,
@@ -171,12 +171,12 @@ async fn test_wfq_no_starvation() {
         ));
 
         // Register a high-weight flow and a low-weight flow.
-        registry.register(llm_qdisc_proxy::flow::FlowRegistration {
+        registry.register(tinyllb::flow::FlowRegistration {
             id: FlowId::new("high"),
             weight: 100.0,
             priority: 50,
         });
-        registry.register(llm_qdisc_proxy::flow::FlowRegistration {
+        registry.register(tinyllb::flow::FlowRegistration {
             id: FlowId::new("low"),
             weight: 1.0,
             priority: 50,
@@ -244,7 +244,7 @@ async fn test_wfq_zero_weight_flow_skipped() {
     zero_flow.set_weight(0.0);
 
     // Register a normal flow.
-    registry.register(llm_qdisc_proxy::flow::FlowRegistration {
+    registry.register(tinyllb::flow::FlowRegistration {
         id: FlowId::new("normal"),
         weight: 1.0,
         priority: 50,
@@ -306,12 +306,12 @@ async fn test_wfq_weight_distribution() {
     ));
 
     // Register flows with weights 10 and 1.
-    registry.register(llm_qdisc_proxy::flow::FlowRegistration {
+    registry.register(tinyllb::flow::FlowRegistration {
         id: FlowId::new("A"),
         weight: 10.0,
         priority: 50,
     });
-    registry.register(llm_qdisc_proxy::flow::FlowRegistration {
+    registry.register(tinyllb::flow::FlowRegistration {
         id: FlowId::new("B"),
         weight: 1.0,
         priority: 50,
@@ -384,7 +384,7 @@ async fn test_wfq_queue_snapshot() {
     );
 
     // Register flows.
-    registry.register(llm_qdisc_proxy::flow::FlowRegistration {
+    registry.register(tinyllb::flow::FlowRegistration {
         id: FlowId::new("X"),
         weight: 1.0,
         priority: 50,
@@ -443,12 +443,12 @@ async fn test_wfq_e2e_weight_ratio() {
     let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
 
     // Register flows with weights 10 and 1.
-    flow_registry.register(llm_qdisc_proxy::flow::FlowRegistration {
+    flow_registry.register(tinyllb::flow::FlowRegistration {
         id: FlowId::new("A"),
         weight: 10.0,
         priority: 50,
     });
-    flow_registry.register(llm_qdisc_proxy::flow::FlowRegistration {
+    flow_registry.register(tinyllb::flow::FlowRegistration {
         id: FlowId::new("B"),
         weight: 1.0,
         priority: 50,
@@ -465,22 +465,22 @@ async fn test_wfq_e2e_weight_ratio() {
         Duration::from_secs(1),
     );
 
-    let state = llm_qdisc_proxy::gateway::AppState {
-        client: llm_qdisc_proxy::gateway::build_client(),
+    let state = tinyllb::gateway::AppState {
+        client: tinyllb::gateway::build_client(),
         backend_url: Arc::new(url::Url::parse(&backend_url).expect("valid URL")),
         metrics: m.clone(),
         scheduler: Arc::new(scheduler),
         flow_registry,
-        backpressure: llm_qdisc_proxy::config::Backpressure::default(),
-        priorities: llm_qdisc_proxy::config::Priorities::default(),
+        backpressure: tinyllb::config::Backpressure::default(),
+        priorities: tinyllb::config::Priorities::default(),
         request_timeout: None,
         context: None,
-        retry_policy: llm_qdisc_proxy::config::RetryPolicy::default(),
+        retry_policy: tinyllb::config::RetryPolicy::default(),
     };
 
     let health_router =
         axum::Router::new().route("/healthz", axum::routing::get(|| async { "ok" }));
-    let gateway_router = llm_qdisc_proxy::gateway::create_router().with_state(state.clone());
+    let gateway_router = tinyllb::gateway::create_router().with_state(state.clone());
 
     let app = axum::Router::new()
         .merge(health_router)
@@ -583,7 +583,7 @@ async fn test_wfq_cancelled_waiter_no_active_underflow() {
         Duration::from_millis(5),
     ));
 
-    registry.register(llm_qdisc_proxy::flow::FlowRegistration {
+    registry.register(tinyllb::flow::FlowRegistration {
         id: FlowId::new("A"),
         weight: 1.0,
         priority: 50,
@@ -644,7 +644,7 @@ async fn test_wfq_blocking_abort_no_depth_leak() {
         Duration::from_secs(1),
     ));
 
-    registry.register(llm_qdisc_proxy::flow::FlowRegistration {
+    registry.register(tinyllb::flow::FlowRegistration {
         id: FlowId::new("A"),
         weight: 1.0,
         priority: 50,
@@ -727,12 +727,12 @@ async fn test_wfq_weight_ratio_completed_work() {
         ));
 
         // Flow A weight=10, Flow B weight=1.
-        registry.register(llm_qdisc_proxy::flow::FlowRegistration {
+        registry.register(tinyllb::flow::FlowRegistration {
             id: FlowId::new("A"),
             weight: 10.0,
             priority: 50,
         });
-        registry.register(llm_qdisc_proxy::flow::FlowRegistration {
+        registry.register(tinyllb::flow::FlowRegistration {
             id: FlowId::new("B"),
             weight: 1.0,
             priority: 50,
@@ -875,17 +875,17 @@ async fn test_wfq_tie_break_earlier_enqueued_wins() {
     ));
 
     // All three flows have weight 1.0 → identical ratios when service_done is 0.
-    registry.register(llm_qdisc_proxy::flow::FlowRegistration {
+    registry.register(tinyllb::flow::FlowRegistration {
         id: FlowId::new("holder"),
         weight: 1.0,
         priority: 50,
     });
-    registry.register(llm_qdisc_proxy::flow::FlowRegistration {
+    registry.register(tinyllb::flow::FlowRegistration {
         id: FlowId::new("first"),
         weight: 1.0,
         priority: 50,
     });
-    registry.register(llm_qdisc_proxy::flow::FlowRegistration {
+    registry.register(tinyllb::flow::FlowRegistration {
         id: FlowId::new("second"),
         weight: 1.0,
         priority: 50,
@@ -972,7 +972,7 @@ async fn test_wfq_sibling_cancel_does_not_kill_other() {
         Duration::from_secs(1),
     ));
 
-    registry.register(llm_qdisc_proxy::flow::FlowRegistration {
+    registry.register(tinyllb::flow::FlowRegistration {
         id: FlowId::new("A"),
         weight: 1.0,
         priority: 50,

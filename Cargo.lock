@@ -1498,37 +1498,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
-name = "llm-qdisc-proxy"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "bytes",
- "chrono",
- "clap",
- "config",
- "criterion",
- "dashmap",
- "futures",
- "http-body-util",
- "humantime",
- "prometheus",
- "reqwest",
- "serde",
- "serde_json",
- "serial_test",
- "sqlx",
- "tokenizers",
- "tokio",
- "tower",
- "tracing",
- "tracing-subscriber",
- "url",
- "uuid",
-]
-
-[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2960,6 +2929,37 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2c9d3793400a45f954c52e73d068316d76b6f4e36977e3fcebb13a2721e80237"
 dependencies = [
  "crunchy",
+]
+
+[[package]]
+name = "tinyllb"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "bytes",
+ "chrono",
+ "clap",
+ "config",
+ "criterion",
+ "dashmap",
+ "futures",
+ "http-body-util",
+ "humantime",
+ "prometheus",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "sqlx",
+ "tokenizers",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
 ]
 
 [[package]]

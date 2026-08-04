@@ -31,18 +31,18 @@ deployment story stays local-first.
 1. `Dockerfile`: builder stage uses `rust:1.x-slim`; runtime stage uses
    `debian:bookworm-slim` + the compiled binary + `config.example.yaml`.
    Final image is non-root, EXPOSE 8080, ENTRYPOINT the binary with
-   `--config /etc/llm-qdisc/config.yaml`.
+   `--config /etc/tinyllb/config.yaml`.
 2. `docker-compose.yaml` example:
    * `vllm` service using `vllm/vllm-openai:latest` with appropriate `--model`
      and GPU reservation,
-   * `proxy` service depends_on vllm, `CONFIG_PATH=/etc/llm-qdisc/config.yaml`,
+   * `proxy` service depends_on vllm, `CONFIG_PATH=/etc/tinyllb/config.yaml`,
      healthcheck hitting `/healthz`.
 3. `README.md` (wait until `03` lands so quickstart shows a real curl):
    * Quickstart: `scripts/run_local.sh` then `curl ...`,
    * Single-GPU deploy via compose,
    * Multi-GPU: example env vars for `vllm` (`--tensor-parallel-size=2`) and
      the note that the proxy sees one backend URL,
-   * Env var reference (mirror `02`'s `LLM_QDISC__*` override list),
+   * Env var reference (mirror `02`'s `TINYLLB__*` override list),
    * Link to `docs/plans/.../PHASE*-RESULTS.md` for measured throughput.
 4. `scripts/run_local.sh`: cargo run + default config + assumes vLLM at
    `http://localhost:8000`; print the curl example.
@@ -52,7 +52,7 @@ deployment story stays local-first.
 
 ## Verification
 
-* `docker build -t llm-qdisc-proxy .` succeeds; image size is reasonable
+* `docker build -t tinyllb .` succeeds; image size is reasonable
   (<50MB runtime layer) and runs as non-root.
 * `docker compose up` brings up proxy + vllm; `curl localhost:8080/v1/models`
    works after vLLM is ready.

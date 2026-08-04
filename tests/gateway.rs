@@ -157,11 +157,11 @@ impl Stream for SseStream {
 
 /// Build the proxy app pointing at the given backend URL.
 fn build_proxy_app(backend_url: &str) -> Router {
-    use llm_qdisc_proxy::config::{Algorithm, BackpressureMode};
-    use llm_qdisc_proxy::flow::FlowRegistry;
-    use llm_qdisc_proxy::gateway;
-    use llm_qdisc_proxy::metrics;
-    use llm_qdisc_proxy::scheduler;
+    use tinyllb::config::{Algorithm, BackpressureMode};
+    use tinyllb::flow::FlowRegistry;
+    use tinyllb::gateway;
+    use tinyllb::metrics;
+    use tinyllb::scheduler;
 
     let metrics = metrics::create_metrics();
     let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
@@ -181,11 +181,11 @@ fn build_proxy_app(backend_url: &str) -> Router {
         metrics: metrics.clone(),
         scheduler: std::sync::Arc::new(scheduler),
         flow_registry,
-        backpressure: llm_qdisc_proxy::config::Backpressure::default(),
-        priorities: llm_qdisc_proxy::config::Priorities::default(),
+        backpressure: tinyllb::config::Backpressure::default(),
+        priorities: tinyllb::config::Priorities::default(),
         request_timeout: None,
         context: None,
-        retry_policy: llm_qdisc_proxy::config::RetryPolicy::default(),
+        retry_policy: tinyllb::config::RetryPolicy::default(),
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
@@ -193,10 +193,10 @@ fn build_proxy_app(backend_url: &str) -> Router {
     let metrics_router = Router::new()
         .route(
             "/metrics",
-            get(llm_qdisc_proxy::metrics::endpoint::metrics_handler),
+            get(tinyllb::metrics::endpoint::metrics_handler),
         )
         .with_state(state.clone());
-    let admin_router = llm_qdisc_proxy::api::create_router().with_state(state);
+    let admin_router = tinyllb::api::create_router().with_state(state);
 
     Router::new()
         .merge(health_router)
@@ -566,10 +566,10 @@ fn build_proxy_app_with_max(
     _backend_url: &str,
     max_active_flows: u32,
 ) -> (Router, Arc<LoadTestState>) {
-    use llm_qdisc_proxy::flow::FlowRegistry;
-    use llm_qdisc_proxy::gateway;
-    use llm_qdisc_proxy::metrics;
-    use llm_qdisc_proxy::scheduler;
+    use tinyllb::flow::FlowRegistry;
+    use tinyllb::gateway;
+    use tinyllb::metrics;
+    use tinyllb::scheduler;
 
     let load_state = Arc::new(LoadTestState {
         current: AtomicU32::new(0),
@@ -596,11 +596,11 @@ fn build_proxy_app_with_max(
     let metrics = metrics::create_metrics();
     let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
     let scheduler = scheduler::Scheduler::new_with_defaults(
-        llm_qdisc_proxy::config::Algorithm::Fifo,
+        tinyllb::config::Algorithm::Fifo,
         max_active_flows,
         metrics.clone(),
         flow_registry.clone(),
-        llm_qdisc_proxy::config::BackpressureMode::Blocking,
+        tinyllb::config::BackpressureMode::Blocking,
         100,
         std::time::Duration::from_secs(10),
         std::time::Duration::from_secs(1),
@@ -611,11 +611,11 @@ fn build_proxy_app_with_max(
         metrics: metrics.clone(),
         scheduler: Arc::new(scheduler),
         flow_registry,
-        backpressure: llm_qdisc_proxy::config::Backpressure::default(),
-        priorities: llm_qdisc_proxy::config::Priorities::default(),
+        backpressure: tinyllb::config::Backpressure::default(),
+        priorities: tinyllb::config::Priorities::default(),
         request_timeout: None,
         context: None,
-        retry_policy: llm_qdisc_proxy::config::RetryPolicy::default(),
+        retry_policy: tinyllb::config::RetryPolicy::default(),
     };
 
     let _ = _backend_url; // unused; we use the actual backend URL
@@ -624,10 +624,10 @@ fn build_proxy_app_with_max(
     let metrics_router = Router::new()
         .route(
             "/metrics",
-            get(llm_qdisc_proxy::metrics::endpoint::metrics_handler),
+            get(tinyllb::metrics::endpoint::metrics_handler),
         )
         .with_state(proxy_state.clone());
-    let admin_router = llm_qdisc_proxy::api::create_router().with_state(proxy_state.clone());
+    let admin_router = tinyllb::api::create_router().with_state(proxy_state.clone());
 
     let app = Router::new()
         .merge(health_router)
@@ -709,9 +709,9 @@ async fn test_load_three_requests_max_two_concurrent() {
 /// mid-stream, and we verify that active_flows returns to 0.
 #[tokio::test]
 async fn test_client_disconnect_releases_permit() {
-    use llm_qdisc_proxy::gateway;
-    use llm_qdisc_proxy::metrics;
-    use llm_qdisc_proxy::scheduler;
+    use tinyllb::gateway;
+    use tinyllb::metrics;
+    use tinyllb::scheduler;
 
     // Build a streaming stub backend.
     let streaming_handler = |_req: Request<Body>| async {
@@ -742,13 +742,13 @@ async fn test_client_disconnect_releases_permit() {
 
     let metrics = metrics::create_metrics();
     let metrics_clone = metrics.clone();
-    let flow_registry = Arc::new(llm_qdisc_proxy::flow::FlowRegistry::new(1.0, 50));
+    let flow_registry = Arc::new(tinyllb::flow::FlowRegistry::new(1.0, 50));
     let scheduler = scheduler::Scheduler::new_with_defaults(
-        llm_qdisc_proxy::config::Algorithm::Fifo,
+        tinyllb::config::Algorithm::Fifo,
         4,
         metrics.clone(),
         flow_registry.clone(),
-        llm_qdisc_proxy::config::BackpressureMode::Blocking,
+        tinyllb::config::BackpressureMode::Blocking,
         100,
         std::time::Duration::from_secs(10),
         std::time::Duration::from_secs(1),
@@ -759,11 +759,11 @@ async fn test_client_disconnect_releases_permit() {
         metrics: metrics.clone(),
         scheduler: Arc::new(scheduler),
         flow_registry,
-        backpressure: llm_qdisc_proxy::config::Backpressure::default(),
-        priorities: llm_qdisc_proxy::config::Priorities::default(),
+        backpressure: tinyllb::config::Backpressure::default(),
+        priorities: tinyllb::config::Priorities::default(),
         request_timeout: None,
         context: None,
-        retry_policy: llm_qdisc_proxy::config::RetryPolicy::default(),
+        retry_policy: tinyllb::config::RetryPolicy::default(),
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));

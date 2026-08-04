@@ -601,7 +601,7 @@ mod tests {
     #[tokio::test]
     async fn test_persistence() {
         let tmp_dir = std::env::temp_dir();
-        let db_path = tmp_dir.join(format!("llm-qdisc-test-persist-{}.db", chrono::Utc::now().timestamp_millis()));
+        let db_path = tmp_dir.join(format!("tinyllb-test-persist-{}.db", chrono::Utc::now().timestamp_millis()));
 
         // Open, write, close.
         {

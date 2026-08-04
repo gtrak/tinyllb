@@ -169,7 +169,7 @@ one is sufficient.
 | `tests/priority_heuristic.rs` | NEW: cadence classification unit tests |
 | `tests/priority_header.rs` | NEW: header override tests |
 | `tests/priority_live.rs` | NEW: end-to-end scheduler integration (two fake flows, assert the slow one wins) |
-| `docs/plans/001-llm-qdisc-proxy/PRIORITY.md` | NEW: operator-facing doc explaining the heuristic and header |
+| `docs/plans/001-tinyllb/PRIORITY.md` | NEW: operator-facing doc explaining the heuristic and header |
 
 Out of scope (deferred):
 

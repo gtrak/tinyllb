@@ -10,10 +10,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use llm_qdisc_proxy::config::BackpressureMode;
-use llm_qdisc_proxy::flow::{FlowId, FlowRegistry};
-use llm_qdisc_proxy::metrics;
-use llm_qdisc_proxy::scheduler::FifoScheduler;
+use tinyllb::config::BackpressureMode;
+use tinyllb::flow::{FlowId, FlowRegistry};
+use tinyllb::metrics;
+use tinyllb::scheduler::FifoScheduler;
 
 /// Create a scheduler with a specific max_active_flows for tests.
 fn make_scheduler(max_active_flows: u32) -> (Arc<FifoScheduler>, Arc<metrics::Metrics>) {

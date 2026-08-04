@@ -58,7 +58,7 @@ admission time based on its recent inter-request gap pattern:
 
 ## Configuration
 
-Add this block to `~/.config/llm-qdisc/config.yaml`:
+Add this block to `~/.config/tinyllb/config.yaml`:
 
 ```yaml
 priority_policy:

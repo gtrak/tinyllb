@@ -10,11 +10,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use llm_qdisc_proxy::backend::BackendMonitor;
-use llm_qdisc_proxy::config::{Algorithm, BackpressureMode, CompletionBias, KvPolicyConfig, Priorities, PriorityPolicy};
-use llm_qdisc_proxy::flow::{FlowId, FlowRegistration, FlowRegistry};
-use llm_qdisc_proxy::metrics;
-use llm_qdisc_proxy::scheduler::Scheduler;
+use tinyllb::backend::BackendMonitor;
+use tinyllb::config::{Algorithm, BackpressureMode, CompletionBias, KvPolicyConfig, Priorities, PriorityPolicy};
+use tinyllb::flow::{FlowId, FlowRegistration, FlowRegistry};
+use tinyllb::metrics;
+use tinyllb::scheduler::Scheduler;
 
 const WORK_UNIT: f64 = 1024.0;
 

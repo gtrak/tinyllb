@@ -66,7 +66,7 @@ watch classification in real time and tune the gap thresholds.
 
 5. Verify via running upgrade:
    ```bash
-   systemctl --user restart llm-qdisc-proxy.service
+   systemctl --user restart tinyllb.service
    curl -sS http://localhost:1234/metrics | grep -E \
      'llm_flow_priority_class|llm_flow_priority_source_total|llm_flow_inter_request_seconds'
    ```

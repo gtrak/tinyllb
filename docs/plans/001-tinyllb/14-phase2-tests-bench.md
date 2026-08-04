@@ -17,7 +17,7 @@ only when these tests + benchmarks pass.
 | `benches/fairness.rs` | New: per-flow throughput distribution test. |
 | `benches/completion_bias.rs` | New: 10-agents-@-10% vs 3-agents-@-90% comparison. |
 | `scripts/phase2_bench.sh` | New: runner; writes `PHASE2-RESULTS.md`. |
-| `docs/plans/001-llm-qdisc-proxy/PHASE2-RESULTS.md` | New: recorded numbers + verdict. |
+| `docs/plans/001-tinyllb/PHASE2-RESULTS.md` | New: recorded numbers + verdict. |
 
 ## Steps
 

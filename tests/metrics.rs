@@ -10,19 +10,19 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tower::ServiceExt;
 
-use llm_qdisc_proxy::config::BackpressureMode;
-use llm_qdisc_proxy::flow::FlowRegistry;
-use llm_qdisc_proxy::gateway;
-use llm_qdisc_proxy::metrics;
+use tinyllb::config::BackpressureMode;
+use tinyllb::flow::FlowRegistry;
+use tinyllb::gateway;
+use tinyllb::metrics;
 
 /// Build a full proxy app with metrics for testing.
 /// Returns the router and the shared `Arc<Metrics>` handle so tests can
 /// access individual collectors (e.g., to touch GaugeVec labels).
-fn build_test_app(backend_url: &str) -> (Router, Arc<llm_qdisc_proxy::metrics::Metrics>) {
+fn build_test_app(backend_url: &str) -> (Router, Arc<tinyllb::metrics::Metrics>) {
     let metrics = metrics::create_metrics();
     let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
-    let scheduler = llm_qdisc_proxy::scheduler::Scheduler::new_with_defaults(
-        llm_qdisc_proxy::config::Algorithm::Fifo,
+    let scheduler = tinyllb::scheduler::Scheduler::new_with_defaults(
+        tinyllb::config::Algorithm::Fifo,
         4,
         metrics.clone(),
         flow_registry.clone(),
@@ -37,11 +37,11 @@ fn build_test_app(backend_url: &str) -> (Router, Arc<llm_qdisc_proxy::metrics::M
         metrics: metrics.clone(),
         scheduler: Arc::new(scheduler),
         flow_registry,
-        backpressure: llm_qdisc_proxy::config::Backpressure::default(),
-        priorities: llm_qdisc_proxy::config::Priorities::default(),
+        backpressure: tinyllb::config::Backpressure::default(),
+        priorities: tinyllb::config::Priorities::default(),
         request_timeout: None,
         context: None,
-        retry_policy: llm_qdisc_proxy::config::RetryPolicy::default(),
+        retry_policy: tinyllb::config::RetryPolicy::default(),
     };
 
     // Touch the queue_depth GaugeVec with an "ephemeral" label so it appears
@@ -56,7 +56,7 @@ fn build_test_app(backend_url: &str) -> (Router, Arc<llm_qdisc_proxy::metrics::M
     let metrics_router = Router::new()
         .route(
             "/metrics",
-            get(llm_qdisc_proxy::metrics::endpoint::metrics_handler),
+            get(tinyllb::metrics::endpoint::metrics_handler),
         )
         .with_state(state.clone());
     let gateway_router = gateway::create_router().with_state(state.clone());
@@ -349,9 +349,9 @@ async fn test_streaming_tokens_count_completion_not_total() {
 
     let metrics = metrics::create_metrics();
     let metrics_clone = metrics.clone();
-    let flow_registry = Arc::new(llm_qdisc_proxy::flow::FlowRegistry::new(1.0, 50));
-    let scheduler = llm_qdisc_proxy::scheduler::Scheduler::new_with_defaults(
-        llm_qdisc_proxy::config::Algorithm::Fifo,
+    let flow_registry = Arc::new(tinyllb::flow::FlowRegistry::new(1.0, 50));
+    let scheduler = tinyllb::scheduler::Scheduler::new_with_defaults(
+        tinyllb::config::Algorithm::Fifo,
         4,
         metrics.clone(),
         flow_registry.clone(),
@@ -366,11 +366,11 @@ async fn test_streaming_tokens_count_completion_not_total() {
         metrics: metrics.clone(),
         scheduler: Arc::new(scheduler),
         flow_registry,
-        backpressure: llm_qdisc_proxy::config::Backpressure::default(),
-        priorities: llm_qdisc_proxy::config::Priorities::default(),
+        backpressure: tinyllb::config::Backpressure::default(),
+        priorities: tinyllb::config::Priorities::default(),
         request_timeout: None,
         context: None,
-        retry_policy: llm_qdisc_proxy::config::RetryPolicy::default(),
+        retry_policy: tinyllb::config::RetryPolicy::default(),
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
@@ -425,9 +425,9 @@ async fn test_active_gauge_during_streaming() {
 
     let metrics = metrics::create_metrics();
     let metrics_clone = metrics.clone();
-    let flow_registry = Arc::new(llm_qdisc_proxy::flow::FlowRegistry::new(1.0, 50));
-    let scheduler = llm_qdisc_proxy::scheduler::Scheduler::new_with_defaults(
-        llm_qdisc_proxy::config::Algorithm::Fifo,
+    let flow_registry = Arc::new(tinyllb::flow::FlowRegistry::new(1.0, 50));
+    let scheduler = tinyllb::scheduler::Scheduler::new_with_defaults(
+        tinyllb::config::Algorithm::Fifo,
         4,
         metrics.clone(),
         flow_registry.clone(),
@@ -442,11 +442,11 @@ async fn test_active_gauge_during_streaming() {
         metrics: metrics.clone(),
         scheduler: Arc::new(scheduler),
         flow_registry,
-        backpressure: llm_qdisc_proxy::config::Backpressure::default(),
-        priorities: llm_qdisc_proxy::config::Priorities::default(),
+        backpressure: tinyllb::config::Backpressure::default(),
+        priorities: tinyllb::config::Priorities::default(),
         request_timeout: None,
         context: None,
-        retry_policy: llm_qdisc_proxy::config::RetryPolicy::default(),
+        retry_policy: tinyllb::config::RetryPolicy::default(),
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
@@ -510,9 +510,9 @@ async fn test_nonstream_tokens_count_completion_not_total() {
 
     let metrics = metrics::create_metrics();
     let metrics_clone = metrics.clone();
-    let flow_registry = Arc::new(llm_qdisc_proxy::flow::FlowRegistry::new(1.0, 50));
-    let scheduler = llm_qdisc_proxy::scheduler::Scheduler::new_with_defaults(
-        llm_qdisc_proxy::config::Algorithm::Fifo,
+    let flow_registry = Arc::new(tinyllb::flow::FlowRegistry::new(1.0, 50));
+    let scheduler = tinyllb::scheduler::Scheduler::new_with_defaults(
+        tinyllb::config::Algorithm::Fifo,
         4,
         metrics.clone(),
         flow_registry.clone(),
@@ -527,11 +527,11 @@ async fn test_nonstream_tokens_count_completion_not_total() {
         metrics: metrics.clone(),
         scheduler: Arc::new(scheduler),
         flow_registry,
-        backpressure: llm_qdisc_proxy::config::Backpressure::default(),
-        priorities: llm_qdisc_proxy::config::Priorities::default(),
+        backpressure: tinyllb::config::Backpressure::default(),
+        priorities: tinyllb::config::Priorities::default(),
         request_timeout: None,
         context: None,
-        retry_policy: llm_qdisc_proxy::config::RetryPolicy::default(),
+        retry_policy: tinyllb::config::RetryPolicy::default(),
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
@@ -586,9 +586,9 @@ async fn test_active_gauge_during_nonstreaming() {
 
     let metrics = metrics::create_metrics();
     let metrics_clone = metrics.clone();
-    let flow_registry = Arc::new(llm_qdisc_proxy::flow::FlowRegistry::new(1.0, 50));
-    let scheduler = llm_qdisc_proxy::scheduler::Scheduler::new_with_defaults(
-        llm_qdisc_proxy::config::Algorithm::Fifo,
+    let flow_registry = Arc::new(tinyllb::flow::FlowRegistry::new(1.0, 50));
+    let scheduler = tinyllb::scheduler::Scheduler::new_with_defaults(
+        tinyllb::config::Algorithm::Fifo,
         4,
         metrics.clone(),
         flow_registry.clone(),
@@ -603,11 +603,11 @@ async fn test_active_gauge_during_nonstreaming() {
         metrics: metrics.clone(),
         scheduler: Arc::new(scheduler),
         flow_registry,
-        backpressure: llm_qdisc_proxy::config::Backpressure::default(),
-        priorities: llm_qdisc_proxy::config::Priorities::default(),
+        backpressure: tinyllb::config::Backpressure::default(),
+        priorities: tinyllb::config::Priorities::default(),
         request_timeout: None,
         context: None,
-        retry_policy: llm_qdisc_proxy::config::RetryPolicy::default(),
+        retry_policy: tinyllb::config::RetryPolicy::default(),
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));

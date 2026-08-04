@@ -2,7 +2,7 @@
 
 The vLLM deployment (Qwen3.6-27B, 180K context, 2× RTX 5060 Ti) was hitting
 KV-cache exhaustion and context-length-exceeded errors on long agentic chains.
-Context compression was added to the `llm-qdisc-proxy` to intercept prompts
+Context compression was added to the `tinyllb` to intercept prompts
 before they reach vLLM, maintaining a per-flow transcript and replacing older
 turns with compact summaries. This extends effective context windows, caps
 per-flow KV footprint, and prevents hard failures from oversized history.
@@ -24,7 +24,7 @@ error. Disabled by default; enabled via `context_policy.enabled`.
   rewriting in `proxy_handler`, summarization prompt builder, background
   compression worker (sidecar + retry + backoff)
 - **Polish**: admin API (`/admin/context/*`), Prometheus metrics
-  (`llm_qdisc_context_*`), integration tests, docs + deployment config
+  (`tinyllb_context_*`), integration tests, docs + deployment config
 
 ## Tasks
 1. deps + config — 2. token estimator — 3. segment model — 4. SQLite store —

@@ -59,7 +59,7 @@ vs OFF completes 2.66 flows within the 120ms budget.
 ## Raw Data
 
 ```
-   Compiling llm-qdisc-proxy v0.1.0 (/home/gary/dev/vllm-frontend)
+   Compiling tinyllb v0.1.0 (/home/gary/dev/vllm-frontend)
     Finished `bench` profile [optimized] target(s) in 1.59s
      Running benches/completion_bias.rs (target/release/deps/completion_bias-bf078e6e30b706f1)
 Gnuplot not found, using plotters backend

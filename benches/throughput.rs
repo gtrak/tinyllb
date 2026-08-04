@@ -22,11 +22,11 @@ use std::time::Duration;
 
 use axum::routing::get;
 use axum::Router;
-use llm_qdisc_proxy::config::{Algorithm, Backpressure, BackpressureMode, Priorities};
-use llm_qdisc_proxy::flow::FlowRegistry;
-use llm_qdisc_proxy::gateway;
-use llm_qdisc_proxy::metrics;
-use llm_qdisc_proxy::scheduler::Scheduler;
+use tinyllb::config::{Algorithm, Backpressure, BackpressureMode, Priorities};
+use tinyllb::flow::FlowRegistry;
+use tinyllb::gateway;
+use tinyllb::metrics;
+use tinyllb::scheduler::Scheduler;
 use stub_backend::{StubConfig, StubState};
 
 /// Number of token frames per request (matches stub config).
@@ -92,7 +92,7 @@ fn build_proxy_app(backend_url: &str, max_active_flows: u32) -> (Router, Arc<met
         priorities: Priorities::default(),
         request_timeout: None,
         context: None,
-        retry_policy: llm_qdisc_proxy::config::RetryPolicy::default(),
+        retry_policy: tinyllb::config::RetryPolicy::default(),
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
@@ -100,7 +100,7 @@ fn build_proxy_app(backend_url: &str, max_active_flows: u32) -> (Router, Arc<met
     let metrics_router = Router::new()
         .route(
             "/metrics",
-            get(llm_qdisc_proxy::metrics::endpoint::metrics_handler),
+            get(tinyllb::metrics::endpoint::metrics_handler),
         )
         .with_state(state.clone());
 

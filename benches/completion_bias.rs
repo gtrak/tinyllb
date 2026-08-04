@@ -39,14 +39,14 @@ use axum::routing::get;
 use axum::Router;
 use tower::ServiceExt;
 
-use llm_qdisc_proxy::backend::BackendMonitor;
-use llm_qdisc_proxy::config::{
+use tinyllb::backend::BackendMonitor;
+use tinyllb::config::{
     Algorithm, Backpressure, BackpressureMode, CompletionBias, KvPolicyConfig, Priorities, PriorityPolicy,
 };
-use llm_qdisc_proxy::flow::FlowRegistry;
-use llm_qdisc_proxy::gateway;
-use llm_qdisc_proxy::metrics;
-use llm_qdisc_proxy::scheduler::Scheduler;
+use tinyllb::flow::FlowRegistry;
+use tinyllb::gateway;
+use tinyllb::metrics;
+use tinyllb::scheduler::Scheduler;
 use stub_backend::{StubConfig, StubState};
 
 /// Number of flows to test.
@@ -106,12 +106,12 @@ fn build_proxy_app(
         priorities: Priorities::default(),
         request_timeout: None,
         context: None,
-        retry_policy: llm_qdisc_proxy::config::RetryPolicy::default(),
+        retry_policy: tinyllb::config::RetryPolicy::default(),
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
     let gateway_router = gateway::create_router().with_state(state.clone());
-    let admin_router = llm_qdisc_proxy::api::create_router().with_state(state.clone());
+    let admin_router = tinyllb::api::create_router().with_state(state.clone());
 
     let app = Router::new()
         .merge(health_router)

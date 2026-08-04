@@ -10,8 +10,8 @@
 
 use axum::http::{HeaderMap, HeaderValue};
 use bytes::Bytes;
-use llm_qdisc_proxy::config::Priorities;
-use llm_qdisc_proxy::flow::{
+use tinyllb::config::Priorities;
+use tinyllb::flow::{
     FlowId, FlowRegistry, FlowRegistration, PriorityClass, identify,
 };
 

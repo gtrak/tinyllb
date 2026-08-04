@@ -355,7 +355,7 @@ pub fn spawn_retry_stream(
                                 "premature-stop retry (streaming): degenerate stop with no content/tool_calls, retrying with bumped temperature"
                             );
                             let notice = format!(
-                                ": llm-qdisc: premature-stop retry attempt={} fired — discarded failed reasoning, retrying\n\n",
+                                ": tinyllb: premature-stop retry attempt={} fired — discarded failed reasoning, retrying\n\n",
                                 attempt
                             );
                             if tx.send(Ok(bytes::Bytes::from(notice))).await.is_err() {

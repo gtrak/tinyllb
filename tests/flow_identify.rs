@@ -13,12 +13,12 @@ use axum::Router;
 use std::sync::Arc;
 use tower::ServiceExt;
 
-use llm_qdisc_proxy::config::Algorithm;
-use llm_qdisc_proxy::config::BackpressureMode;
-use llm_qdisc_proxy::flow::{FlowId, FlowRegistry};
-use llm_qdisc_proxy::gateway;
-use llm_qdisc_proxy::metrics;
-use llm_qdisc_proxy::scheduler::Scheduler;
+use tinyllb::config::Algorithm;
+use tinyllb::config::BackpressureMode;
+use tinyllb::flow::{FlowId, FlowRegistry};
+use tinyllb::gateway;
+use tinyllb::metrics;
+use tinyllb::scheduler::Scheduler;
 
 /// Build a test proxy app for flow identification tests, returning both the
 /// router and the shared registry/metrics handles for assertion.
@@ -43,16 +43,16 @@ fn build_flow_test_app_with_handles(
         metrics: metrics.clone(),
         scheduler: Arc::new(scheduler),
         flow_registry: flow_registry.clone(),
-        backpressure: llm_qdisc_proxy::config::Backpressure::default(),
-        priorities: llm_qdisc_proxy::config::Priorities::default(),
+        backpressure: tinyllb::config::Backpressure::default(),
+        priorities: tinyllb::config::Priorities::default(),
         request_timeout: None,
         context: None,
-        retry_policy: llm_qdisc_proxy::config::RetryPolicy::default(),
+        retry_policy: tinyllb::config::RetryPolicy::default(),
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
     let gateway_router = gateway::create_router().with_state(state.clone());
-    let admin_router = llm_qdisc_proxy::api::create_router().with_state(state);
+    let admin_router = tinyllb::api::create_router().with_state(state);
 
     (
         Router::new()
@@ -101,7 +101,7 @@ async fn collect_body_string(resp: Response<Body>) -> String {
 #[tokio::test]
 async fn test_header_flow_id_resolved() {
     use bytes::Bytes;
-    use llm_qdisc_proxy::flow::identify;
+    use tinyllb::flow::identify;
 
     let mut headers = HeaderMap::new();
     headers.insert("x-llm-flow-id", HeaderValue::from_static("agent-1"));
@@ -118,7 +118,7 @@ async fn test_header_flow_id_resolved() {
 #[tokio::test]
 async fn test_metadata_flow_id_resolved() {
     use bytes::Bytes;
-    use llm_qdisc_proxy::flow::identify;
+    use tinyllb::flow::identify;
 
     let headers = HeaderMap::new();
     let body = Bytes::from(r#"{"metadata":{"flow_id":"agent-2"},"model":"llama-2"}"#.as_bytes());
@@ -134,7 +134,7 @@ async fn test_metadata_flow_id_resolved() {
 #[tokio::test]
 async fn test_ephemeral_flow_id_generated() {
     use bytes::Bytes;
-    use llm_qdisc_proxy::flow::identify;
+    use tinyllb::flow::identify;
 
     let headers = HeaderMap::new();
     let body = Bytes::from_static(r#"{"model":"llama-2"}"#.as_bytes());
@@ -151,7 +151,7 @@ async fn test_ephemeral_flow_id_generated() {
 #[tokio::test]
 async fn test_header_wins_over_metadata() {
     use bytes::Bytes;
-    use llm_qdisc_proxy::flow::identify;
+    use tinyllb::flow::identify;
 
     let mut headers = HeaderMap::new();
     headers.insert("x-llm-flow-id", HeaderValue::from_static("header-wins"));
@@ -169,7 +169,7 @@ async fn test_header_wins_over_metadata() {
 #[tokio::test]
 async fn test_non_json_body_falls_through_to_ephemeral() {
     use bytes::Bytes;
-    use llm_qdisc_proxy::flow::identify;
+    use tinyllb::flow::identify;
 
     let headers = HeaderMap::new();
     let body = Bytes::from_static(b"not-json-binary-data");
@@ -182,7 +182,7 @@ async fn test_non_json_body_falls_through_to_ephemeral() {
 #[tokio::test]
 async fn test_get_request_gets_ephemeral_id() {
     use bytes::Bytes;
-    use llm_qdisc_proxy::flow::identify;
+    use tinyllb::flow::identify;
 
     let headers = HeaderMap::new();
     let body = Bytes::new();
@@ -401,7 +401,7 @@ async fn test_ephemeral_aggregation_and_named_flow_metric_label() {
 #[tokio::test]
 async fn test_x_session_id_resolves_to_stable_flow() {
     use bytes::Bytes;
-    use llm_qdisc_proxy::flow::identify;
+    use tinyllb::flow::identify;
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -419,7 +419,7 @@ async fn test_x_session_id_resolves_to_stable_flow() {
 #[tokio::test]
 async fn test_x_session_affinity_resolves_to_stable_flow() {
     use bytes::Bytes;
-    use llm_qdisc_proxy::flow::identify;
+    use tinyllb::flow::identify;
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -440,7 +440,7 @@ async fn test_x_session_affinity_resolves_to_stable_flow() {
 #[tokio::test]
 async fn test_same_session_id_yields_same_flow() {
     use bytes::Bytes;
-    use llm_qdisc_proxy::flow::identify;
+    use tinyllb::flow::identify;
 
     let session = "shared-session-id";
 
@@ -466,7 +466,7 @@ async fn test_same_session_id_yields_same_flow() {
 #[tokio::test]
 async fn test_claude_code_session_id_resolves_to_stable_flow() {
     use bytes::Bytes;
-    use llm_qdisc_proxy::flow::identify;
+    use tinyllb::flow::identify;
 
     let mut headers = HeaderMap::new();
     headers.insert(

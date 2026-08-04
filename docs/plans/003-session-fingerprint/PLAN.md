@@ -85,7 +85,7 @@ Design decisions:
 - `src/flow/identify.rs` — header extraction + precedence
 - `src/flow/mod.rs` — no changes expected (verify)
 - `tests/flow_identify.rs` — unit/integration coverage of header matrix
-- Docs: `docs/plans/001-llm-qdisc-proxy/TRACING.md` (field semantics),
+- Docs: `docs/plans/001-tinyllb/TRACING.md` (field semantics),
   module doc comment in `identify.rs`, `README`/docs if referenced
 
 ## Success criteria

@@ -15,10 +15,10 @@
 # Notes:
 #   - Replace the vLLM model with your actual model.
 #   - The proxy config sets backend.url to http://vllm:8000 (compose service name).
-#     Override via LLM_QDISC__BACKEND__URL env var or your own config.yaml.
+#     Override via TINYLLB__BACKEND__URL env var or your own config.yaml.
 #   - For a custom config, mount your own file:
 #     volumes:
-#       - ./config.yaml:/etc/llm-qdisc/config.yaml:ro
+#       - ./config.yaml:/etc/tinyllb/config.yaml:ro
 
 services:
   vllm:
@@ -50,12 +50,12 @@ services:
     ports:
       - "8080:8080"
     environment:
-      - CONFIG_PATH=/etc/llm-qdisc/config.yaml
+      - CONFIG_PATH=/etc/tinyllb/config.yaml
       # Override backend.url to point at the compose service name.
-      - LLM_QDISC__BACKEND__URL=http://vllm:8000
+      - TINYLLB__BACKEND__URL=http://vllm:8000
     volumes:
       # Uses the shipped example config; override with your own config.yaml.
-      - ./config.example.yaml:/etc/llm-qdisc/config.yaml:ro
+      - ./config.example.yaml:/etc/tinyllb/config.yaml:ro
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
       interval: 10s

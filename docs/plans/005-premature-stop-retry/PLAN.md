@@ -135,7 +135,7 @@ retry_policy:
   default_temperature: 0.0        # base temperature when request omits it
 ```
 
-Environment overrides: `LLM_QDISC__RETRY_POLICY__ENABLED=true`, etc.
+Environment overrides: `TINYLLB__RETRY_POLICY__ENABLED=true`, etc.
 
 Validation (only when `enabled: true`):
 - `max_retries > 0`
@@ -145,13 +145,13 @@ Validation (only when `enabled: true`):
 
 ### Metrics
 
-New Prometheus counters in the `llm_qdisc_*` family:
+New Prometheus counters in the `tinyllb_*` family:
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `llm_qdisc_premature_stop_detected_total` | counter | Premature stops detected (one per failed attempt) |
-| `llm_qdisc_premature_stop_retries_total` | counter | Retry requests issued |
-| `llm_qdisc_premature_stop_exhausted_total` | counter | Degenerate turns forwarded after all retries exhausted |
+| `tinyllb_premature_stop_detected_total` | counter | Premature stops detected (one per failed attempt) |
+| `tinyllb_premature_stop_retries_total` | counter | Retry requests issued |
+| `tinyllb_premature_stop_exhausted_total` | counter | Degenerate turns forwarded after all retries exhausted |
 
 ## Scope
 

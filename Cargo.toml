@@ -1,5 +1,5 @@
 [package]
-name = "llm-qdisc-proxy"
+name = "tinyllb"
 version = "0.1.0"
 edition = "2021"
 

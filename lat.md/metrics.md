@@ -292,9 +292,9 @@ The interface provides construction surfaces, a scrape endpoint, and metric fami
 
 **Premature-stop retry family.**
 
-- `llm_qdisc_premature_stop_detected_total` — Premature stops detected (one per failed attempt).
-- `llm_qdisc_premature_stop_retries_total` — Retry requests issued after a premature stop.
-- `llm_qdisc_premature_stop_exhausted_total` — Degenerate turns forwarded after all retries exhausted. In the streaming path, this is also incremented when a retry HTTP failure forces fail-open.
+- `tinyllb_premature_stop_detected_total` — Premature stops detected (one per failed attempt).
+- `tinyllb_premature_stop_retries_total` — Retry requests issued after a premature stop.
+- `tinyllb_premature_stop_exhausted_total` — Degenerate turns forwarded after all retries exhausted. In the streaming path, this is also incremented when a retry HTTP failure forces fail-open.
 
 ## Invariants
 

@@ -130,7 +130,7 @@ async fn build_compression_test_app(
     let (backend_url, mock_state) = start_mock_backend().await;
 
     let (tx, rx) = tokio::sync::mpsc::channel(64);
-    let policy = llm_qdisc_proxy::config::ContextPolicy {
+    let policy = tinyllb::config::ContextPolicy {
         enabled,
         compress_threshold: threshold,
         head_keep_turns: 2,
@@ -144,9 +144,9 @@ async fn build_compression_test_app(
         ..Default::default()
     };
 
-    let metrics = Arc::new(llm_qdisc_proxy::metrics::Metrics::new());
+    let metrics = Arc::new(tinyllb::metrics::Metrics::new());
     let ctx = if enabled {
-        let ctx = llm_qdisc_proxy::context::ContextState::new(
+        let ctx = tinyllb::context::ContextState::new(
             policy.clone(),
             tx,
             metrics.clone(),
@@ -160,7 +160,7 @@ async fn build_compression_test_app(
 
     // Spawn the compression worker if enabled.
     if let Some(ref ctx) = ctx {
-        let worker = llm_qdisc_proxy::context::compressor::CompressionWorker::new(
+        let worker = tinyllb::context::compressor::CompressionWorker::new(
             rx,
             Arc::clone(ctx),
             url::Url::parse(&backend_url).unwrap(),
@@ -177,44 +177,44 @@ async fn build_compression_test_app(
 
     // Build scheduler and app state.
     let flow_registry = Arc::new(
-        llm_qdisc_proxy::flow::FlowRegistry::new(1.0, 50),
+        tinyllb::flow::FlowRegistry::new(1.0, 50),
     );
-    let scheduler = llm_qdisc_proxy::scheduler::Scheduler::new_with_defaults(
-        llm_qdisc_proxy::config::Algorithm::Fifo,
+    let scheduler = tinyllb::scheduler::Scheduler::new_with_defaults(
+        tinyllb::config::Algorithm::Fifo,
         4,
         metrics.clone(),
         flow_registry.clone(),
-        llm_qdisc_proxy::config::BackpressureMode::Blocking,
+        tinyllb::config::BackpressureMode::Blocking,
         100,
         std::time::Duration::from_secs(10),
         std::time::Duration::from_secs(1),
     );
 
-    let app_state = llm_qdisc_proxy::gateway::AppState {
-        client: llm_qdisc_proxy::gateway::build_client(),
+    let app_state = tinyllb::gateway::AppState {
+        client: tinyllb::gateway::build_client(),
         backend_url: Arc::new(
             url::Url::parse(&backend_url).expect("valid backend URL"),
         ),
         metrics: metrics.clone(),
         scheduler: Arc::new(scheduler),
         flow_registry,
-        backpressure: llm_qdisc_proxy::config::Backpressure::default(),
-        priorities: llm_qdisc_proxy::config::Priorities::default(),
+        backpressure: tinyllb::config::Backpressure::default(),
+        priorities: tinyllb::config::Priorities::default(),
         request_timeout: None,
         context: ctx,
-        retry_policy: llm_qdisc_proxy::config::RetryPolicy::default(),
+        retry_policy: tinyllb::config::RetryPolicy::default(),
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
-    let gateway_router = llm_qdisc_proxy::gateway::create_router()
+    let gateway_router = tinyllb::gateway::create_router()
         .with_state(app_state.clone());
     let metrics_router = Router::new()
         .route(
             "/metrics",
-            get(llm_qdisc_proxy::metrics::endpoint::metrics_handler),
+            get(tinyllb::metrics::endpoint::metrics_handler),
         )
         .with_state(app_state.clone());
-    let admin_router = llm_qdisc_proxy::api::create_router().with_state(app_state);
+    let admin_router = tinyllb::api::create_router().with_state(app_state);
 
     let app = Router::new()
         .merge(health_router)
@@ -444,15 +444,15 @@ async fn test_metrics_exposed() {
 
     // Verify compression metrics are present.
     assert!(
-        metrics_text.contains("llm_qdisc_context_compression_events_total"),
+        metrics_text.contains("tinyllb_context_compression_events_total"),
         "metrics should contain compression_events_total",
     );
     assert!(
-        metrics_text.contains("llm_qdisc_context_estimated_tokens"),
+        metrics_text.contains("tinyllb_context_estimated_tokens"),
         "metrics should contain estimated_tokens",
     );
     assert!(
-        metrics_text.contains("llm_qdisc_context_compression_errors_total"),
+        metrics_text.contains("tinyllb_context_compression_errors_total"),
         "metrics should contain compression_errors_total",
     );
 }

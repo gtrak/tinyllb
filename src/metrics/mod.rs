@@ -8,7 +8,7 @@ use std::sync::Arc;
 use prometheus::{CounterVec, GaugeVec, HistogramOpts, HistogramVec, Opts, Registry};
 
 /// Central metrics collector holding all Prometheus gauges, counters,
-/// and histograms for the LLM QDisc Proxy.
+/// and histograms for the tinyllb.
 ///
 /// Stored as `Arc<Metrics>` inside `AppState` so every request handler
 /// can access the same registry.  Later issues (05 FIFO, 06 backpressure,
@@ -213,26 +213,26 @@ impl Metrics {
 
         // -- Context compression family --
         let context_compression_events_total = prometheus::Counter::new(
-            "llm_qdisc_context_compression_events_total",
+            "tinyllb_context_compression_events_total",
             "Total compression events (successful summaries produced)",
         )
         .expect("context_compression_events_total should be creatable");
 
         let context_compression_errors_total = prometheus::Counter::new(
-            "llm_qdisc_context_compression_errors_total",
+            "tinyllb_context_compression_errors_total",
             "Total compression failures (sidecar errors, store errors)",
         )
         .expect("context_compression_errors_total should be creatable");
 
         let context_compression_tokens_saved_total = prometheus::Counter::new(
-            "llm_qdisc_context_compression_tokens_saved_total",
+            "tinyllb_context_compression_tokens_saved_total",
             "Total tokens saved by compression (raw minus summary)",
         )
         .expect("context_compression_tokens_saved_total should be creatable");
 
         let context_compression_sidecar_latency = prometheus::Histogram::with_opts(
             HistogramOpts::new(
-                "llm_qdisc_context_compression_sidecar_latency_seconds",
+                "tinyllb_context_compression_sidecar_latency_seconds",
                 "Latency of sidecar summarization requests (seconds)",
             )
             .buckets(vec![0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0]),
@@ -241,7 +241,7 @@ impl Metrics {
 
         let context_compression_turns_per_event = prometheus::Histogram::with_opts(
             HistogramOpts::new(
-                "llm_qdisc_context_compression_turns_per_event",
+                "tinyllb_context_compression_turns_per_event",
                 "Turns compressed per compression event",
             )
             .buckets(vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0]),
@@ -250,7 +250,7 @@ impl Metrics {
 
         let context_estimated_tokens = GaugeVec::new(
             Opts::new(
-                "llm_qdisc_context_estimated_tokens",
+                "tinyllb_context_estimated_tokens",
                 "Estimated forwarded tokens for the flow (post-compression)",
             ),
             &["flow_id"],
@@ -259,7 +259,7 @@ impl Metrics {
 
         let context_raw_estimated_tokens = GaugeVec::new(
             Opts::new(
-                "llm_qdisc_context_raw_estimated_tokens",
+                "tinyllb_context_raw_estimated_tokens",
                 "Estimated raw (uncompressed) tokens for the flow",
             ),
             &["flow_id"],
@@ -268,7 +268,7 @@ impl Metrics {
 
         let context_compressed_segments = GaugeVec::new(
             Opts::new(
-                "llm_qdisc_context_compressed_segments",
+                "tinyllb_context_compressed_segments",
                 "Number of compressed segments for the flow",
             ),
             &["flow_id"],
@@ -276,7 +276,7 @@ impl Metrics {
         .expect("context_compressed_segments should be creatable");
 
         let context_compression_queue_depth = prometheus::Gauge::new(
-            "llm_qdisc_context_compression_queue_depth",
+            "tinyllb_context_compression_queue_depth",
             "Pending compression jobs in the channel",
         )
         .expect("context_compression_queue_depth should be creatable");
@@ -312,19 +312,19 @@ impl Metrics {
         .expect("llm_flow_inter_request_seconds should be creatable");
         // -- Premature stop retry family --
         let premature_stop_detected_total = prometheus::Counter::new(
-            "llm_qdisc_premature_stop_detected_total",
+            "tinyllb_premature_stop_detected_total",
             "Premature stops detected (one per failed attempt)",
         )
         .expect("premature_stop_detected_total should be creatable");
 
         let premature_stop_retries_total = prometheus::Counter::new(
-            "llm_qdisc_premature_stop_retries_total",
+            "tinyllb_premature_stop_retries_total",
             "Retry requests issued after a premature stop",
         )
         .expect("premature_stop_retries_total should be creatable");
 
         let premature_stop_exhausted_total = prometheus::Counter::new(
-            "llm_qdisc_premature_stop_exhausted_total",
+            "tinyllb_premature_stop_exhausted_total",
             "Degenerate turns forwarded after all retries exhausted",
         )
         .expect("premature_stop_exhausted_total should be creatable");
@@ -486,39 +486,39 @@ mod tests {
         let names: Vec<&str> = gathers.iter().map(|m| m.name()).collect();
 
         assert!(
-            names.contains(&"llm_qdisc_context_compression_events_total"),
+            names.contains(&"tinyllb_context_compression_events_total"),
             "context_compression_events_total should be registered"
         );
         assert!(
-            names.contains(&"llm_qdisc_context_compression_errors_total"),
+            names.contains(&"tinyllb_context_compression_errors_total"),
             "context_compression_errors_total should be registered"
         );
         assert!(
-            names.contains(&"llm_qdisc_context_compression_tokens_saved_total"),
+            names.contains(&"tinyllb_context_compression_tokens_saved_total"),
             "context_compression_tokens_saved_total should be registered"
         );
         assert!(
-            names.contains(&"llm_qdisc_context_compression_sidecar_latency_seconds"),
+            names.contains(&"tinyllb_context_compression_sidecar_latency_seconds"),
             "context_compression_sidecar_latency should be registered"
         );
         assert!(
-            names.contains(&"llm_qdisc_context_compression_turns_per_event"),
+            names.contains(&"tinyllb_context_compression_turns_per_event"),
             "context_compression_turns_per_event should be registered"
         );
         assert!(
-            names.contains(&"llm_qdisc_context_estimated_tokens"),
+            names.contains(&"tinyllb_context_estimated_tokens"),
             "context_estimated_tokens should be registered"
         );
         assert!(
-            names.contains(&"llm_qdisc_context_raw_estimated_tokens"),
+            names.contains(&"tinyllb_context_raw_estimated_tokens"),
             "context_raw_estimated_tokens should be registered"
         );
         assert!(
-            names.contains(&"llm_qdisc_context_compressed_segments"),
+            names.contains(&"tinyllb_context_compressed_segments"),
             "context_compressed_segments should be registered"
         );
         assert!(
-            names.contains(&"llm_qdisc_context_compression_queue_depth"),
+            names.contains(&"tinyllb_context_compression_queue_depth"),
             "context_compression_queue_depth should be registered"
         );
     }

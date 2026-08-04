@@ -2,15 +2,15 @@
 
 ## Initialization
 
-The global tracing subscriber is initialized via `llm_qdisc_proxy::telemetry::init()`
+The global tracing subscriber is initialized via `tinyllb_proxy::telemetry::init()`
 at the start of `main()`. It is configured by two environment variables:
 
 | Env Var | Default | Description |
 | --- | --- | --- |
-| `RUST_LOG` | `info,llm_qdisc_proxy=debug` | Standard tracing filter directive. |
-| `LLM_QDISC_LOG_JSON` | unset | Set to `1` for JSON output (one JSON object per line). |
+| `RUST_LOG` | `info,tinyllb_proxy=debug` | Standard tracing filter directive. |
+| `TINYLLB_LOG_JSON` | unset | Set to `1` for JSON output (one JSON object per line). |
 
-When `LLM_QDISC_LOG_JSON=1`, the subscriber emits JSON-formatted log lines
+When `TINYLLB_LOG_JSON=1`, the subscriber emits JSON-formatted log lines
 suitable for ingestion by Loki, Datadog, or similar aggregators. The JSON
 formatter uses `.flatten_event(true)` so span fields are flattened into each
 event object rather than nested under a separate key.

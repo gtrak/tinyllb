@@ -21,14 +21,14 @@ use std::sync::Arc;
 use std::time::Duration;
 use tower::ServiceExt;
 
-use llm_qdisc_proxy::backend::BackendMonitor;
-use llm_qdisc_proxy::config::{
+use tinyllb::backend::BackendMonitor;
+use tinyllb::config::{
     Algorithm, Backpressure, BackpressureMode, CompletionBias, KvPolicyConfig, Priorities, PriorityPolicy,
 };
-use llm_qdisc_proxy::flow::{FlowId, FlowRegistry};
-use llm_qdisc_proxy::gateway;
-use llm_qdisc_proxy::metrics;
-use llm_qdisc_proxy::scheduler::Scheduler;
+use tinyllb::flow::{FlowId, FlowRegistry};
+use tinyllb::gateway;
+use tinyllb::metrics;
+use tinyllb::scheduler::Scheduler;
 
 // ---------------------------------------------------------------------------
 // SSE stream wrapper for tests
@@ -207,7 +207,7 @@ fn build_drr_proxy(backend_url: &str) -> (Router, Arc<metrics::Metrics>, Arc<Sch
         priorities: Priorities::default(),
         request_timeout: None,
         context: None,
-        retry_policy: llm_qdisc_proxy::config::RetryPolicy::default(),
+        retry_policy: tinyllb::config::RetryPolicy::default(),
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
@@ -215,10 +215,10 @@ fn build_drr_proxy(backend_url: &str) -> (Router, Arc<metrics::Metrics>, Arc<Sch
     let metrics_router = Router::new()
         .route(
             "/metrics",
-            get(llm_qdisc_proxy::metrics::endpoint::metrics_handler),
+            get(tinyllb::metrics::endpoint::metrics_handler),
         )
         .with_state(state.clone());
-    let admin_router = llm_qdisc_proxy::api::create_router().with_state(state.clone());
+    let admin_router = tinyllb::api::create_router().with_state(state.clone());
 
     let app = Router::new()
         .merge(health_router)
@@ -259,7 +259,7 @@ async fn test_streaming_credit_restored_on_under_delivery() {
     let backend_url = format!("http://{}/", addr);
     let (app, _m, scheduler) = build_drr_proxy(&backend_url);
 
-    let flow_id = llm_qdisc_proxy::flow::FlowId::new("under-delivery-flow");
+    let flow_id = tinyllb::flow::FlowId::new("under-delivery-flow");
     let credit_before = scheduler.credit(&flow_id);
 
     // Send streaming request with max_tokens=8192.
@@ -304,7 +304,7 @@ async fn test_nonstreaming_credit_restored_on_under_delivery() {
     let backend_url = format!("http://{}/", addr);
     let (app, _m, scheduler) = build_drr_proxy(&backend_url);
 
-    let flow_id = llm_qdisc_proxy::flow::FlowId::new("nonstream-under-delivery");
+    let flow_id = tinyllb::flow::FlowId::new("nonstream-under-delivery");
     let credit_before = scheduler.credit(&flow_id);
 
     // Send non-streaming request with max_tokens=8192.
@@ -352,7 +352,7 @@ async fn test_no_usage_falls_back_to_estimate() {
     let backend_url = format!("http://{}/", addr);
     let (app, _m, scheduler) = build_drr_proxy(&backend_url);
 
-    let flow_id = llm_qdisc_proxy::flow::FlowId::new("no-usage-flow");
+    let flow_id = tinyllb::flow::FlowId::new("no-usage-flow");
     let credit_before = scheduler.credit(&flow_id);
 
     // Send streaming request with max_tokens=100.
@@ -395,7 +395,7 @@ async fn test_overrun_additional_debit() {
     let backend_url = format!("http://{}/", addr);
     let (app, _m, scheduler) = build_drr_proxy(&backend_url);
 
-    let flow_id = llm_qdisc_proxy::flow::FlowId::new("overrun-flow");
+    let flow_id = tinyllb::flow::FlowId::new("overrun-flow");
     let credit_before = scheduler.credit(&flow_id);
 
     // Send streaming request with max_tokens=100, but backend generates 200.
@@ -464,8 +464,8 @@ fn test_predictive_admit_config_serialization() {
 /// FlowProgressTracker: register, update, is_near_done.
 #[test]
 fn test_flow_progress_tracker_near_done() {
-    use llm_qdisc_proxy::flow::FlowId;
-    use llm_qdisc_proxy::scheduler::FlowProgressTracker;
+    use tinyllb::flow::FlowId;
+    use tinyllb::scheduler::FlowProgressTracker;
 
     let tracker = FlowProgressTracker::new();
     let flow_id = FlowId::new("test-flow");
@@ -488,8 +488,8 @@ fn test_flow_progress_tracker_near_done() {
 /// FlowProgressTracker: unregister cleans up.
 #[test]
 fn test_flow_progress_tracker_unregister() {
-    use llm_qdisc_proxy::flow::FlowId;
-    use llm_qdisc_proxy::scheduler::FlowProgressTracker;
+    use tinyllb::flow::FlowId;
+    use tinyllb::scheduler::FlowProgressTracker;
 
     let tracker = FlowProgressTracker::new();
     let flow_id = FlowId::new("cleanup-flow");
@@ -507,8 +507,8 @@ fn test_flow_progress_tracker_unregister() {
 /// FlowProgressTracker: any_flow_near_done.
 #[test]
 fn test_flow_progress_tracker_any_flow_near_done() {
-    use llm_qdisc_proxy::flow::FlowId;
-    use llm_qdisc_proxy::scheduler::FlowProgressTracker;
+    use tinyllb::flow::FlowId;
+    use tinyllb::scheduler::FlowProgressTracker;
 
     let tracker = FlowProgressTracker::new();
     let flow_a = FlowId::new("flow-a");

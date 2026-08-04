@@ -174,7 +174,7 @@ A duration source may be absent without error. When present, it must parse to a 
 
 **Configuration sourcing**
 
-The configuration file path is controlled by the `CONFIG_PATH` environment variable, defaulting to `config.yaml`. Environment variables use the `LLM_QDISC` prefix with double-underscore separators to address nested configuration keys.
+The configuration file path is controlled by the `CONFIG_PATH` environment variable, defaulting to `config.yaml`. Environment variables use the `TINYLLB` prefix with double-underscore separators to address nested configuration keys.
 
 **Default configuration contract**
 
@@ -221,7 +221,7 @@ Configuration loading operates within specific boundaries on sourcing, format, a
 **Source constraints**
 
 - The configuration file is optional; its absence is not an error condition.
-- Environment variables use the `LLM_QDISC` prefix with double-underscore section separators to address nested configuration keys.
+- Environment variables use the `TINYLLB` prefix with double-underscore section separators to address nested configuration keys.
 - The `CONFIG_PATH` environment variable controls the configuration file path; its default value is `config.yaml`.
 - YAML is the only structured file format accepted; no JSON, TOML, or other formats. A non-YAML file produces a misleading YAML parse error rather than a format-specific error.
 

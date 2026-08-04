@@ -14,11 +14,11 @@ use std::sync::Arc;
 use std::time::Duration;
 use tower::ServiceExt;
 
-use llm_qdisc_proxy::config::{Algorithm, Backpressure, BackpressureMode};
-use llm_qdisc_proxy::flow::FlowRegistry;
-use llm_qdisc_proxy::gateway;
-use llm_qdisc_proxy::metrics;
-use llm_qdisc_proxy::scheduler::{FifoScheduler, Scheduler};
+use tinyllb::config::{Algorithm, Backpressure, BackpressureMode};
+use tinyllb::flow::FlowRegistry;
+use tinyllb::gateway;
+use tinyllb::metrics;
+use tinyllb::scheduler::{FifoScheduler, Scheduler};
 
 /// Build a proxy app with specific backpressure config for tests.
 fn build_proxy_app_with_backpressure(
@@ -45,10 +45,10 @@ fn build_proxy_app_with_backpressure(
         scheduler: Arc::new(scheduler),
         flow_registry,
         backpressure,
-        priorities: llm_qdisc_proxy::config::Priorities::default(),
+        priorities: tinyllb::config::Priorities::default(),
         request_timeout: None,
         context: None,
-        retry_policy: llm_qdisc_proxy::config::RetryPolicy::default(),
+        retry_policy: tinyllb::config::RetryPolicy::default(),
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
@@ -149,7 +149,7 @@ async fn test_fail_fast_reject_has_retry_after() {
 
     // Occupy the single slot.
     let _t1 = scheduler
-        .admit(llm_qdisc_proxy::flow::FlowId::new("test"), 1024.0)
+        .admit(tinyllb::flow::FlowId::new("test"), 1024.0)
         .await
         .expect("should admit first");
 
@@ -157,7 +157,7 @@ async fn test_fail_fast_reject_has_retry_after() {
     let s_waiter = scheduler.clone();
     let waiter = tokio::spawn(async move {
         s_waiter
-            .admit(llm_qdisc_proxy::flow::FlowId::new("test"), 1024.0)
+            .admit(tinyllb::flow::FlowId::new("test"), 1024.0)
             .await
     });
 
@@ -166,7 +166,7 @@ async fn test_fail_fast_reject_has_retry_after() {
 
     // At this point depth should be 1 (one waiter). Next admit should be rejected.
     let rejected = match scheduler
-        .admit(llm_qdisc_proxy::flow::FlowId::new("test"), 1024.0)
+        .admit(tinyllb::flow::FlowId::new("test"), 1024.0)
         .await
     {
         Ok(_) => panic!("should be rejected when depth > max_queue_depth (0)"),
@@ -200,7 +200,7 @@ async fn test_hybrid_timeout_returns_429() {
 
     let start = std::time::Instant::now();
     let result = scheduler
-        .admit(llm_qdisc_proxy::flow::FlowId::new("test"), 1024.0)
+        .admit(tinyllb::flow::FlowId::new("test"), 1024.0)
         .await;
     let elapsed = start.elapsed();
 
@@ -235,7 +235,7 @@ async fn test_hybrid_admits_when_slot_frees_before_timeout() {
 
     // Occupy the single slot.
     let t1 = scheduler
-        .admit(llm_qdisc_proxy::flow::FlowId::new("test"), 1024.0)
+        .admit(tinyllb::flow::FlowId::new("test"), 1024.0)
         .await
         .unwrap();
 
@@ -244,7 +244,7 @@ async fn test_hybrid_admits_when_slot_frees_before_timeout() {
     let scheduler_waiter = scheduler_clone.clone();
     let joiner = tokio::spawn(async move {
         scheduler_waiter
-            .admit(llm_qdisc_proxy::flow::FlowId::new("test"), 1024.0)
+            .admit(tinyllb::flow::FlowId::new("test"), 1024.0)
             .await
     });
 
@@ -349,7 +349,7 @@ async fn test_blocking_waits_until_slot_available() {
 
     // Occupy the slot.
     let t1 = scheduler
-        .admit(llm_qdisc_proxy::flow::FlowId::new("test"), 1024.0)
+        .admit(tinyllb::flow::FlowId::new("test"), 1024.0)
         .await
         .unwrap();
 
@@ -358,7 +358,7 @@ async fn test_blocking_waits_until_slot_available() {
     let scheduler_waiter = scheduler_clone.clone();
     let joiner = tokio::spawn(async move {
         scheduler_waiter
-            .admit(llm_qdisc_proxy::flow::FlowId::new("test"), 1024.0)
+            .admit(tinyllb::flow::FlowId::new("test"), 1024.0)
             .await
     });
 
@@ -482,16 +482,16 @@ async fn test_backpressure_rejections_metric() {
         scheduler: Arc::new(scheduler),
         flow_registry: Arc::new(FlowRegistry::new(1.0, 50)),
         backpressure: bp,
-        priorities: llm_qdisc_proxy::config::Priorities::default(),
+        priorities: tinyllb::config::Priorities::default(),
         request_timeout: None,
         context: None,
-        retry_policy: llm_qdisc_proxy::config::RetryPolicy::default(),
+        retry_policy: tinyllb::config::RetryPolicy::default(),
     };
 
     let metrics_app = Router::new()
         .route(
             "/metrics",
-            get(llm_qdisc_proxy::metrics::endpoint::metrics_handler),
+            get(tinyllb::metrics::endpoint::metrics_handler),
         )
         .with_state(state);
 

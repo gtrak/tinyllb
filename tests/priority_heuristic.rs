@@ -6,9 +6,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use llm_qdisc_proxy::config::{Priorities, PriorityPolicy};
-use llm_qdisc_proxy::flow::cadence::CadenceRegistry;
-use llm_qdisc_proxy::flow::{Flow, FlowId};
+use tinyllb::config::{Priorities, PriorityPolicy};
+use tinyllb::flow::cadence::CadenceRegistry;
+use tinyllb::flow::{Flow, FlowId};
 
 /// Helper: build a `CadenceRegistry` with the default test policy.
 fn make_registry() -> CadenceRegistry {

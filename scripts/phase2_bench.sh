@@ -16,7 +16,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-RESULTS_DIR="$REPO_ROOT/docs/plans/001-llm-qdisc-proxy"
+RESULTS_DIR="$REPO_ROOT/docs/plans/001-tinyllb"
 RESULTS_FILE="$RESULTS_DIR/PHASE2-RESULTS.md"
 STDERR_LOG=$(mktemp)
 

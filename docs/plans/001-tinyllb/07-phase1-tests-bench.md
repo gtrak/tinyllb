@@ -19,7 +19,7 @@ tokens/sec than uncontrolled concurrency** (PRD §G1, §14).  Phase 1 is
 | `benches/throughput.rs` | New: criterion bench — proxy vs direct, bursty load. |
 | `benches/stub_backend.rs` | New: shared stub that emits N fake tokens with timing. |
 | `scripts/phase1_bench.sh` | New: reproducible bench runner + ascii reporter. |
-| `docs/plans/001-llm-qdisc-proxy/PHASE1-RESULTS.md` | New: where recorded numbers land. |
+| `docs/plans/001-tinyllb/PHASE1-RESULTS.md` | New: where recorded numbers land. |
 
 ## Steps
 
@@ -36,7 +36,7 @@ tokens/sec than uncontrolled concurrency** (PRD §G1, §14).  Phase 1 is
    * `/metrics` reflects activity during the run.
 3. Criterion bench comparing:
    * **direct**: clients -> stub,
-   * **proxy**: clients -> llm-qdisc-proxy -> stub,
+   * **proxy**: clients -> tinyllb -> stub,
    across concurrency levels `{1,4,8,16,32}` and burst lengths.
    Report aggregate fake-tokens/sec.
 4. `scripts/phase1_bench.sh`: sets env, runs `cargo bench`, parses output,

@@ -5,7 +5,7 @@
 #
 # Runs `cargo bench --bench throughput`, captures RESULT lines from stderr,
 # computes average tokens/sec per (scenario, concurrency) pair, and writes
-# a comparison table to docs/plans/001-llm-qdisc-proxy/PHASE1-RESULTS.md.
+# a comparison table to docs/plans/001-tinyllb/PHASE1-RESULTS.md.
 #
 # The RESULT lines have the format:
 #   RESULT <direct|proxy> concurrency=<N> waves=<W> requests=<R> tokens=<T> wall=<W> tok/s=<S> peak_inflight=<P> base_time=<B>ms penalty=<Q>
@@ -14,7 +14,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-RESULTS_DIR="$REPO_ROOT/docs/plans/001-llm-qdisc-proxy"
+RESULTS_DIR="$REPO_ROOT/docs/plans/001-tinyllb"
 RESULTS_FILE="$RESULTS_DIR/PHASE1-RESULTS.md"
 STDERR_LOG=$(mktemp)
 

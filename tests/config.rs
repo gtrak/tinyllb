@@ -1,4 +1,4 @@
-use llm_qdisc_proxy::config;
+use tinyllb::config;
 
 /// Helper: save and restore env vars for a test.
 fn with_env<F, R>(vars: &[(&str, Option<&str>)], f: F) -> R
@@ -34,18 +34,18 @@ where
 
 /// Tests that should NOT have env overrides must explicitly clear them.
 const ENV_OVERRIDES: &[&str] = &[
-    "LLM_QDISC__SCHEDULER__MAX_ACTIVE_FLOWS",
-    "LLM_QDISC__SCHEDULER__STARVATION_TIMEOUT",
-    "LLM_QDISC__SCHEDULER__ALGORITHM",
-    "LLM_QDISC__FLOWS__DEFAULT_WEIGHT",
-    "LLM_QDISC__FLOWS__DEFAULT_PRIORITY",
-    "LLM_QDISC__PRIORITIES__INTERACTIVE",
-    "LLM_QDISC__PRIORITIES__AGENT",
-    "LLM_QDISC__PRIORITIES__BACKGROUND",
-    "LLM_QDISC__BACKPRESSURE__MODE",
-    "LLM_QDISC__METRICS__ENDPOINT",
-    "LLM_QDISC__SERVER__BIND",
-    "LLM_QDISC__BACKEND__URL",
+    "TINYLLB__SCHEDULER__MAX_ACTIVE_FLOWS",
+    "TINYLLB__SCHEDULER__STARVATION_TIMEOUT",
+    "TINYLLB__SCHEDULER__ALGORITHM",
+    "TINYLLB__FLOWS__DEFAULT_WEIGHT",
+    "TINYLLB__FLOWS__DEFAULT_PRIORITY",
+    "TINYLLB__PRIORITIES__INTERACTIVE",
+    "TINYLLB__PRIORITIES__AGENT",
+    "TINYLLB__PRIORITIES__BACKGROUND",
+    "TINYLLB__BACKPRESSURE__MODE",
+    "TINYLLB__METRICS__ENDPOINT",
+    "TINYLLB__SERVER__BIND",
+    "TINYLLB__BACKEND__URL",
 ];
 
 /// Build a vars slice that sets the given vars AND clears all env overrides.
@@ -102,7 +102,7 @@ fn env_override_max_active_flows() {
     with_env(
         &[
             ("CONFIG_PATH", Some("config.example.yaml")),
-            ("LLM_QDISC__SCHEDULER__MAX_ACTIVE_FLOWS", Some("8")),
+            ("TINYLLB__SCHEDULER__MAX_ACTIVE_FLOWS", Some("8")),
         ],
         || {
             let cfg = config::load().expect("should load with env override");

@@ -34,8 +34,8 @@ inline, so this lands before any scheduling logic exists.
    * `Algorithm` enum: `Fifo`, `Wfq`, `Drr` (serde lowercase).
    * `BackpressureMode` enum: `Blocking`, `FailFast`, `Hybrid`.
 2. `loader`: read `$CONFIG_PATH` (default `config.yaml`); if absent, use
-   defaults; then apply `LLM_QDISC__*` env overrides (double-underscore path,
-   e.g. `LLM_QDISC__SCHEDULER__MAX_ACTIVE_FLOWS=4`).  Validate: `max_active_flows > 0`,
+   defaults; then apply `TINYLLB__*` env overrides (double-underscore path,
+   e.g. `TINYLLB__SCHEDULER__MAX_ACTIVE_FLOWS=4`).  Validate: `max_active_flows > 0`,
    `starvation_timeout > 0s`, `default_weight > 0`, `backend.url` is absolute.
 3. `config.example.yaml` — mirror PRD §7 exactly with comments:
    ```yaml
@@ -60,5 +60,5 @@ inline, so this lands before any scheduling logic exists.
 
 * `cargo test --all` covers loader + env override + validation errors.
 * `cargo run` with `config.example.yaml` boots and logs the resolved config.
-* `LLM_QDISC__SCHEDULER__MAX_ACTIVE_FLOWS=8 cargo run` shows `8` in the log.
+* `TINYLLB__SCHEDULER__MAX_ACTIVE_FLOWS=8 cargo run` shows `8` in the log.
 * Invalid `backend.url` fails to load with a clear error.

@@ -20,13 +20,13 @@ conventions every later issue follows.
 | `src/main.rs` | Edit: `telemetry::init()` before anything else runs. |
 | `src/gateway/proxy.rs` | Edit: per-request span with `flow_id`, `request_id`, `method`, `path`. |
 | `src/scheduler/mod.rs` | Edit: span on `admit` (`flow_id`, queued-for, decision). |
-| `docs/plans/001-llm-qdisc-proxy/TRACING.md` | New: span field conventions. |
+| `docs/plans/001-tinyllb/TRACING.md` | New: span field conventions. |
 
 ## Steps
 
 1. `tracing_subscriber::fmt()` configured by env (`RUST_LOG`, default `info`,
-   `llm_qdisc_proxy=debug`).
-2. JSON output mode toggled by `LLM_QDISC_LOG_JSON=1` (for shipping to a log
+   `tinyllb_proxy=debug`).
+2. JSON output mode toggled by `TINYLLB_LOG_JSON=1` (for shipping to a log
    aggregator; default stays human-readable).
 3. OpenTelemetry export is **scaffolded but commented out**: pulling in
    `opentelemetry-otlp` and running a collector is left for deployment; this
@@ -46,7 +46,7 @@ conventions every later issue follows.
 
 * `cargo run` with `RUST_LOG=debug` shows structured spans for `/healthz` and
   a forwarded request including `flow_id`, `request_id`, `decision`.
-* `LLM_QDISC_LOG_JSON=1 cargo run` emits valid JSON-per-line logs parseable by
+* `TINYLLB_LOG_JSON=1 cargo run` emits valid JSON-per-line logs parseable by
   `jq`.
 * `X-Request-ID` echoed back on a forwarded request's response.
 * No prompt bodies appear anywhere in logs (assert via grep on a test run).

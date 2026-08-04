@@ -8,11 +8,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use tower::ServiceExt;
 
-use llm_qdisc_proxy::config::{BackpressureMode, RetryPolicy};
-use llm_qdisc_proxy::flow::FlowRegistry;
-use llm_qdisc_proxy::gateway;
-use llm_qdisc_proxy::metrics;
-use llm_qdisc_proxy::scheduler;
+use tinyllb::config::{BackpressureMode, RetryPolicy};
+use tinyllb::flow::FlowRegistry;
+use tinyllb::gateway;
+use tinyllb::metrics;
+use tinyllb::scheduler;
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -21,11 +21,11 @@ use llm_qdisc_proxy::scheduler;
 fn build_proxy_app_with_retry(
     backend_url: &str,
     retry_policy: RetryPolicy,
-) -> (Router, Arc<llm_qdisc_proxy::metrics::Metrics>) {
+) -> (Router, Arc<tinyllb::metrics::Metrics>) {
     let metrics = metrics::create_metrics();
     let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
     let scheduler = scheduler::Scheduler::new_with_defaults(
-        llm_qdisc_proxy::config::Algorithm::Fifo,
+        tinyllb::config::Algorithm::Fifo,
         4,
         metrics.clone(),
         flow_registry.clone(),
@@ -40,8 +40,8 @@ fn build_proxy_app_with_retry(
         metrics: metrics.clone(),
         scheduler: Arc::new(scheduler),
         flow_registry,
-        backpressure: llm_qdisc_proxy::config::Backpressure::default(),
-        priorities: llm_qdisc_proxy::config::Priorities::default(),
+        backpressure: tinyllb::config::Backpressure::default(),
+        priorities: tinyllb::config::Priorities::default(),
         request_timeout: None,
         context: None,
         retry_policy,
@@ -52,10 +52,10 @@ fn build_proxy_app_with_retry(
     let metrics_router = Router::new()
         .route(
             "/metrics",
-            get(llm_qdisc_proxy::metrics::endpoint::metrics_handler),
+            get(tinyllb::metrics::endpoint::metrics_handler),
         )
         .with_state(state.clone());
-    let admin_router = llm_qdisc_proxy::api::create_router().with_state(state.clone());
+    let admin_router = tinyllb::api::create_router().with_state(state.clone());
 
     let app = Router::new()
         .merge(health_router)

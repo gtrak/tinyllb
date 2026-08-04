@@ -162,7 +162,7 @@ impl ContextPolicy {
     }
 
     fn default_store_path() -> String {
-        "~/.local/share/llm-qdisc/transcripts.db".to_string()
+        "~/.local/share/tinyllb/transcripts.db".to_string()
     }
 
     fn default_sidecar_request_timeout() -> Duration {

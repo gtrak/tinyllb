@@ -9,7 +9,7 @@ maintainers know which headers are honored and in what order.
 
 | File | Change |
 |------|--------|
-| `docs/plans/001-llm-qdisc-proxy/TRACING.md` | Update `flow_id` field description to mention harness session headers |
+| `docs/plans/001-tinyllb/TRACING.md` | Update `flow_id` field description to mention harness session headers |
 | `src/flow/identify.rs` | Module doc comment: full precedence list (done in issue 01; verify wording) |
 | `README.md` (if present) | Note supported session headers in the flow-ID section, if one exists |
 

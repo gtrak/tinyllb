@@ -13,12 +13,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use tower::ServiceExt;
 
-use llm_qdisc_proxy::config::Algorithm;
-use llm_qdisc_proxy::config::BackpressureMode;
-use llm_qdisc_proxy::flow::FlowRegistry;
-use llm_qdisc_proxy::gateway;
-use llm_qdisc_proxy::metrics;
-use llm_qdisc_proxy::scheduler::Scheduler;
+use tinyllb::config::Algorithm;
+use tinyllb::config::BackpressureMode;
+use tinyllb::flow::FlowRegistry;
+use tinyllb::gateway;
+use tinyllb::metrics;
+use tinyllb::scheduler::Scheduler;
 
 /// Shared atomic counter tracking concurrent in-flight requests at the stub.
 struct LoadTestState {
@@ -101,11 +101,11 @@ fn build_admin_test_app(
         metrics: metrics.clone(),
         scheduler: Arc::new(scheduler),
         flow_registry: flow_registry.clone(),
-        backpressure: llm_qdisc_proxy::config::Backpressure::default(),
-        priorities: llm_qdisc_proxy::config::Priorities::default(),
+        backpressure: tinyllb::config::Backpressure::default(),
+        priorities: tinyllb::config::Priorities::default(),
         request_timeout: None,
         context: None,
-        retry_policy: llm_qdisc_proxy::config::RetryPolicy::default(),
+        retry_policy: tinyllb::config::RetryPolicy::default(),
     };
 
     let _ = _backend_url;
@@ -114,10 +114,10 @@ fn build_admin_test_app(
     let metrics_router = Router::new()
         .route(
             "/metrics",
-            get(llm_qdisc_proxy::metrics::endpoint::metrics_handler),
+            get(tinyllb::metrics::endpoint::metrics_handler),
         )
         .with_state(state.clone());
-    let admin_router = llm_qdisc_proxy::api::create_router().with_state(state);
+    let admin_router = tinyllb::api::create_router().with_state(state);
 
     let app = Router::new()
         .merge(health_router)
@@ -163,7 +163,7 @@ async fn test_register_new_flow_returns_201() {
     assert!(text.contains(r#""status":"created""#));
 
     // Verify the flow is in the registry with correct values.
-    let flow = registry.get_or_create(llm_qdisc_proxy::flow::FlowId::new("new-agent"));
+    let flow = registry.get_or_create(tinyllb::flow::FlowId::new("new-agent"));
     assert_eq!(flow.weight(), 5.0);
     assert_eq!(flow.priority(), 50);
 }
@@ -174,7 +174,7 @@ async fn test_update_existing_flow_returns_200() {
     let (app, registry, _metrics, _load_state) = build_admin_test_app("http://localhost/", 4);
 
     // Pre-create a flow via get_or_create.
-    registry.get_or_create(llm_qdisc_proxy::flow::FlowId::new("existing-agent"));
+    registry.get_or_create(tinyllb::flow::FlowId::new("existing-agent"));
 
     let body = r#"{"id":"existing-agent","weight":10.0,"priority":80}"#;
     let resp = app
@@ -194,7 +194,7 @@ async fn test_update_existing_flow_returns_200() {
     assert!(text.contains(r#""status":"updated""#));
 
     // Verify the flow has the updated values.
-    let flow = registry.get_or_create(llm_qdisc_proxy::flow::FlowId::new("existing-agent"));
+    let flow = registry.get_or_create(tinyllb::flow::FlowId::new("existing-agent"));
     assert_eq!(flow.weight(), 10.0);
     assert_eq!(flow.priority(), 80);
 }

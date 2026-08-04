@@ -39,7 +39,7 @@ The subsystem exposes a shared state object, a reconciliation entry point, a bac
 
 **Admin API.** See [[api#Admin API Router Assembly]] — `GET /admin/context`, `GET /admin/context/{flow_id}`, `POST /admin/context/{flow_id}/compress`, `DELETE /admin/context/{flow_id}`.
 
-**Metrics.** See [[metrics#Metrics Registry]] — the context compression metric family (`llm_qdisc_context_*`).
+**Metrics.** See [[metrics#Metrics Registry]] — the context compression metric family (`tinyllb_context_*`).
 
 ## Invariants
 

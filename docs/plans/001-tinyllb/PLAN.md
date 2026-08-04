@@ -1,4 +1,4 @@
-# Plan 001 — LLM QDisc Proxy
+# Plan 001 — tinyllb
 
 Implementation plan for the **Agent-Aware LLM Inference Scheduling Proxy**
 described in `PRD.md`.  Tracks the build-out from empty repo to an MVP

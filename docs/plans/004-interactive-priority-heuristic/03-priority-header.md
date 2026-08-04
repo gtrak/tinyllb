@@ -149,7 +149,7 @@ with the literal value `auto`.
 ## Notes
 
 - Header parsing is the only new client-facing surface in this plan.
-  Document it in `docs/plans/001-llm-qdisc-proxy/PRIORITY.md` (issue
+  Document it in `docs/plans/001-tinyllb/PRIORITY.md` (issue
   07) once behavior stabilizes.
 - The `unset_override` flag is a deliberate choice over hiding the
   reset behind a `POST /flows` admin call. Clients need a way to

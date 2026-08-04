@@ -58,7 +58,7 @@ pub mod humantime_serde_option {
 /// Load configuration from YAML file and environment overrides.
 ///
 /// Reads `$CONFIG_PATH` (defaults to `config.yaml`). If the file does not exist,
-/// uses defaults. Then layers `LLM_QDISC__*` environment variable overrides.
+/// uses defaults. Then layers `TINYLLB__*` environment variable overrides.
 /// Finally validates the resolved config.
 pub fn load() -> anyhow::Result<Config> {
     let config_path = std::env::var("CONFIG_PATH").unwrap_or_else(|_| "config.yaml".to_string());
@@ -91,7 +91,7 @@ pub fn load() -> anyhow::Result<Config> {
         .set_default("context_policy.summary_max_tokens", 2048u64)?
         .set_default(
             "context_policy.store_path",
-            "~/.local/share/llm-qdisc/transcripts.db",
+            "~/.local/share/tinyllb/transcripts.db",
         )?
         .set_default("context_policy.sidecar_request_timeout", "60s")?
         .set_default("context_policy.compression_retries", 3u64)?
@@ -111,7 +111,7 @@ pub fn load() -> anyhow::Result<Config> {
                 .format(config::FileFormat::Yaml)
                 .required(false),
         )
-        .add_source(config::Environment::with_prefix("LLM_QDISC").separator("__"));
+        .add_source(config::Environment::with_prefix("TINYLLB").separator("__"));
 
     let settings = builder.build()?;
     let mut cfg: Config = settings.try_deserialize()?;

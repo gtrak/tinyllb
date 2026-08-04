@@ -6,11 +6,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use llm_qdisc_proxy::backend::{BackendMonitor, BackendSnapshot};
-use llm_qdisc_proxy::config::{Algorithm, BackpressureMode, KvPolicyConfig, Priorities, PriorityPolicy};
-use llm_qdisc_proxy::flow::{FlowId, FlowRegistry};
-use llm_qdisc_proxy::metrics;
-use llm_qdisc_proxy::scheduler::Scheduler;
+use tinyllb::backend::{BackendMonitor, BackendSnapshot};
+use tinyllb::config::{Algorithm, BackpressureMode, KvPolicyConfig, Priorities, PriorityPolicy};
+use tinyllb::flow::{FlowId, FlowRegistry};
+use tinyllb::metrics;
+use tinyllb::scheduler::Scheduler;
 
 // ---------------------------------------------------------------------------
 // Helper: build scheduler with KV policy

@@ -15,7 +15,7 @@ compiles and the CI gate is green.
 
 | File | Change |
 | --- | --- |
-| `Cargo.toml` | New workspace root; crate `llm-qdisc-proxy`, edition 2021. |
+| `Cargo.toml` | New workspace root; crate `tinyllb`, edition 2021. |
 | `Cargo.lock` | Generated on first build; commit. |
 | `src/main.rs` | New: minimal axum server, `/healthz` -> `200 OK`, listens on `0.0.0.0:8080` (port overridable via env). |
 | `.gitignore` | New: `target/`, `/target`. |
@@ -24,7 +24,7 @@ compiles and the CI gate is green.
 
 ## Steps
 
-1. `cargo init --name llm-qdisc-proxy`.
+1. `cargo init --name tinyllb`.
 2. Add deps to `Cargo.toml`: `axum`, `tokio` (full), `serde`, `serde_json`,
    `tower`, `reqwest` (for later proxying; pull now to fail fast on version
    conflicts), `prometheus` (later, but reserve the dep), `tracing`,

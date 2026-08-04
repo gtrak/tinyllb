@@ -26,13 +26,13 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates curl && \
     rm -rf /var/lib/apt/lists/* && \
     groupadd -f --system proxy && \
-    useradd --system --gid proxy --no-create-home --home-dir /etc/llm-qdisc proxy 2>/dev/null || true
+    useradd --system --gid proxy --no-create-home --home-dir /etc/tinyllb proxy 2>/dev/null || true
 
-COPY --from=builder /src/target/release/llm-qdisc-proxy /usr/local/bin/
-COPY config.example.yaml /etc/llm-qdisc/config.example.yaml
+COPY --from=builder /src/target/release/tinyllb /usr/local/bin/
+COPY config.example.yaml /etc/tinyllb/config.example.yaml
 
 USER proxy
 EXPOSE 8080
-ENV CONFIG_PATH=/etc/llm-qdisc/config.yaml
+ENV CONFIG_PATH=/etc/tinyllb/config.yaml
 
-ENTRYPOINT ["llm-qdisc-proxy"]
+ENTRYPOINT ["tinyllb"]

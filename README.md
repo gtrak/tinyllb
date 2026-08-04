@@ -1,4 +1,4 @@
-# llm-qdisc-proxy
+# tinyllb
 
 tc/qdisc for LLM inference workloads.
 
@@ -69,9 +69,9 @@ settings. You can also override via environment variables:
 ```yaml
 # docker-compose override example
 environment:
-  - LLM_QDISC__BACKEND__URL=http://vllm:8000
-  - LLM_QDISC__SCHEDULER__ALGORITHM=wfq
-  - LLM_QDISC__SCHEDULER__MAX_ACTIVE_FLOWS=8
+  - TINYLLB__BACKEND__URL=http://vllm:8000
+  - TINYLLB__SCHEDULER__ALGORITHM=wfq
+  - TINYLLB__SCHEDULER__MAX_ACTIVE_FLOWS=8
 ```
 
 ### Multi-GPU Local (Tensor Parallel)
@@ -125,7 +125,7 @@ overridden via environment variables (see below).
 | `context_policy.live_keep_turns` | `6` | Turns kept verbatim at end (recent context) |
 | `context_policy.compress_chunk_turns` | `8` | Turns folded into each compressed summary |
 | `context_policy.summary_max_tokens` | `2048` | Max tokens for sidecar summarization request |
-| `context_policy.store_path` | `~/.local/share/llm-qdisc/transcripts.db` | SQLite transcript store path |
+| `context_policy.store_path` | `~/.local/share/tinyllb/transcripts.db` | SQLite transcript store path |
 | `context_policy.tokenizer_path` | *(none)* | Path to tokenizer.json for accurate token counts |
 | `context_policy.compression_retries` | `3` | Sidecar retry attempts on failure |
 | `retry_policy.enabled` | `false` | Enable premature-stop retry for chat completions |
@@ -157,24 +157,24 @@ overridden via environment variables (see below).
 | --- | --- |
 | `CONFIG_PATH` | Path to config file (default: `config.yaml`) |
 | `PORT` | Override bind port (e.g. `PORT=9090` binds to `0.0.0.0:9090`) |
-| `LLM_QDISC__BACKEND__URL` | Override `backend.url` |
-| `LLM_QDISC__SCHEDULER__ALGORITHM` | Override scheduler algorithm |
-| `LLM_QDISC__SCHEDULER__MAX_ACTIVE_FLOWS` | Override max active flows |
-| `LLM_QDISC__SCHEDULER__STARVATION_TIMEOUT` | Override starvation timeout |
-| `LLM_QDISC__FLOWS__DEFAULT_WEIGHT` | Override default flow weight |
-| `LLM_QDISC__FLOWS__DEFAULT_PRIORITY` | Override default flow priority |
-| `LLM_QDISC__PRIORITIES__INTERACTIVE` | Override interactive priority |
-| `LLM_QDISC__PRIORITIES__AGENT` | Override agent priority |
-| `LLM_QDISC__PRIORITIES__BACKGROUND` | Override background priority |
-| `LLM_QDISC__BACKPRESSURE__MODE` | Override backpressure mode |
-| `LLM_QDISC__BACKPRESSURE__MAX_QUEUE_DEPTH` | Override max queue depth |
-| `LLM_QDISC__SERVER__BIND` | Override server bind address |
-| `LLM_QDISC__KV_POLICY__ENABLED` | Override KV policy enable flag |
-| `LLM_QDISC__KV_POLICY__REJECT_THRESHOLD` | Override KV reject threshold |
-| `LLM_QDISC__KV_POLICY__DELAY_THRESHOLD` | Override KV delay threshold |
-| `LLM_QDISC__REQUEST_TIMEOUT` | Override request timeout |
+| `TINYLLB__BACKEND__URL` | Override `backend.url` |
+| `TINYLLB__SCHEDULER__ALGORITHM` | Override scheduler algorithm |
+| `TINYLLB__SCHEDULER__MAX_ACTIVE_FLOWS` | Override max active flows |
+| `TINYLLB__SCHEDULER__STARVATION_TIMEOUT` | Override starvation timeout |
+| `TINYLLB__FLOWS__DEFAULT_WEIGHT` | Override default flow weight |
+| `TINYLLB__FLOWS__DEFAULT_PRIORITY` | Override default flow priority |
+| `TINYLLB__PRIORITIES__INTERACTIVE` | Override interactive priority |
+| `TINYLLB__PRIORITIES__AGENT` | Override agent priority |
+| `TINYLLB__PRIORITIES__BACKGROUND` | Override background priority |
+| `TINYLLB__BACKPRESSURE__MODE` | Override backpressure mode |
+| `TINYLLB__BACKPRESSURE__MAX_QUEUE_DEPTH` | Override max queue depth |
+| `TINYLLB__SERVER__BIND` | Override server bind address |
+| `TINYLLB__KV_POLICY__ENABLED` | Override KV policy enable flag |
+| `TINYLLB__KV_POLICY__REJECT_THRESHOLD` | Override KV reject threshold |
+| `TINYLLB__KV_POLICY__DELAY_THRESHOLD` | Override KV delay threshold |
+| `TINYLLB__REQUEST_TIMEOUT` | Override request timeout |
 
-The `LLM_QDISC__` prefix replaces config sections: `LLM_QDISC__SECTION__KEY`
+The `TINYLLB__` prefix replaces config sections: `TINYLLB__SECTION__KEY`
 maps to `section.key` in YAML.
 
 ## Context Compression
@@ -202,7 +202,7 @@ curl -X POST http://localhost:8080/admin/context/{flow_id}/compress  # force com
 curl -X DELETE http://localhost:8080/admin/context/{flow_id}         # clear transcript
 ```
 
-**Prometheus metrics** (prefixed `llm_qdisc_context_`):
+**Prometheus metrics** (prefixed `tinyllb_context_`):
 `compression_events_total`, `compression_tokens_saved_total`,
 `compression_sidecar_latency_seconds`, `estimated_tokens{flow_id}`,
 `compression_queue_depth`.
@@ -227,11 +227,11 @@ appears as extra "thinking" but the thread survives with a single terminal
 frame + `[DONE]`.
 - **Non-streaming:** The client receives the good response body after retry;
 fail-open forwards the last degenerate body if all retries are exhausted.
-- **Environment overrides:** `LLM_QDISC__RETRY_POLICY__ENABLED=true`, etc.
+- **Environment overrides:** `TINYLLB__RETRY_POLICY__ENABLED=true`, etc.
 
 **Disabled by default.** Enable via `retry_policy.enabled: true` in config.
 
-**Prometheus metrics** (prefixed `llm_qdisc_premature_stop_`):
+**Prometheus metrics** (prefixed `tinyllb_premature_stop_`):
 `detected_total`, `retries_total`, `exhausted_total`.
 
 See `docs/plans/005-premature-stop-retry/PLAN.md` for the full design.
@@ -240,10 +240,10 @@ See `docs/plans/005-premature-stop-retry/PLAN.md` for the full design.
 
 Measured throughput and fairness benchmarks are documented in:
 
-- [Phase 1 Results](docs/plans/001-llm-qdisc-proxy/PHASE1-RESULTS.md) —
+- [Phase 1 Results](docs/plans/001-tinyllb/PHASE1-RESULTS.md) —
   Admission control vs direct uncontrolled path. At N=32, proxy achieves
   3.48× higher tokens/sec than direct.
-- [Phase 2 Results](docs/plans/001-llm-qdisc-proxy/PHASE2-RESULTS.md) —
+- [Phase 2 Results](docs/plans/001-tinyllb/PHASE2-RESULTS.md) —
   WFQ fairness, no-starvation guarantees, completion bias, and queue
   endpoint correctness.
 

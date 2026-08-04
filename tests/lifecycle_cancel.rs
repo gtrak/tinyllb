@@ -26,11 +26,11 @@ use std::sync::Arc;
 use std::time::Duration;
 use tower::ServiceExt;
 
-use llm_qdisc_proxy::config::{Algorithm, Backpressure, BackpressureMode, Priorities};
-use llm_qdisc_proxy::flow::FlowRegistry;
-use llm_qdisc_proxy::gateway;
-use llm_qdisc_proxy::metrics;
-use llm_qdisc_proxy::scheduler::Scheduler;
+use tinyllb::config::{Algorithm, Backpressure, BackpressureMode, Priorities};
+use tinyllb::flow::FlowRegistry;
+use tinyllb::gateway;
+use tinyllb::metrics;
+use tinyllb::scheduler::Scheduler;
 
 // ---------------------------------------------------------------------------
 // SSE stream wrapper for tests
@@ -242,7 +242,7 @@ fn build_proxy_with_fifo(backend_url: &str) -> (Router, Arc<metrics::Metrics>) {
         priorities: Priorities::default(),
         request_timeout: None,
         context: None,
-        retry_policy: llm_qdisc_proxy::config::RetryPolicy::default(),
+        retry_policy: tinyllb::config::RetryPolicy::default(),
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
@@ -250,10 +250,10 @@ fn build_proxy_with_fifo(backend_url: &str) -> (Router, Arc<metrics::Metrics>) {
     let metrics_router = Router::new()
         .route(
             "/metrics",
-            get(llm_qdisc_proxy::metrics::endpoint::metrics_handler),
+            get(tinyllb::metrics::endpoint::metrics_handler),
         )
         .with_state(state.clone());
-    let admin_router = llm_qdisc_proxy::api::create_router().with_state(state.clone());
+    let admin_router = tinyllb::api::create_router().with_state(state.clone());
 
     let app = Router::new()
         .merge(health_router)
@@ -289,7 +289,7 @@ fn build_proxy_with_drr(backend_url: &str) -> (Router, Arc<metrics::Metrics>, Ar
         priorities: Priorities::default(),
         request_timeout: None,
         context: None,
-        retry_policy: llm_qdisc_proxy::config::RetryPolicy::default(),
+        retry_policy: tinyllb::config::RetryPolicy::default(),
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
@@ -297,10 +297,10 @@ fn build_proxy_with_drr(backend_url: &str) -> (Router, Arc<metrics::Metrics>, Ar
     let metrics_router = Router::new()
         .route(
             "/metrics",
-            get(llm_qdisc_proxy::metrics::endpoint::metrics_handler),
+            get(tinyllb::metrics::endpoint::metrics_handler),
         )
         .with_state(state.clone());
-    let admin_router = llm_qdisc_proxy::api::create_router().with_state(state.clone());
+    let admin_router = tinyllb::api::create_router().with_state(state.clone());
 
     let app = Router::new()
         .merge(health_router)
@@ -545,7 +545,7 @@ async fn test_streaming_with_usage_tracks_tokens() {
 /// Test: request_timeout config field exists and can be loaded.
 #[tokio::test]
 async fn test_request_timeout_config_exists() {
-    use llm_qdisc_proxy::config::Config;
+    use tinyllb::config::Config;
 
     // Default config should have request_timeout = None.
     let config = Config::default();
@@ -639,7 +639,7 @@ async fn test_drr_credit_restored_on_cancel() {
     let (app, m, scheduler) = build_proxy_with_drr(&backend_url);
 
     // Use the scheduler's credit accessor.
-    let flow_id = llm_qdisc_proxy::flow::FlowId::new("test-flow-cancel");
+    let flow_id = tinyllb::flow::FlowId::new("test-flow-cancel");
 
     // Record credit BEFORE the request (baseline).
     let credit_before = scheduler.credit(&flow_id);
@@ -757,7 +757,7 @@ fn build_proxy_with_drr_and_timeout(
         priorities: Priorities::default(),
         request_timeout: Some(timeout),
         context: None,
-        retry_policy: llm_qdisc_proxy::config::RetryPolicy::default(),
+        retry_policy: tinyllb::config::RetryPolicy::default(),
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
@@ -765,10 +765,10 @@ fn build_proxy_with_drr_and_timeout(
     let metrics_router = Router::new()
         .route(
             "/metrics",
-            get(llm_qdisc_proxy::metrics::endpoint::metrics_handler),
+            get(tinyllb::metrics::endpoint::metrics_handler),
         )
         .with_state(state.clone());
-    let admin_router = llm_qdisc_proxy::api::create_router().with_state(state.clone());
+    let admin_router = tinyllb::api::create_router().with_state(state.clone());
 
     let app = Router::new()
         .merge(health_router)
@@ -792,7 +792,7 @@ async fn test_timeout_cancels_and_restores_credit() {
     let (app, m, scheduler) =
         build_proxy_with_drr_and_timeout(&backend_url, Duration::from_millis(300));
 
-    let flow_id = llm_qdisc_proxy::flow::FlowId::new("test-timeout-flow");
+    let flow_id = tinyllb::flow::FlowId::new("test-timeout-flow");
 
     // Record pre-request state.
     let credit_before = scheduler.credit(&flow_id);

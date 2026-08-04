@@ -13,13 +13,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use llm_qdisc_proxy::backend::BackendMonitor;
-use llm_qdisc_proxy::config::{
+use tinyllb::backend::BackendMonitor;
+use tinyllb::config::{
     Algorithm, BackpressureMode, CompletionBias, KvPolicyConfig, Priorities, PriorityPolicy,
 };
-use llm_qdisc_proxy::flow::{FlowId, FlowRegistry, PriorityClass};
-use llm_qdisc_proxy::metrics::{self, Metrics};
-use llm_qdisc_proxy::scheduler::Scheduler;
+use tinyllb::flow::{FlowId, FlowRegistry, PriorityClass};
+use tinyllb::metrics::{self, Metrics};
+use tinyllb::scheduler::Scheduler;
 
 const WORK_UNIT: f64 = 1024.0;
 

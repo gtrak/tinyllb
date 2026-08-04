@@ -10,10 +10,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use llm_qdisc_proxy::config::{Algorithm, BackpressureMode};
-use llm_qdisc_proxy::flow::{FlowId, FlowRegistry};
-use llm_qdisc_proxy::metrics;
-use llm_qdisc_proxy::scheduler::Scheduler;
+use tinyllb::config::{Algorithm, BackpressureMode};
+use tinyllb::flow::{FlowId, FlowRegistry};
+use tinyllb::metrics;
+use tinyllb::scheduler::Scheduler;
 
 /// Default work unit for tests.
 const WORK_UNIT: f64 = 10.0;
@@ -34,7 +34,7 @@ async fn test_drr_admit_single() {
         Duration::from_secs(1),
     );
 
-    registry.register(llm_qdisc_proxy::flow::FlowRegistration {
+    registry.register(tinyllb::flow::FlowRegistration {
         id: FlowId::new("A"),
         weight: 1.0,
         priority: 50,
@@ -70,7 +70,7 @@ async fn test_drr_credit_accumulation_and_consumption() {
         // Flow A weight=10, cost=10.
         // With weight=10, A accumulates 10 credit per tick.
         // Cost = 10, so A needs exactly 1 tick of accumulation to be served.
-        registry.register(llm_qdisc_proxy::flow::FlowRegistration {
+        registry.register(tinyllb::flow::FlowRegistration {
             id: FlowId::new("A"),
             weight: 10.0,
             priority: 50,
@@ -140,13 +140,13 @@ async fn test_drr_skip_when_deficit() {
         ));
 
         // Flow A: weight=1, cost=10 → needs 10 ticks
-        registry.register(llm_qdisc_proxy::flow::FlowRegistration {
+        registry.register(tinyllb::flow::FlowRegistration {
             id: FlowId::new("A"),
             weight: 1.0,
             priority: 50,
         });
         // Flow B: weight=10, cost=10 → needs 1 tick
-        registry.register(llm_qdisc_proxy::flow::FlowRegistration {
+        registry.register(tinyllb::flow::FlowRegistration {
             id: FlowId::new("B"),
             weight: 10.0,
             priority: 50,
@@ -225,7 +225,7 @@ async fn test_drr_credit_reset_on_empty() {
         Duration::from_secs(1),
     );
 
-    registry.register(llm_qdisc_proxy::flow::FlowRegistration {
+    registry.register(tinyllb::flow::FlowRegistration {
         id: FlowId::new("A"),
         weight: 10.0,
         priority: 50,
@@ -273,12 +273,12 @@ async fn test_drr_weight_ratio_discrimination() {
         ));
 
         // Flow A weight=10, Flow B weight=1.
-        registry.register(llm_qdisc_proxy::flow::FlowRegistration {
+        registry.register(tinyllb::flow::FlowRegistration {
             id: FlowId::new("A"),
             weight: 10.0,
             priority: 50,
         });
-        registry.register(llm_qdisc_proxy::flow::FlowRegistration {
+        registry.register(tinyllb::flow::FlowRegistration {
             id: FlowId::new("B"),
             weight: 1.0,
             priority: 50,
@@ -385,7 +385,7 @@ async fn test_drr_queue_snapshot() {
         Duration::from_secs(1),
     );
 
-    registry.register(llm_qdisc_proxy::flow::FlowRegistration {
+    registry.register(tinyllb::flow::FlowRegistration {
         id: FlowId::new("X"),
         weight: 1.0,
         priority: 50,
@@ -423,7 +423,7 @@ async fn test_drr_fail_fast_rejection() {
         Duration::from_secs(2), // retry_after_base for assertion
     ));
 
-    registry.register(llm_qdisc_proxy::flow::FlowRegistration {
+    registry.register(tinyllb::flow::FlowRegistration {
         id: FlowId::new("A"),
         weight: 10.0,
         priority: 50,
@@ -476,7 +476,7 @@ async fn test_drr_hybrid_timeout() {
         Duration::from_millis(5),
     );
 
-    registry.register(llm_qdisc_proxy::flow::FlowRegistration {
+    registry.register(tinyllb::flow::FlowRegistration {
         id: FlowId::new("A"),
         weight: 1.0,
         priority: 50,
@@ -509,7 +509,7 @@ async fn test_drr_cancelled_waiter_no_active_underflow() {
         Duration::from_millis(5),
     ));
 
-    registry.register(llm_qdisc_proxy::flow::FlowRegistration {
+    registry.register(tinyllb::flow::FlowRegistration {
         id: FlowId::new("A"),
         weight: 1.0,
         priority: 50,
@@ -559,7 +559,7 @@ async fn test_drr_sibling_cancel_does_not_kill_other() {
         Duration::from_secs(1),
     ));
 
-    registry.register(llm_qdisc_proxy::flow::FlowRegistration {
+    registry.register(tinyllb::flow::FlowRegistration {
         id: FlowId::new("A"),
         weight: 10.0,
         priority: 50,
@@ -646,7 +646,7 @@ async fn test_drr_zero_weight_flow_no_wedge() {
         frac_flow.set_weight(0.5);
 
         // Normal flow with sufficient weight.
-        registry.register(llm_qdisc_proxy::flow::FlowRegistration {
+        registry.register(tinyllb::flow::FlowRegistration {
             id: FlowId::new("normal"),
             weight: 10.0,
             priority: 50,

@@ -25,10 +25,10 @@ Validate the PRD §14 success metrics end-to-end:
 
 | File | Change |
 | --- | --- |
-| `tests/phase3_live.rs` | New: live vLLM integration; `#[ignore]` unless `LLM_QDISC_LIVE_TESTS=1`. |
+| `tests/phase3_live.rs` | New: live vLLM integration; `#[ignore]` unless `TINYLLB_LIVE_TESTS=1`. |
 | `scripts/phase3_bench.sh` | New: harness for the +20% throughput comparison. |
 | `scripts/spawn_vllm.sh` | New: helper to launch a small vLLM server for tests. |
-| `docs/plans/001-llm-qdisc-proxy/PHASE3-RESULTS.md` | New: where the §14 metric table gets filled in. |
+| `docs/plans/001-tinyllb/PHASE3-RESULTS.md` | New: where the §14 metric table gets filled in. |
 
 ## Steps
 
@@ -36,7 +36,7 @@ Validate the PRD §14 success metrics end-to-end:
    path + args from env; document a tiny model like
    `meta-llama/Llama-3.2-1B-Instruct` so it fits a single modest GPU).  If
    env unset, the suite is skipped (`#[ignore]`).
-2. Tests (`tests/phase3_live.rs`, gated by `LLM_QDISC_LIVE_TESTS=1`):
+2. Tests (`tests/phase3_live.rs`, gated by `TINYLLB_LIVE_TESTS=1`):
    * **Throughput delta**: identical 50-request bursty workload, run twice:
      direct-to-vLLM, then via-proxy with `algorithm=drr`, compare aggregate
      tokens/sec; assert via-proxy >= 1.2 * direct (PRD §14 +20% target).
@@ -57,12 +57,12 @@ Validate the PRD §14 success metrics end-to-end:
 
 ## Verification
 
-* `cargo test --all` (without `LLM_QDISC_LIVE_TESTS`) green, the live suite
+* `cargo test --all` (without `TINYLLB_LIVE_TESTS`) green, the live suite
   is skipped.
-* `LLM_QDISC_LIVE_TESTS=1 scripts/phase3_bench.sh` against a real vLLM fills
+* `TINYLLB_LIVE_TESTS=1 scripts/phase3_bench.sh` against a real vLLM fills
   in `PHASE3-RESULTS.md`.
 * The §14 table has a PASS/GAP verdict per row; **all six rows PASS** is the
   condition to close this issue and Phase 3.
 * On a GPU-less machine: `scripts/phase3_bench.sh` prints a clear "set
-  LLM_QDISC_LIVE_TESTS=1 + provide a vLLM endpoint" message and exits non-zero
+  TINYLLB_LIVE_TESTS=1 + provide a vLLM endpoint" message and exits non-zero
   without running the comparison.

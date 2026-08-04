@@ -14,16 +14,16 @@ the `X-LLM-Priority` header, then update the local vLLM deployment's
 
 | File | Change |
 | --- | --- |
-| `docs/plans/001-llm-qdisc-proxy/PRIORITY.md` | NEW: operator-facing doc. |
+| `docs/plans/001-tinyllb/PRIORITY.md` | NEW: operator-facing doc. |
 | `/home/gary/opt/vllm/WORKLOG.md` | EDIT:prepend a rollup entry. |
-| `/home/gary/.config/llm-qdisc/config.yaml` | EDIT: add the `priority_policy:` stanza. |
+| `/home/gary/.config/tinyllb/config.yaml` | EDIT: add the `priority_policy:` stanza. |
 | `/home/gary/opt/vllm/install-lb.sh` | EDIT: emit `priority_policy` defaults in the generated config. |
 | `src/flow/identify.rs` | EDIT: module-level doc comment referencing PRIORITY.md. |
 | `src/flow/cadence.rs` | EDIT: module-level doc comment with the classify table. |
 
 ## Steps
 
-1. Write `docs/plans/001-llm-qdisc-proxy/PRIORITY.md` covering:
+1. Write `docs/plans/001-tinyllb/PRIORITY.md` covering:
 
    - One-paragraph overview: cadence-based auto-classification, with
      an explicit header override.
@@ -77,17 +77,17 @@ the `X-LLM-Priority` header, then update the local vLLM deployment's
    should cover:
    - What changed (interactive-vs-batch heuristic + header).
    - Why (the 2026-08-03 19:47 contention burst).
-   - New config block to add to `~/.config/llm-qdisc/config.yaml`.
+   - New config block to add to `~/.config/tinyllb/config.yaml`.
    - How to disable (`priority_policy.enabled: false`).
-   - Link to `docs/plans/001-llm-qdisc-proxy/PRIORITY.md` (or the
+   - Link to `docs/plans/001-tinyllb/PRIORITY.md` (or the
      archive summary once the plan completes).
 
-3. Edit `~/.config/llm-qdisc/config.yaml`: append the
+3. Edit `~/.config/tinyllb/config.yaml`: append the
    `priority_policy:` block from step 1 and restart the service:
 
    ```bash
-   systemctl --user restart llm-qdisc-proxy.service
-   journalctl --user -u llm-qdisc-proxy --since "1 minute ago" --no-pager
+   systemctl --user restart tinyllb.service
+   journalctl --user -u tinyllb --since "1 minute ago" --no-pager
    ```
 
    Verify the new config is loaded in the `config loaded cfg=...`

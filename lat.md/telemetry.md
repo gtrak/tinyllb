@@ -26,15 +26,15 @@ Telemetry is a bootstrap configuration surface, not a data pipeline or a runtime
 The telemetry concept exposes a single public initialization surface and a configuration surface read entirely from environment variables. All output is written to stderr.
 
 - **Subscriber initialization** — activates the global tracing subscriber. Must be invoked exactly once before any diagnostic events are emitted. No parameters; all configuration is read from environment variables.
-- **Filter directive** — the `RUST_LOG` environment variable controls per-module verbosity. Defaults to `info,llm_qdisc_proxy=debug` when absent. If `RUST_LOG` is present but empty, the empty string is passed to the tracing system rather than falling back to the default.
-- **Output format selection** — the `LLM_QDISC_LOG_JSON` environment variable selects between structured JSON (value `"1"`) and human-readable output (any other value or absence). JSON mode produces flattened event entries suitable for log aggregators.
+- **Filter directive** — the `RUST_LOG` environment variable controls per-module verbosity. Defaults to `info,tinyllb_proxy=debug` when absent. If `RUST_LOG` is present but empty, the empty string is passed to the tracing system rather than falling back to the default.
+- **Output format selection** — the `TINYLLB_LOG_JSON` environment variable selects between structured JSON (value `"1"`) and human-readable output (any other value or absence). JSON mode produces flattened event entries suitable for log aggregators.
 - **Single-call constraint** — only one initialization is permitted per process lifetime. A second initialization attempt causes a panic in the calling thread.
 
 ## Invariants
 
 The following statements hold regardless of implementation details.
 
-- When `RUST_LOG` is absent, the filter directive resolves to `info,llm_qdisc_proxy=debug`. When present but empty, the empty string is used — distinct from the absent case.
+- When `RUST_LOG` is absent, the filter directive resolves to `info,tinyllb_proxy=debug`. When present but empty, the empty string is used — distinct from the absent case.
 - JSON mode is a binary toggle: only the exact string `"1"` enables JSON output; every other value, including empty string or absence, yields human-readable format.
 - Output format is strictly binary: either flattened JSON or human-readable with no intermediate or hybrid mode.
 - Only one initialization is permitted per process lifetime; repeated initialization is not allowed.

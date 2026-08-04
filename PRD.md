@@ -4,7 +4,7 @@
 
 ### Product Name
 
-**LLM QDisc Proxy** (working name)
+**tinyllb** (working name)
 
 ### Summary
 

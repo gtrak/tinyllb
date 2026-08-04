@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # run_local.sh — One-shot local single-GPU launcher.
 #
-# Starts the llm-qdisc-proxy in development mode, assuming a vLLM backend
-# at http://localhost:8000 (or $LLM_QDISC_BACKEND_URL).
+# Starts the tinyllb in development mode, assuming a vLLM backend
+# at http://localhost:8000 (or $TINYLLB_BACKEND_URL).
 #
 # Usage:
 #   ./scripts/run_local.sh
@@ -21,11 +21,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-BACKEND="${LLM_QDISC_BACKEND_URL:-http://localhost:8000}"
+BACKEND="${TINYLLB_BACKEND_URL:-http://localhost:8000}"
 PROXY_PORT="${PORT:-8080}"
 CONFIG_PATH="${CONFIG_PATH:-${REPO_ROOT}/config.yaml}"
 
-echo "=== llm-qdisc-proxy (local dev) ==="
+echo "=== tinyllb (local dev) ==="
 echo "Backend:  $BACKEND"
 echo "Proxy:    0.0.0.0:${PROXY_PORT}"
 echo "Config:   $CONFIG_PATH"
@@ -46,7 +46,7 @@ export PORT="$PROXY_PORT"
 
 # If BACKEND differs from default, override via env.
 if [ "$BACKEND" != "http://localhost:8000" ]; then
-    export LLM_QDISC__BACKEND__URL="$BACKEND"
+    export TINYLLB__BACKEND__URL="$BACKEND"
 fi
 
 cd "$REPO_ROOT"

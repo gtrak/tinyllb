@@ -3,31 +3,31 @@
 //! Configures `tracing_subscriber` based on environment variables:
 //!
 //! - `RUST_LOG` — standard `tracing` filter directive.
-//!   Default: `info,llm_qdisc_proxy=debug`.
-//! - `LLM_QDISC_LOG_JSON=1` — switch from human-readable to JSON output
+//!   Default: `info,tinyllb=debug`.
+//! - `TINYLLB_LOG_JSON=1` — switch from human-readable to JSON output
 //!   (useful for shipping to a log aggregator such as Loki or Datadog).
 //!
 //! Span conventions are documented in
-//! `docs/plans/001-llm-qdisc-proxy/TRACING.md`.
+//! `docs/plans/001-tinyllb/TRACING.md`.
 
 /// Initialize the global tracing subscriber.
 ///
 /// Called once at the start of `main()`.  Configures:
-/// - An env-filter for `RUST_LOG` (default `info,llm_qdisc_proxy=debug`).
-/// - JSON output when `LLM_QDISC_LOG_JSON=1` is set; human-readable otherwise.
+/// - An env-filter for `RUST_LOG` (default `info,tinyllb=debug`).
+/// - JSON output when `TINYLLB_LOG_JSON=1` is set; human-readable otherwise.
 ///
 /// OpenTelemetry export is scaffolded as a commented-out `init_otlp()` stub
 /// below — the codebase uses `tracing` spans throughout, so an OTLP exporter
 /// can be wired up later without rewriting call sites.
 // @lat: [[telemetry#Telemetry Initialization]]
 pub fn init() {
-    let json_mode = std::env::var("LLM_QDISC_LOG_JSON")
+    let json_mode = std::env::var("TINYLLB_LOG_JSON")
         .map(|v| v == "1")
         .unwrap_or(false);
 
     // Default filter: info globally, debug for our crate.
     let env_filter =
-        std::env::var("RUST_LOG").unwrap_or_else(|_| "info,llm_qdisc_proxy=debug".to_string());
+        std::env::var("RUST_LOG").unwrap_or_else(|_| "info,tinyllb=debug".to_string());
 
     if json_mode {
         tracing_subscriber::fmt()
@@ -69,7 +69,7 @@ pub fn init() {
 /// //
 /// // tracing_subscriber::fmt()
 /// //     .with_env_filter(std::env::var("RUST_LOG")
-/// //         .unwrap_or_else(|_| "info,llm_qdisc_proxy=debug".to_string()))
+/// //         .unwrap_or_else(|_| "info,tinyllb=debug".to_string()))
 /// //     .finish()
 /// //     .with(otel)
 /// //     .init();

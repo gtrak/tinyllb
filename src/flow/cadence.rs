@@ -9,7 +9,7 @@
 //!
 //! Hysteresis: an interactive flow is only demoted after a sustained run
 //! of fast gaps (last 3 all <= background_gap_max). See
-//! `docs/plans/001-llm-qdisc-proxy/PRIORITY.md`.
+//! `docs/plans/001-tinyllb/PRIORITY.md`.
 
 use std::collections::VecDeque;
 use std::sync::Arc;

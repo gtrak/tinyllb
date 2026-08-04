@@ -3,7 +3,7 @@
 ## Test Summary
 
 Live tests against real vLLM backend at http://gary-agents:1234.
-Gate: LLM_QDISC_LIVE_TESTS=1, backend: http://gary-agents:1234
+Gate: TINYLLB_LIVE_TESTS=1, backend: http://gary-agents:1234
 
 Live test results: 8 passed, 0 failed.
 

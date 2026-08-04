@@ -755,7 +755,7 @@ pub async fn proxy_handler(
     );
     // Report premature-stop retry count.
     resp.headers_mut().insert(
-        axum::http::HeaderName::from_static("x-llm-qdisc-premature-stop-retries"),
+        axum::http::HeaderName::from_static("x-tinyllb-premature-stop-retries"),
         axum::http::HeaderValue::from_str(&retry_attempts.to_string())
             .expect("retry count header value is valid"),
     );

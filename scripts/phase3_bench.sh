@@ -11,13 +11,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-RESULTS_DIR="$REPO_ROOT/docs/plans/001-llm-qdisc-proxy"
+RESULTS_DIR="$REPO_ROOT/docs/plans/001-tinyllb"
 RESULTS_FILE="$RESULTS_DIR/PHASE3-RESULTS.md"
 
 # ── Check prerequisites ──────────────────────────────────────────────────
 
-if [ "${LLM_QDISC_LIVE_TESTS:-}" != "1" ]; then
-    echo "ERROR: LLM_QDISC_LIVE_TESTS is not set to 1."
+if [ "${TINYLLB_LIVE_TESTS:-}" != "1" ]; then
+    echo "ERROR: TINYLLB_LIVE_TESTS is not set to 1."
     echo ""
     echo "Set the environment variable or source the env script first:"
     echo "  source scripts/phase3_live_env.sh"
@@ -25,7 +25,7 @@ if [ "${LLM_QDISC_LIVE_TESTS:-}" != "1" ]; then
     exit 1
 fi
 
-BACKEND="${LLM_QDISC_BACKEND_URL:-http://gary-agents:1234}"
+BACKEND="${TINYLLB_BACKEND_URL:-http://gary-agents:1234}"
 PROXY_BIND="127.0.0.1:18080"
 
 echo "=== Phase 3 Benchmark ==="
@@ -78,7 +78,7 @@ echo "  Backend reachable. ✓"
 
 echo ""
 echo "Running live tests..."
-LIVE_TEST_OUTPUT=$(cd "$REPO_ROOT" && LLM_QDISC_LIVE_TESTS=1 cargo test --test phase3_live -- --ignored 2>&1) || LIVE_TEST_EXIT=$?
+LIVE_TEST_OUTPUT=$(cd "$REPO_ROOT" && TINYLLB_LIVE_TESTS=1 cargo test --test phase3_live -- --ignored 2>&1) || LIVE_TEST_EXIT=$?
 LIVE_TEST_EXIT=${LIVE_TEST_EXIT:-0}
 
 echo "$LIVE_TEST_OUTPUT" | grep "test result:" || true
@@ -246,7 +246,7 @@ cat > "$RESULTS_FILE" << EOF
 ## Test Summary
 
 Live tests against real vLLM backend at $BACKEND.
-Gate: LLM_QDISC_LIVE_TESTS=1, backend: $BACKEND
+Gate: TINYLLB_LIVE_TESTS=1, backend: $BACKEND
 
 Live test results: $TESTS_PASSED passed, $TESTS_FAILED failed.
 

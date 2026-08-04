@@ -1,10 +1,10 @@
 use axum::{routing::get, Router};
 use std::sync::Arc;
 
-use llm_qdisc_proxy::config;
-use llm_qdisc_proxy::flow::FlowRegistry;
-use llm_qdisc_proxy::gateway;
-use llm_qdisc_proxy::metrics;
+use tinyllb::config;
+use tinyllb::flow::FlowRegistry;
+use tinyllb::gateway;
+use tinyllb::metrics;
 
 async fn healthz() -> &'static str {
     "ok"
@@ -17,7 +17,7 @@ pub fn create_router(state: gateway::AppState) -> Router {
         .route("/metrics", get(metrics::endpoint::metrics_handler))
         .with_state(state.clone());
     let gateway_router = gateway::create_router().with_state(state.clone());
-    let admin_router = llm_qdisc_proxy::api::create_router().with_state(state);
+    let admin_router = tinyllb::api::create_router().with_state(state);
 
     Router::new()
         .merge(health_router)
@@ -31,7 +31,7 @@ pub fn create_router(state: gateway::AppState) -> Router {
 /// deltas over `window_secs`. This smooths the lumpy updates that occur when
 /// tokens are credited in a batch at request completion.
 // @lat: [[app#Token Rate Gauge Task]]
-pub fn spawn_token_rate_task(metrics: &Arc<llm_qdisc_proxy::metrics::Metrics>, window_secs: u64) {
+pub fn spawn_token_rate_task(metrics: &Arc<tinyllb::metrics::Metrics>, window_secs: u64) {
     let tokens_total = metrics.tokens_generated_total.clone();
     let tokens_per_second = metrics.tokens_per_second.clone();
     let window_secs = window_secs.max(1);
@@ -61,12 +61,12 @@ pub fn spawn_token_rate_task(metrics: &Arc<llm_qdisc_proxy::metrics::Metrics>, w
 
 #[tokio::main]
 async fn main() {
-    llm_qdisc_proxy::telemetry::init();
+    tinyllb::telemetry::init();
 
     let cfg = config::load().expect("failed to load configuration");
     tracing::info!(?cfg, "config loaded");
 
-    let addr = if std::env::var("LLM_QDISC__SERVER__BIND").is_ok() {
+    let addr = if std::env::var("TINYLLB__SERVER__BIND").is_ok() {
         cfg.server.bind
     } else if let Ok(port_str) = std::env::var("PORT") {
         let port: u16 = port_str.parse().expect("PORT must be a valid port number");
@@ -89,7 +89,7 @@ async fn main() {
     // observability regardless of whether KV admission policy is enabled.
     // The KvPolicy itself short-circuits to Accept when disabled.
     let client = gateway::build_client();
-    let (monitor, monitor_task) = llm_qdisc_proxy::backend::BackendMonitor::new(
+    let (monitor, monitor_task) = tinyllb::backend::BackendMonitor::new(
         &cfg.backend,
         metrics.clone(),
         client.clone(),
@@ -99,7 +99,7 @@ async fn main() {
     }
     let monitor = Arc::new(monitor);
 
-    let scheduler = llm_qdisc_proxy::scheduler::Scheduler::new(
+    let scheduler = tinyllb::scheduler::Scheduler::new(
         cfg.scheduler.algorithm,
         cfg.scheduler.max_active_flows,
         metrics.clone(),
@@ -117,16 +117,16 @@ async fn main() {
     );
 
     // Initialize context-compression state when enabled.
-    let context_state: Option<Arc<llm_qdisc_proxy::context::ContextState>> = if cfg.context_policy.enabled {
+    let context_state: Option<Arc<tinyllb::context::ContextState>> = if cfg.context_policy.enabled {
         match async {
-            let (tx, rx) = tokio::sync::mpsc::channel::<llm_qdisc_proxy::context::CompressionJob>(64);
-            let state = Arc::new(llm_qdisc_proxy::context::ContextState::new(cfg.context_policy.clone(), tx, metrics.clone()).await?);
+            let (tx, rx) = tokio::sync::mpsc::channel::<tinyllb::context::CompressionJob>(64);
+            let state = Arc::new(tinyllb::context::ContextState::new(cfg.context_policy.clone(), tx, metrics.clone()).await?);
             let n = state.find_flows_needing_compression().await?;
             if n > 0 { tracing::info!(n, "enqueued compression jobs for over-threshold flows at startup"); }
             // Spawn the compression worker (consumes jobs from the channel).
             // Sidecar requests go directly to the vLLM backend (not through the
             // proxy) to avoid self-referential HTTP.
-            let worker = llm_qdisc_proxy::context::compressor::CompressionWorker::new(
+            let worker = tinyllb::context::compressor::CompressionWorker::new(
                 rx,
                 Arc::clone(&state),
                 cfg.backend.url.clone(),
@@ -176,15 +176,15 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
-    use llm_qdisc_proxy::config::BackpressureMode;
+    use tinyllb::config::BackpressureMode;
     use tower::ServiceExt;
 
     #[tokio::test]
     async fn test_healthz_returns_ok() {
         let metrics = metrics::create_metrics();
         let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
-        let scheduler = llm_qdisc_proxy::scheduler::Scheduler::new_with_defaults(
-            llm_qdisc_proxy::config::Algorithm::Fifo,
+        let scheduler = tinyllb::scheduler::Scheduler::new_with_defaults(
+            tinyllb::config::Algorithm::Fifo,
             4,
             metrics.clone(),
             flow_registry.clone(),

@@ -1,8 +1,8 @@
-use llm_qdisc_proxy::config::ContextPolicy;
-use llm_qdisc_proxy::context::estimator::TokenEstimator;
-use llm_qdisc_proxy::context::reconcile::reconcile;
-use llm_qdisc_proxy::context::segment::find_turn_boundaries;
-use llm_qdisc_proxy::context::store::{SqliteStore, TranscriptStore};
+use tinyllb::config::ContextPolicy;
+use tinyllb::context::estimator::TokenEstimator;
+use tinyllb::context::reconcile::reconcile;
+use tinyllb::context::segment::find_turn_boundaries;
+use tinyllb::context::store::{SqliteStore, TranscriptStore};
 use serde_json::json;
 use serde_json::Value;
 use std::time::Duration;
