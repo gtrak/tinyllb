@@ -39,6 +39,7 @@ The configuration surface presents contractual guarantees about what values are 
 - **Metrics** declares the metrics endpoint path (default `/metrics`).
 - **Server** declares the listener bind address (default `0.0.0.0:8080`).
 - **KV-cache policy** declares `enabled` (default `false`), `reject_threshold` (default `0.95`), and `delay_threshold` (default `0.80`).
+- **Context policy** declares compression settings: `enabled` (default `false`), `compress_threshold` (default `100000`), `head_keep_turns` (default `3`), `live_keep_turns` (default `6`), `compress_chunk_turns` (default `8`), `summary_max_tokens` (default `2048`), `store_path`, `tokenizer_path`, `sidecar_request_timeout` (default `60s`), `compression_retries` (default `3`), and `prompt_template_path`. See [[context#Context Compression]].
 
 **Duration representation**
 
@@ -74,6 +75,7 @@ These limitations are inherent to the configuration model.
 - When backpressure mode is `hybrid`, `max_wait` must be positive; zero is rejected.
 - When backpressure mode is `blocking`, no positive-threshold constraints apply; zero values for queue depth and wait time are valid.
 - When `kv_policy.enabled` is `true`, thresholds must satisfy: `reject_threshold` in `(0, 1]`, `delay_threshold` in `[0, 1]`, and `delay_threshold` strictly less than `reject_threshold`. When `enabled` is `false`, these thresholds are not validated.
+- When `context_policy.enabled` is `true`, `compress_threshold`, `head_keep_turns`, `live_keep_turns`, `compress_chunk_turns`, `summary_max_tokens`, and `compression_retries` must all be positive, and `store_path` must be non-empty. When `enabled` is `false`, these fields are not validated. A leading `~` in `store_path`, `tokenizer_path`, and `prompt_template_path` is expanded to the user's home directory.
 
 **Input format**
 
@@ -117,6 +119,8 @@ This section lists related concepts and source references for the configuration 
 - [[src/config/mod.rs#Metrics]] — metrics endpoint configuration
 - [[src/config/mod.rs#Server]] — server bind address configuration
 - [[src/config/mod.rs#KvPolicyConfig]] — KV-cache admission policy configuration
+- [[src/config/mod.rs#ContextPolicy]] — context compression policy configuration
+- [[context#Context Compression]] — domain semantics of context policy fields
 - [[src/config/loader.rs]] — layered resolution and validation
 
 # Configuration Loading and Validation

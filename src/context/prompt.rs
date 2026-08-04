@@ -30,6 +30,7 @@ FORMAT:
 
 Do NOT add information not present in the original turns. Do NOT speculate or infer beyond what was explicitly stated."#;
 
+// @lat: [[context#Summarization Prompt]]
 /// Builds summarization prompts for the compression sidecar.
 ///
 /// Caches the template text (default or custom from `prompt_template_path`)
@@ -86,6 +87,7 @@ impl PromptBuilder {
     }
 }
 
+// @lat: [[context#Summarization Prompt]]
 /// Build a summarization prompt messages array without a PromptBuilder.
 ///
 /// Uses the default template (or `custom_template` if provided) with

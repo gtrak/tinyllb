@@ -5,6 +5,7 @@ This directory defines the high-level concepts, business logic, and architecture
 - [[app]] — Binary composition: crate module declarations, application startup, token rate gauge task
 - [[backend]] — vLLM backend monitoring: KV-cache monitor and metrics parsing
 - [[config]] — Configuration contract, loading, and validation
+- [[context]] — Context compression: segment model, reconciliation, sidecar worker, transcript store
 - [[flow]] — Flow identity, registry and state, and request flow identification
 - [[gateway]] — Reverse proxy: application state, request handling, streaming passthrough, error model
 - [[metrics]] — Prometheus metrics registry, export endpoint, and metric family contracts

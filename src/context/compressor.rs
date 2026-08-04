@@ -19,6 +19,7 @@ use crate::context::segment::{find_turn_boundaries, Segment, SegmentKind, Transc
 use crate::context::store::TranscriptMeta;
 use crate::context::{CompressionJob, ContextState};
 
+// @lat: [[context#Background Compression Worker]]
 /// Background worker that drains `CompressionJob` messages and processes them
 /// sequentially (one at a time) to avoid competing for vLLM slots.
 pub struct CompressionWorker {
@@ -43,6 +44,7 @@ impl CompressionWorker {
         }
     }
 
+    // @lat: [[context#Background Compression Worker]]
     /// Main loop: consume jobs until the channel is closed.
     pub async fn run(mut self) {
         tracing::info!("context compression worker started");
@@ -63,6 +65,7 @@ impl CompressionWorker {
         tracing::info!("context compression worker stopped");
     }
 
+    // @lat: [[context#Background Compression Worker]]
     async fn process_job(&self, job: &CompressionJob) -> anyhow::Result<()> {
         self.ctx
             .with_flow_lock(&job.flow_id, async {

@@ -36,6 +36,14 @@ Each public endpoint carries a precise input contract, output guarantee, and err
 - Always returns `200 OK`; no error responses are produced.
 - Queue positions are 1-indexed and reflect current ordering.
 
+**Context Inspection** (see [[context#Context Compression]])
+
+- `GET /admin/context` — list all flows with transcript metadata (token counts, compressed-segment count). Optional `?over_threshold=true` filter.
+- `GET /admin/context/{flow_id}` — full segment breakdown for a flow with per-segment previews, token counts, and compression status.
+- `POST /admin/context/{flow_id}/compress` — force-trigger compression for a flow. Returns `202 Accepted` with the turn range, or `409 Conflict` if nothing is compressible.
+- `DELETE /admin/context/{flow_id}` — clear a flow's transcript. Returns `200 OK` or `404` if not found.
+- All context endpoints return `503 Service Unavailable` when context compression is disabled.
+
 ## Invariants
 
 These properties hold regardless of implementation changes.

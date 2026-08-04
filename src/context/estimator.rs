@@ -18,6 +18,7 @@ use tokenizers::Tokenizer;
 /// the backend would inject for each turn.
 const PER_MESSAGE_OVERHEAD: usize = 4;
 
+// @lat: [[context#Token Estimation]]
 /// Estimates token counts for arbitrary text and OpenAI-style message arrays.
 ///
 /// Construct with [`TokenEstimator::new`], passing `Some(path)` pointing at a
@@ -62,6 +63,7 @@ impl TokenEstimator {
         Self { tokenizer: None }
     }
 
+    // @lat: [[context#Token Estimation]]
     /// Estimate the token count of a single text string.
     ///
     /// Uses the real tokenizer when present (encoding with special tokens);
@@ -80,6 +82,7 @@ impl TokenEstimator {
         }
     }
 
+    // @lat: [[context#Token Estimation]]
     /// Estimate the token count of an OpenAI-style message array.
     ///
     /// Sums `estimate_text()` over each message's `content` and adds

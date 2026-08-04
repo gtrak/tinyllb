@@ -13,6 +13,7 @@ use crate::config::ContextPolicy;
 use crate::context::estimator::TokenEstimator;
 use crate::context::store::TranscriptStore;
 
+// @lat: [[context#Context Compression]]
 /// A background compression job enqueued for the worker (issue 09) to consume.
 #[derive(Debug, Clone)]
 pub struct CompressionJob {
@@ -22,6 +23,7 @@ pub struct CompressionJob {
     pub enqueued_at: std::time::Instant,
 }
 
+// @lat: [[context#Context Compression]]
 /// Shared context-compression state: store, estimator, config, per-flow locks,
 /// and the compression-job channel sender.
 pub struct ContextState {

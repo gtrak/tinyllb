@@ -7,6 +7,7 @@
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
+// @lat: [[context#Segment Model and Transcript Types]]
 /// The role of a segment within a transcript.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -19,6 +20,7 @@ pub enum SegmentKind {
     Live,
 }
 
+// @lat: [[context#Segment Model and Transcript Types]]
 /// An immutable segment of a conversation transcript.
 ///
 /// Head and Compressed segments are immutable once created. The Live segment
@@ -79,6 +81,7 @@ impl Segment {
     }
 }
 
+// @lat: [[context#Segment Model and Transcript Types]]
 /// An ordered list of segments representing a complete conversation transcript.
 #[derive(Debug, Clone)]
 pub struct Transcript {
@@ -154,6 +157,7 @@ impl Transcript {
     }
 }
 
+// @lat: [[context#Segment Model and Transcript Types]]
 /// Find the message index where each turn starts.
 ///
 /// A turn = user message + all following non-user messages until the next user
@@ -202,6 +206,7 @@ pub fn find_turn_boundaries(messages: &[Value]) -> Vec<usize> {
     boundaries
 }
 
+// @lat: [[context#Segment Model and Transcript Types]]
 /// Split a message array into head, middle, and live parts by turn boundaries.
 ///
 /// Returns `(head_msgs, middle_msgs, live_msgs)`.

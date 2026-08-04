@@ -54,6 +54,7 @@ The public contract consists of a metrics value with exposed collectors, multipl
 - **Starvation family**: per-flow starvation-wait observation (labeled by flow identity) and total forced-admission count.
 - **Lifecycle family**: request-event counter (labeled by event type: request_started, token_received, request_completed, request_cancelled).
 - **KV-cache family**: cache usage percentage, free percentage, and admission-decision count (labeled by decision: accept, delay, reject).
+- **Context compression family**: compression event and error counters, tokens-saved counter, sidecar latency histogram (buckets 0.5–60s), turns-per-event histogram (buckets 1–32), per-flow estimated/raw-estimated/compressed-segment gauges (labeled by flow identity), and compression queue depth gauge. See [[context#Context Compression]].
 
 **Exposition endpoint.**
 

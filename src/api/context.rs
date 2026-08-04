@@ -127,6 +127,7 @@ fn segment_to_detail(seg: &Segment) -> SegmentDetail {
 
 // ── Handlers ─────────────────────────────────────────────────────────────────
 
+// @lat: [[api#Admin API Router Assembly]]
 /// GET /admin/context — list all flows or only those over threshold.
 pub async fn list_flows(
     State(state): State<AppState>,

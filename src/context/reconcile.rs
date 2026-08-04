@@ -9,6 +9,7 @@ use anyhow::Context;
 use chrono::Utc;
 use serde_json::Value;
 
+// @lat: [[context#Reconciliation]]
 /// Result of reconciling an incoming request against a stored transcript.
 pub struct ReconcileResult {
     /// Messages to forward to the backend (may differ from incoming after
@@ -46,6 +47,7 @@ fn messages_equal(a: &Value, b: &Value) -> bool {
     true
 }
 
+// @lat: [[context#Reconciliation]]
 /// Return messages in `incoming` that are not already in `stored_live`.
 ///
 /// Uses prefix matching: the longest common prefix of `incoming` and
@@ -68,6 +70,7 @@ fn find_new_turns(incoming: &[Value], stored_live: &[Value]) -> Vec<Value> {
     incoming[prefix_len..].to_vec()
 }
 
+// @lat: [[context#Reconciliation]]
 /// Reconcile an incoming request's `messages` array against the stored
 /// transcript for `flow_id`.
 ///

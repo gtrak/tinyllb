@@ -11,6 +11,7 @@ use serde_json::Value;
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{Row, SqlitePool};
 
+// @lat: [[context#Transcript Store]]
 /// Per-flow transcript metadata stored in `transcript_meta`.
 ///
 /// Provides quick-lookup aggregates so the compression scheduler can decide
@@ -35,6 +36,7 @@ pub struct TranscriptMeta {
     pub updated_at: String,
 }
 
+// @lat: [[context#Transcript Store]]
 /// Abstract transcript persistence layer.
 ///
 /// Implementations may be in-memory (for tests), SQLite-backed, or any
@@ -81,6 +83,7 @@ pub trait TranscriptStore: Send + Sync {
     async fn list_all_meta(&self) -> anyhow::Result<Vec<TranscriptMeta>>;
 }
 
+// @lat: [[context#Transcript Store]]
 /// SQLite-backed implementation of `TranscriptStore`.
 pub struct SqliteStore {
     pool: SqlitePool,
