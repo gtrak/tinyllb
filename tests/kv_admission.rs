@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use llm_qdisc_proxy::backend::{BackendMonitor, BackendSnapshot};
-use llm_qdisc_proxy::config::{Algorithm, BackpressureMode, KvPolicyConfig};
+use llm_qdisc_proxy::config::{Algorithm, BackpressureMode, KvPolicyConfig, Priorities, PriorityPolicy};
 use llm_qdisc_proxy::flow::{FlowId, FlowRegistry};
 use llm_qdisc_proxy::metrics;
 use llm_qdisc_proxy::scheduler::Scheduler;
@@ -40,6 +40,8 @@ fn build_scheduler_with_mode(
         Default::default(), // completion_bias
         kv_config,
         monitor,
+        PriorityPolicy::default(),
+        Priorities::default(),
     );
     Arc::new(scheduler)
 }
@@ -220,6 +222,8 @@ async fn kv_admission_decision_counter_increments() {
         Default::default(),
         enabled_kv_policy(),
         monitor,
+        PriorityPolicy::default(),
+        Priorities::default(),
     ));
 
     // 1 accept
@@ -293,6 +297,8 @@ async fn kv_admission_delay_to_accept_transition() {
         Default::default(),
         enabled_kv_policy(),
         monitor,
+        PriorityPolicy::default(),
+        Priorities::default(),
     ));
 
     // First request: accept immediately.
@@ -384,6 +390,8 @@ async fn kv_admission_hybrid_delay_timeout_rejected() {
         Default::default(),
         enabled_kv_policy(),
         monitor,
+        PriorityPolicy::default(),
+        Priorities::default(),
     ));
 
     // The request should be rejected after max_wait (200ms), not hung.
@@ -434,6 +442,8 @@ async fn kv_admission_delayed_visible_in_queue_depth() {
         Default::default(),
         enabled_kv_policy(),
         monitor,
+        PriorityPolicy::default(),
+        Priorities::default(),
     ));
 
     // Queue depth should be 0 before any admit.

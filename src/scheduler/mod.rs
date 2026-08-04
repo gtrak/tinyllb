@@ -21,6 +21,9 @@ use crate::backend::BackendMonitor;
 use crate::config::Algorithm;
 use crate::config::CompletionBias;
 use crate::config::KvPolicyConfig;
+use crate::config::Priorities;
+use crate::config::PriorityPolicy;
+use crate::flow::cadence::CadenceRegistry;
 use crate::flow::FlowRegistry;
 use crate::metrics::Metrics;
 use std::sync::Arc;
@@ -91,6 +94,10 @@ pub struct Scheduler {
     kv_policy: Arc<KvPolicy>,
     /// Flow progress tracker for predictive admit.
     flow_progress: Arc<flow_progress::FlowProgressTracker>,
+    /// Flow registry (lifted for cadence lookup in `admit`).
+    registry: Arc<FlowRegistry>,
+    /// Cadence heuristic registry for interactive-vs-batch classification.
+    cadence: Arc<CadenceRegistry>,
     /// Human-readable algorithm name for tracing.
     algorithm_label: &'static str,
 }
@@ -115,6 +122,8 @@ impl Scheduler {
         completion_bias: CompletionBias,
         kv_config: KvPolicyConfig,
         monitor: Arc<BackendMonitor>,
+        priority_policy: PriorityPolicy,
+        priorities: Priorities,
     ) -> Self {
         let notify = Arc::new(tokio::sync::Notify::new());
         let flow_progress = Arc::new(flow_progress::FlowProgressTracker::new());
@@ -148,7 +157,7 @@ impl Scheduler {
             Algorithm::Fifo => SchedulerImpl::Fifo(FifoScheduler::new_with_policies(
                 max_active_flows,
                 metrics,
-                registry,
+                registry.clone(),
                 backpressure_mode,
                 max_queue_depth,
                 max_wait,
@@ -158,7 +167,7 @@ impl Scheduler {
             Algorithm::Wfq => SchedulerImpl::Wfq(WfqScheduler::new_with_policies(
                 max_active_flows,
                 metrics,
-                registry,
+                registry.clone(),
                 backpressure_mode,
                 max_queue_depth,
                 max_wait,
@@ -169,7 +178,7 @@ impl Scheduler {
             Algorithm::Drr => SchedulerImpl::Drr(DrrScheduler::new_with_policies(
                 max_active_flows,
                 metrics,
-                registry,
+                registry.clone(),
                 backpressure_mode,
                 max_queue_depth,
                 max_wait,
@@ -179,10 +188,17 @@ impl Scheduler {
             )),
         };
 
+        let cadence = Arc::new(CadenceRegistry::new(
+            Arc::new(priority_policy),
+            Arc::new(priorities),
+        ));
+
         Self {
             kv_policy,
             inner,
             flow_progress,
+            registry,
+            cadence,
             algorithm_label,
         }
     }
@@ -218,6 +234,8 @@ impl Scheduler {
             CompletionBias::default(),
             KvPolicyConfig::default(),
             monitor,
+            PriorityPolicy::default(),
+            Priorities::default(),
         )
     }
 
@@ -237,6 +255,13 @@ impl Scheduler {
     ) -> Result<QueueTicket, BackpressureRejected> {
         // Record queue depth before the admit process begins.
         tracing::Span::current().record("queue_depth_before", self.queue_depth());
+
+        // ── Priority cadence heuristic ──
+        let flow = self.registry.get_or_create(flow_id.clone());
+        self.cadence.record_arrival(&flow_id, std::time::Instant::now());
+        self.cadence.classify_and_apply(&flow, &flow_id);
+        tracing::Span::current().record("priority", flow.priority());
+        tracing::Span::current().record("priority_source", flow.priority_source());
 
         let enter = std::time::Instant::now();
 

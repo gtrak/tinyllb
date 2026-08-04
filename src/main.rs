@@ -115,6 +115,8 @@ async fn main() {
         cfg.scheduler.completion_bias.clone(),
         cfg.kv_policy.clone(),
         monitor.clone(),
+        cfg.priority_policy.clone(),
+        cfg.priorities.clone(),
     );
 
     // Initialize context-compression state when enabled.

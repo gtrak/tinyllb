@@ -23,7 +23,7 @@ use tower::ServiceExt;
 
 use llm_qdisc_proxy::backend::BackendMonitor;
 use llm_qdisc_proxy::config::{
-    Algorithm, Backpressure, BackpressureMode, CompletionBias, KvPolicyConfig, Priorities,
+    Algorithm, Backpressure, BackpressureMode, CompletionBias, KvPolicyConfig, Priorities, PriorityPolicy,
 };
 use llm_qdisc_proxy::flow::FlowId;
 use llm_qdisc_proxy::gateway;
@@ -138,6 +138,8 @@ fn build_e2e_proxy_with_config(
         completion_bias,
         KvPolicyConfig::default(),
         Arc::new(BackendMonitor::empty()),
+        PriorityPolicy::default(),
+        Priorities::default(),
     ));
 
     let state = gateway::AppState {

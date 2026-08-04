@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use llm_qdisc_proxy::backend::BackendMonitor;
-use llm_qdisc_proxy::config::{Algorithm, BackpressureMode, CompletionBias, KvPolicyConfig};
+use llm_qdisc_proxy::config::{Algorithm, BackpressureMode, CompletionBias, KvPolicyConfig, Priorities, PriorityPolicy};
 use llm_qdisc_proxy::flow::{FlowId, FlowRegistration, FlowRegistry};
 use llm_qdisc_proxy::metrics;
 use llm_qdisc_proxy::scheduler::Scheduler;
@@ -50,6 +50,8 @@ async fn test_priority_higher_prio_selected_first() {
             CompletionBias::default(),
             KvPolicyConfig::default(),
             Arc::new(BackendMonitor::empty()),
+            PriorityPolicy::default(),
+            Priorities::default(),
         ));
 
         // Register flows with different priorities.
@@ -139,6 +141,8 @@ async fn test_priority_tiebreak_by_wfq_ratio() {
             CompletionBias::default(),
             KvPolicyConfig::default(),
             Arc::new(BackendMonitor::empty()),
+            PriorityPolicy::default(),
+            Priorities::default(),
         ));
 
         // All flows equal priority, equal weight → tiebreak by enqueue order.
@@ -228,6 +232,8 @@ async fn test_starvation_force_admit_after_timeout() {
             CompletionBias::default(),
             KvPolicyConfig::default(),
             Arc::new(BackendMonitor::empty()),
+            PriorityPolicy::default(),
+            Priorities::default(),
         ));
 
         // Flow A: holder
@@ -311,6 +317,8 @@ async fn test_completion_bias_blocks_new_flow() {
             },
             KvPolicyConfig::default(),
             Arc::new(BackendMonitor::empty()),
+            PriorityPolicy::default(),
+            Priorities::default(),
         ));
 
         // Fill 2 slots with A and B.
@@ -382,6 +390,8 @@ async fn test_completion_bias_allows_active_flow_requests() {
             },
             KvPolicyConfig::default(),
             Arc::new(BackendMonitor::empty()),
+            PriorityPolicy::default(),
+            Priorities::default(),
         ));
 
         // A gets admitted. active=1, target=1.
@@ -435,6 +445,8 @@ async fn test_combined_starvation_overrides_completion_bias() {
             },
             KvPolicyConfig::default(),
             Arc::new(BackendMonitor::empty()),
+            PriorityPolicy::default(),
+            Priorities::default(),
         ));
 
         // Fill 2 slots with A and B.
@@ -508,6 +520,8 @@ async fn test_priority_drr_higher_prio_selected_first() {
             CompletionBias::default(),
             KvPolicyConfig::default(),
             Arc::new(BackendMonitor::empty()),
+            PriorityPolicy::default(),
+            Priorities::default(),
         ));
 
         registry.register(FlowRegistration {
@@ -580,6 +594,8 @@ async fn test_starvation_drr_force_admit() {
             CompletionBias::default(),
             KvPolicyConfig::default(),
             Arc::new(BackendMonitor::empty()),
+            PriorityPolicy::default(),
+            Priorities::default(),
         ));
 
         registry.register(FlowRegistration {
