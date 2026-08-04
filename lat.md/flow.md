@@ -105,7 +105,7 @@ The registry exposes contractual surfaces covering construction, registration, l
 - **Lookup** — returns an independently usable shared flow reference; auto-creates with defaults if not registered.
 - **Aggregate queries** — reports registered flow count, emptiness, and sum of all per-flow depth counters.
 - **Queue snapshots** — produces a snapshot with global counts and ordered `QueueFlowEntry` items, filtering to registered flows with positive depth.
-- **Per-flow attributes** — weight, priority (readable/writable methods); depth, credit, enqueued timestamp, active count (direct public field access).
+- **Per-flow attributes** — weight, priority, and priority source (readable/writable methods); depth, credit, enqueued timestamp, active count (direct public field access). Priority source indicates whether priority was set by the heuristic (0), an explicit header (1), or the admin API (2).
 - **Flow identity** — opaque type with string construction, equality, display, ephemeral classification, and metric label derivation.
 
 ## Invariants
@@ -117,6 +117,7 @@ All statements about the registry remain true regardless of implementation detai
 - Weight, priority, credit, and depth are updated individually; no cross-attribute atomicity is guaranteed.
 - Snapshots list only flows with positive depth, contain no duplicates, and assign contiguous 1-based positions.
 - Ephemeral metric label always resolves to a single common value; named labels equal the identity string.
+- Priority source is an independent attribute from priority value; updating one does not atomically update the other. The heuristic checks priority source before writing priority and skips flows with non-zero source.
 
 ## Constraints
 
@@ -192,6 +193,8 @@ The resolution contract accepts pre-extracted request headers and body bytes, an
 - **FlowId Display** — yields the exact underlying string value.
 - **Ephemeral test** — returns true when identifier begins with `ephemeral-`.
 - **Metric label** — ephemeral yields `"ephemeral"`; named yields exact value.
+- **Resolution output** — returns a `ResolvedFlow` containing the resolved flow identifier, an optional priority class override, and an unset-override flag. The flow identifier is always present; the override fields are `None`/`false` when no `X-LLM-Priority` header is sent.
+- **Priority header** — `X-LLM-Priority` header is parsed case-insensitively alongside flow identity resolution. Values `interactive`, `agent`, `background` produce a priority class override; `auto` signals clearing any prior override; unknown values are logged as warnings and ignored. The header does not affect flow identity resolution.
 
 ## Invariants
 
@@ -203,6 +206,7 @@ The following properties hold regardless of implementation changes.
 - Each invocation of auto-generation produces a statistically distinct identifier.
 - Ephemeral classification is determined precisely by the `ephemeral-` prefix.
 - Requests sharing a harness session identifier resolve to the same flow identifier.
+- The `X-LLM-Priority` header, when present, does not alter the resolved flow identifier; it only attaches priority override metadata to the result.
 
 ## Constraints
 
@@ -233,4 +237,7 @@ Related concepts and source code for flow identification.
 - Flow context management that consumes the resolved identifier.
 - Metric aggregation using flow identifier labels.
 - [[src/flow/identify.rs]] — Resolution implementation, including harness session-header extraction.
+- [[src/flow/mod.rs#PriorityClass]] — priority class enumeration and token resolution
+- [[src/flow/mod.rs#ResolvedFlow]] — resolved flow identity and priority override
+- [[src/flow/cadence.rs]] — cadence-based priority heuristic
 - [[src/flow/mod.rs]] — Flow identifier type and ephemeral classification.

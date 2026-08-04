@@ -22,7 +22,7 @@ The gateway module exposes the application state struct, a router factory, a cli
 
 **State object.** The state object provides read-only access to shared resources and cloned-by-value configuration.
 
-- Provides read access to the HTTP client, backend URL, metrics, scheduler, flow registry, backpressure configuration, an optional per-request timeout, and an optional context-compression state (`Option<Arc<ContextState>>`).
+- Provides read access to the HTTP client, backend URL, metrics, scheduler, flow registry, backpressure configuration, priority class values, an optional per-request timeout, and an optional context-compression state (`Option<Arc<ContextState>>`).
 - The context-compression state is `None` when context compression is disabled or failed to initialize, so the proxy serves without compression. See [[context#Context Compression]].
 - Is publicly cloneable, so that each clone provides equivalent read access to the same logical resources.
 - Has no public constructor; callers construct it incrementally, which permits partial initialization before injection.
