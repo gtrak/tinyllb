@@ -134,9 +134,12 @@ impl CadenceRegistry {
     }
 
     /// Record an arrival for a flow. Called by the scheduler on every admit.
-    pub fn record_arrival(&self, flow_id: &FlowId, now: Instant) {
+    /// Returns the gap since the previous arrival, or `None` for the first arrival.
+    pub fn record_arrival(&self, flow_id: &FlowId, now: Instant) -> Option<Duration> {
         let mut entry = self.inner.entry(flow_id.clone()).or_default();
+        let prev_gap = entry.arrivals.back().copied().map(|last| now.duration_since(last));
         entry.record_arrival(now, self.policy.sample_window);
+        prev_gap
     }
 
     /// Classify a flow by cadence and apply the priority if allowed.

@@ -5,7 +5,7 @@ pub mod throughput;
 
 use std::sync::Arc;
 
-use prometheus::{CounterVec, GaugeVec, HistogramOpts, Opts, Registry};
+use prometheus::{CounterVec, GaugeVec, HistogramOpts, HistogramVec, Opts, Registry};
 
 /// Central metrics collector holding all Prometheus gauges, counters,
 /// and histograms for the LLM QDisc Proxy.
@@ -76,6 +76,14 @@ pub struct Metrics {
     pub context_compressed_segments: GaugeVec,
     /// Pending compression jobs in the channel.
     pub context_compression_queue_depth: prometheus::Gauge,
+
+    // -- Priority heuristic family (plan 004) --
+    /// Per-flow numeric priority value (100/50/10). Labeled by `flow_id`.
+    pub flow_priority_class: GaugeVec,
+    /// Source of the priority value: header, admin, auto. Labeled by `flow_id`, `source`.
+    pub flow_priority_source_total: CounterVec,
+    /// Observed inter-request gap per flow (seconds). Labeled by `flow_id`.
+    pub flow_inter_request_seconds: HistogramVec,
 }
 
 impl Default for Metrics {
@@ -269,6 +277,35 @@ impl Metrics {
         )
         .expect("context_compression_queue_depth should be creatable");
 
+
+        // -- Priority heuristic family (plan 004) --
+        let flow_priority_class = GaugeVec::new(
+            Opts::new(
+                "llm_flow_priority_class",
+                "Per-flow numeric priority value (100/50/10)",
+            ),
+            &["flow_id"],
+        )
+        .expect("llm_flow_priority_class should be creatable");
+
+        let flow_priority_source_total = CounterVec::new(
+            Opts::new(
+                "llm_flow_priority_source_total",
+                "Source of the priority value: header, admin, auto",
+            ),
+            &["flow_id", "source"],
+        )
+        .expect("llm_flow_priority_source_total should be creatable");
+
+        let flow_inter_request_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "llm_flow_inter_request_seconds",
+                "Observed inter-request gap per flow (seconds)",
+            )
+            .buckets(vec![0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0]),
+            &["flow_id"],
+        )
+        .expect("llm_flow_inter_request_seconds should be creatable");
         // Register all collectors with the registry.
         registry
             .register(Box::new(queue_depth.clone()))
@@ -345,6 +382,17 @@ impl Metrics {
             .register(Box::new(context_compression_queue_depth.clone()))
             .expect("context_compression_queue_depth registration should succeed");
 
+        // Register priority heuristic metrics.
+        registry
+            .register(Box::new(flow_priority_class.clone()))
+            .expect("llm_flow_priority_class registration should succeed");
+        registry
+            .register(Box::new(flow_priority_source_total.clone()))
+            .expect("llm_flow_priority_source_total registration should succeed");
+        registry
+            .register(Box::new(flow_inter_request_seconds.clone()))
+            .expect("llm_flow_inter_request_seconds registration should succeed");
+
         Metrics {
             registry,
             queue_depth,
@@ -371,6 +419,9 @@ impl Metrics {
             context_raw_estimated_tokens,
             context_compressed_segments,
             context_compression_queue_depth,
+            flow_priority_class,
+            flow_priority_source_total,
+            flow_inter_request_seconds,
         }
     }
 }
@@ -432,6 +483,30 @@ mod tests {
         assert!(
             names.contains(&"llm_qdisc_context_compression_queue_depth"),
             "context_compression_queue_depth should be registered"
+        );
+    }
+
+    #[test]
+    fn test_priority_metrics_registered() {
+        let metrics = Metrics::new();
+        // Instantiate one series per collector so they show up in gather().
+        metrics.flow_priority_class.with_label_values(&["test"]).set(50.0);
+        metrics.flow_priority_source_total.with_label_values(&["test", "header"]).inc();
+        metrics.flow_inter_request_seconds.with_label_values(&["test"]).observe(1.0);
+
+        let gathers = metrics.registry.gather();
+        let names: Vec<&str> = gathers.iter().map(|m| m.name()).collect();
+        assert!(
+            names.contains(&"llm_flow_priority_class"),
+            "flow_priority_class should be registered"
+        );
+        assert!(
+            names.contains(&"llm_flow_priority_source_total"),
+            "flow_priority_source_total should be registered"
+        );
+        assert!(
+            names.contains(&"llm_flow_inter_request_seconds"),
+            "flow_inter_request_seconds should be registered"
         );
     }
 }

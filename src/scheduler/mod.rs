@@ -98,6 +98,8 @@ pub struct Scheduler {
     registry: Arc<FlowRegistry>,
     /// Cadence heuristic registry for interactive-vs-batch classification.
     cadence: Arc<CadenceRegistry>,
+    /// Metrics collector for priority heuristic observability.
+    metrics: Arc<Metrics>,
     /// Human-readable algorithm name for tracing.
     algorithm_label: &'static str,
 }
@@ -156,7 +158,7 @@ impl Scheduler {
         let inner = match algorithm {
             Algorithm::Fifo => SchedulerImpl::Fifo(FifoScheduler::new_with_policies(
                 max_active_flows,
-                metrics,
+                metrics.clone(),
                 registry.clone(),
                 backpressure_mode,
                 max_queue_depth,
@@ -166,7 +168,7 @@ impl Scheduler {
             )),
             Algorithm::Wfq => SchedulerImpl::Wfq(WfqScheduler::new_with_policies(
                 max_active_flows,
-                metrics,
+                metrics.clone(),
                 registry.clone(),
                 backpressure_mode,
                 max_queue_depth,
@@ -177,7 +179,7 @@ impl Scheduler {
             )),
             Algorithm::Drr => SchedulerImpl::Drr(DrrScheduler::new_with_policies(
                 max_active_flows,
-                metrics,
+                metrics.clone(),
                 registry.clone(),
                 backpressure_mode,
                 max_queue_depth,
@@ -199,6 +201,7 @@ impl Scheduler {
             flow_progress,
             registry,
             cadence,
+            metrics,
             algorithm_label,
         }
     }
@@ -258,10 +261,22 @@ impl Scheduler {
 
         // ── Priority cadence heuristic ──
         let flow = self.registry.get_or_create(flow_id.clone());
-        self.cadence.record_arrival(&flow_id, std::time::Instant::now());
+        let gap = self.cadence.record_arrival(&flow_id, std::time::Instant::now());
         self.cadence.classify_and_apply(&flow, &flow_id);
         tracing::Span::current().record("priority", flow.priority());
         tracing::Span::current().record("priority_source", flow.priority_source());
+
+        // ── Priority metrics ──
+        self.metrics
+            .flow_priority_class
+            .with_label_values(&[flow_id.metric_label()])
+            .set(flow.priority() as f64);
+        if let Some(gap) = gap {
+            self.metrics
+                .flow_inter_request_seconds
+                .with_label_values(&[flow_id.metric_label()])
+                .observe(gap.as_secs_f64());
+        }
 
         let enter = std::time::Instant::now();
 

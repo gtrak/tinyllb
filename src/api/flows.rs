@@ -56,11 +56,18 @@ pub async fn register_handler(
     }
 
     let flow_id = FlowId::new(req.id.clone());
+    let metric_label = flow_id.metric_label().to_string();
     let is_new = state.flow_registry.register(FlowRegistration {
         id: flow_id,
         weight: req.weight,
         priority: req.priority,
     });
+
+    state
+        .metrics
+        .flow_priority_source_total
+        .with_label_values(&[&metric_label, "admin"])
+        .inc();
 
     Ok((
         if is_new {

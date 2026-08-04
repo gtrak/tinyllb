@@ -406,6 +406,20 @@ pub async fn proxy_handler(
         &state.priorities,
     );
 
+    // Increment the priority-source counter for explicit override events.
+    if resolved.unset_override {
+        state
+            .metrics
+            .flow_priority_source_total
+            .with_label_values(&[flow_id.metric_label(), "auto"])
+            .inc();
+    } else if resolved.priority_override.is_some() {
+        state
+            .metrics
+            .flow_priority_source_total
+            .with_label_values(&[flow_id.metric_label(), "header"])
+            .inc();
+    }
     // Admit through the scheduler: blocks until a slot is available,
     // returns a RAII ticket that releases the slot on drop.
     // Under backpressure, this may reject with 429.
