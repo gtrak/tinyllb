@@ -2,6 +2,15 @@
 //!
 //! See `docs/plans/004-interactive-priority-heuristic/PLAN.md`.
 
+//! Classification table (applied per admit when min_samples met):
+//! - median gap <= background_gap_max  => background (10)
+//! - median gap >= interactive_gap_min => interactive (100)
+//! - otherwise                          => agent (50, default)
+//!
+//! Hysteresis: an interactive flow is only demoted after a sustained run
+//! of fast gaps (last 3 all <= background_gap_max). See
+//! `docs/plans/001-llm-qdisc-proxy/PRIORITY.md`.
+
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};

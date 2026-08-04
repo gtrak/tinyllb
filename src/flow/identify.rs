@@ -25,6 +25,8 @@ use super::{FlowId, ResolvedFlow, resolve_priority_token};
 /// - Absent header → `priority_override = None`, `unset_override = false`
 ///
 /// Returns a `ResolvedFlow` containing the resolved flow ID and priority override state.
+/// For the full priority heuristic and tuning guide, see
+/// `docs/plans/001-llm-qdisc-proxy/PRIORITY.md`.
 // @lat: [[flow#Flow Identification]]
 pub fn resolve(headers: &HeaderMap, body: &Bytes) -> ResolvedFlow {
     // 1. Check the X-LLM-Flow-ID header first (highest precedence).
