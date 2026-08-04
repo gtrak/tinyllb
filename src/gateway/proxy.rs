@@ -560,6 +560,38 @@ pub async fn proxy_handler(
     if is_sse || wants_streaming {
         // Compute deadline for stream timeout (if configured).
         let deadline = state.request_timeout.map(|t| std::time::Instant::now() + t);
+        // --- Premature-stop retry gate (streaming path) ---
+        let is_chat = original_path == "/v1/chat/completions";
+        let is_internal_compressor = headers
+            .get("x-llm-internal")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v == "compressor")
+            .unwrap_or(false);
+        if state.retry_policy.enabled && state.retry_policy.max_retries > 0 && is_chat && !is_internal_compressor {
+            let body = crate::gateway::stream::spawn_retry_stream(
+                state.clone(),
+                response,
+                backend_url,
+                method,
+                headers,
+                forwarded_body,
+                _ticket,
+                lifecycle,
+                deadline,
+            );
+            let mut resp = Response::new(body);
+            *resp.status_mut() = status;
+            for (name, value) in filter_response_headers_streaming(&response_headers).iter() {
+                resp.headers_mut().append(name, value.clone());
+            }
+            resp.headers_mut().insert(
+                axum::http::HeaderName::from_static("x-request-id"),
+                axum::http::HeaderValue::from_str(&request_id).expect("valid UUID header value"),
+            );
+            return Ok(resp);
+        }
+
+        // Existing MetricStream path (retry disabled / not applicable) — unchanged
         let stream = MetricStream::new(
             response,
             state.metrics.clone(),
