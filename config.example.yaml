@@ -37,3 +37,10 @@ context_policy:
   sidecar_request_timeout: 60s
   compression_retries: 3
   prompt_template_path: null    # optional custom summarization prompt
+
+retry_policy:
+  enabled: false                # set true to activate premature-stop retry
+  max_retries: 2                # retry attempts after the initial (total = 3)
+  temperature_step: 0.3         # temperature added per retry attempt
+  max_temperature: 1.5          # cap on bumped temperature
+  default_temperature: 0.0      # base temperature when the request omits one

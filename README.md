@@ -128,6 +128,11 @@ overridden via environment variables (see below).
 | `context_policy.store_path` | `~/.local/share/llm-qdisc/transcripts.db` | SQLite transcript store path |
 | `context_policy.tokenizer_path` | *(none)* | Path to tokenizer.json for accurate token counts |
 | `context_policy.compression_retries` | `3` | Sidecar retry attempts on failure |
+| `retry_policy.enabled` | `false` | Enable premature-stop retry for chat completions |
+| `retry_policy.max_retries` | `2` | Retry attempts after the initial (total = max_retries + 1) |
+| `retry_policy.temperature_step` | `0.3` | Temperature added per retry attempt |
+| `retry_policy.max_temperature` | `1.5` | Cap on bumped temperature |
+| `retry_policy.default_temperature` | `0.0` | Base temperature when the request omits one |
 | `request_timeout` | *(none)* | Optional per-request timeout (e.g. `300s`) |
 
 ### Endpoints
@@ -203,6 +208,33 @@ curl -X DELETE http://localhost:8080/admin/context/{flow_id}         # clear tra
 `compression_queue_depth`.
 
 See `docs/plans/002-context-compression/PLAN.md` for the full design.
+
+# Premature-Stop Retry
+
+The proxy can retry `/v1/chat/completions` requests that produce degenerate
+stops — responses with `finish_reason: "stop"`, empty `content`, and no
+`tool_calls`. Such turns kill agentic threads because the agent sees an
+empty assistant message and cannot continue.
+
+**How it works:** On detection of a premature stop, the proxy re-sends the
+exact forwarded body with `temperature` bumped by `temperature_step` per
+attempt (capped at `max_temperature`), up to `max_retries` times. The retry
+bypasses the scheduler (admission slot held), skips internal-compressor
+requests and non-chat paths.
+
+- **Streaming:** The client sees a seamless concatenation — failed reasoning
+appears as extra "thinking" but the thread survives with a single terminal
+frame + `[DONE]`.
+- **Non-streaming:** The client receives the good response body after retry;
+fail-open forwards the last degenerate body if all retries are exhausted.
+- **Environment overrides:** `LLM_QDISC__RETRY_POLICY__ENABLED=true`, etc.
+
+**Disabled by default.** Enable via `retry_policy.enabled: true` in config.
+
+**Prometheus metrics** (prefixed `llm_qdisc_premature_stop_`):
+`detected_total`, `retries_total`, `exhausted_total`.
+
+See `docs/plans/005-premature-stop-retry/PLAN.md` for the full design.
 
 ## Benchmarks
 

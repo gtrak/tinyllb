@@ -55,6 +55,7 @@ The public contract consists of a metrics value with exposed collectors, multipl
 - **Lifecycle family**: request-event counter (labeled by event type: request_started, token_received, request_completed, request_cancelled).
 - **KV-cache family**: cache usage percentage, free percentage, and admission-decision count (labeled by decision: accept, delay, reject).
 - **Context compression family**: compression event and error counters, tokens-saved counter, sidecar latency histogram (buckets 0.5–60s), turns-per-event histogram (buckets 1–32), per-flow estimated/raw-estimated/compressed-segment gauges (labeled by flow identity), and compression queue depth gauge. See [[context#Context Compression]].
+- **Premature-stop retry family**: premature stop detection counter, retry requests issued counter, and degenerate-turn-forwarded counter. In the streaming path, the exhausted counter is also incremented when a retry HTTP failure forces fail-open.
 
 **Exposition endpoint.**
 
@@ -288,6 +289,12 @@ The interface provides construction surfaces, a scrape endpoint, and metric fami
 - `llm_flow_priority_class` — Per-flow gauge of the current numeric priority value (100/50/10). Updated on every admission after the cadence heuristic runs. Labeled by `flow_id`; ephemeral flows aggregate to `"ephemeral"`.
 - `llm_flow_priority_source_total` — Counter of explicit priority-override events, labeled by `flow_id` and `source` (`header`, `admin`, `auto`). Incremented when a flow's priority is pinned via the `X-LLM-Priority` header, set via the admin API, or cleared via `auto`.
 - `llm_flow_inter_request_seconds` — Per-flow histogram of observed inter-request gaps (seconds). Observed on every admission after the first; the first arrival for a flow produces no observation. Buckets span 0.1s to 120s. Labeled by `flow_id`.
+
+**Premature-stop retry family.**
+
+- `llm_qdisc_premature_stop_detected_total` — Premature stops detected (one per failed attempt).
+- `llm_qdisc_premature_stop_retries_total` — Retry requests issued after a premature stop.
+- `llm_qdisc_premature_stop_exhausted_total` — Degenerate turns forwarded after all retries exhausted. In the streaming path, this is also incremented when a retry HTTP failure forces fail-open.
 
 ## Invariants
 
