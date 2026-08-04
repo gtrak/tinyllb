@@ -119,6 +119,15 @@ overridden via environment variables (see below).
 | `kv_policy.enabled` | `false` | Enable KV-cache-aware admission |
 | `kv_policy.reject_threshold` | `0.95` | Reject when KV utilization > threshold |
 | `kv_policy.delay_threshold` | `0.80` | Delay admission when KV utilization > threshold |
+| `context_policy.enabled` | `false` | Enable per-flow context compression |
+| `context_policy.compress_threshold` | `100000` | Est. tokens to trigger compression |
+| `context_policy.head_keep_turns` | `3` | Turns kept verbatim at start (prefix cache anchor) |
+| `context_policy.live_keep_turns` | `6` | Turns kept verbatim at end (recent context) |
+| `context_policy.compress_chunk_turns` | `8` | Turns folded into each compressed summary |
+| `context_policy.summary_max_tokens` | `2048` | Max tokens for sidecar summarization request |
+| `context_policy.store_path` | `~/.local/share/llm-qdisc/transcripts.db` | SQLite transcript store path |
+| `context_policy.tokenizer_path` | *(none)* | Path to tokenizer.json for accurate token counts |
+| `context_policy.compression_retries` | `3` | Sidecar retry attempts on failure |
 | `request_timeout` | *(none)* | Optional per-request timeout (e.g. `300s`) |
 
 ### Endpoints
@@ -132,6 +141,10 @@ overridden via environment variables (see below).
 | `/v1/completions` | POST | Completions (proxied) |
 | `/flows` | GET | Active flow list |
 | `/queue` | GET | Current queue state |
+| `/admin/context` | GET | List all flows with token counts |
+| `/admin/context/{flow_id}` | GET | Segment breakdown for a flow |
+| `/admin/context/{flow_id}/compress` | POST | Force-trigger compression |
+| `/admin/context/{flow_id}` | DELETE | Clear transcript for a flow |
 
 ## Environment Variables
 
@@ -158,6 +171,38 @@ overridden via environment variables (see below).
 
 The `LLM_QDISC__` prefix replaces config sections: `LLM_QDISC__SECTION__KEY`
 maps to `section.key` in YAML.
+
+## Context Compression
+
+The proxy can compress conversation context by summarizing older turns via a
+background sidecar request to vLLM. This extends effective context windows for
+agentic loops and caps per-flow KV footprint.
+
+**How it works:** Each flow's conversation is modeled as `[Head + Compressed₁..ₙ + Live]`.
+Head (system prompt + earliest turns) and Compressed segments are immutable and
+prefix-cache-friendly. Live (recent turns) grows per request. When total
+estimated tokens exceed `compress_threshold`, the oldest chunk of Live turns is
+summarized by a background sidecar request and stored as a new Compressed segment.
+
+**Disabled by default.** Enable via `context_policy.enabled: true` in config.
+
+**Fail-open:** if the compression subsystem errors, the proxy forwards the
+original request unchanged.
+
+**Admin API:**
+```bash
+curl http://localhost:8080/admin/context | jq           # list all flows
+curl http://localhost:8080/admin/context/{flow_id} | jq  # segment breakdown
+curl -X POST http://localhost:8080/admin/context/{flow_id}/compress  # force compress
+curl -X DELETE http://localhost:8080/admin/context/{flow_id}         # clear transcript
+```
+
+**Prometheus metrics** (prefixed `llm_qdisc_context_`):
+`compression_events_total`, `compression_tokens_saved_total`,
+`compression_sidecar_latency_seconds`, `estimated_tokens{flow_id}`,
+`compression_queue_depth`.
+
+See `docs/plans/002-context-compression/PLAN.md` for the full design.
 
 ## Benchmarks
 
