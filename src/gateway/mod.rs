@@ -1,5 +1,6 @@
 pub mod error;
 pub mod proxy;
+pub mod retry;
 pub mod stream;
 
 use axum::routing::{get, post};
