@@ -48,6 +48,7 @@ fn build_proxy_app_with_backpressure(
         priorities: llm_qdisc_proxy::config::Priorities::default(),
         request_timeout: None,
         context: None,
+        retry_policy: llm_qdisc_proxy::config::RetryPolicy::default(),
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
@@ -484,6 +485,7 @@ async fn test_backpressure_rejections_metric() {
         priorities: llm_qdisc_proxy::config::Priorities::default(),
         request_timeout: None,
         context: None,
+        retry_policy: llm_qdisc_proxy::config::RetryPolicy::default(),
     };
 
     let metrics_app = Router::new()

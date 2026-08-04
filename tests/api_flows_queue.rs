@@ -105,6 +105,7 @@ fn build_admin_test_app(
         priorities: llm_qdisc_proxy::config::Priorities::default(),
         request_timeout: None,
         context: None,
+        retry_policy: llm_qdisc_proxy::config::RetryPolicy::default(),
     };
 
     let _ = _backend_url;

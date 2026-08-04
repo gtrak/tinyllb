@@ -242,6 +242,7 @@ fn build_proxy_with_fifo(backend_url: &str) -> (Router, Arc<metrics::Metrics>) {
         priorities: Priorities::default(),
         request_timeout: None,
         context: None,
+        retry_policy: llm_qdisc_proxy::config::RetryPolicy::default(),
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
@@ -288,6 +289,7 @@ fn build_proxy_with_drr(backend_url: &str) -> (Router, Arc<metrics::Metrics>, Ar
         priorities: Priorities::default(),
         request_timeout: None,
         context: None,
+        retry_policy: llm_qdisc_proxy::config::RetryPolicy::default(),
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
@@ -755,6 +757,7 @@ fn build_proxy_with_drr_and_timeout(
         priorities: Priorities::default(),
         request_timeout: Some(timeout),
         context: None,
+        retry_policy: llm_qdisc_proxy::config::RetryPolicy::default(),
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));

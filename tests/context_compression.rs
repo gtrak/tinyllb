@@ -202,6 +202,7 @@ async fn build_compression_test_app(
         priorities: llm_qdisc_proxy::config::Priorities::default(),
         request_timeout: None,
         context: ctx,
+        retry_policy: llm_qdisc_proxy::config::RetryPolicy::default(),
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));

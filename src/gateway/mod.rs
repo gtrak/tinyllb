@@ -9,7 +9,7 @@ use std::sync::Arc;
 use url::Url;
 
 use self::proxy::proxy_handler;
-use crate::config::{Backpressure, Priorities};
+use crate::config::{Backpressure, Priorities, RetryPolicy};
 use crate::context::ContextState;
 use crate::flow::FlowRegistry;
 use crate::metrics::Metrics;
@@ -30,6 +30,7 @@ pub struct AppState {
     /// (both streaming and non-streaming) that exceed this duration.
     pub request_timeout: Option<std::time::Duration>,
     pub context: Option<Arc<ContextState>>,
+    pub retry_policy: RetryPolicy,
 }
 
 // @lat: [[gateway#Reverse Proxy Request Handling]]

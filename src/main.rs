@@ -155,6 +155,7 @@ async fn main() {
         priorities: cfg.priorities.clone(),
         request_timeout: cfg.request_timeout,
         context: context_state,
+        retry_policy: cfg.retry_policy.clone(),
     };
 
     let app = create_router(state);
@@ -202,6 +203,7 @@ mod tests {
             priorities: config::Priorities::default(),
             request_timeout: None,
             context: None,
+            retry_policy: config::RetryPolicy::default(),
         };
         let app = create_router(state);
         let response = app

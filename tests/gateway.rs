@@ -185,6 +185,7 @@ fn build_proxy_app(backend_url: &str) -> Router {
         priorities: llm_qdisc_proxy::config::Priorities::default(),
         request_timeout: None,
         context: None,
+        retry_policy: llm_qdisc_proxy::config::RetryPolicy::default(),
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
@@ -614,6 +615,7 @@ fn build_proxy_app_with_max(
         priorities: llm_qdisc_proxy::config::Priorities::default(),
         request_timeout: None,
         context: None,
+        retry_policy: llm_qdisc_proxy::config::RetryPolicy::default(),
     };
 
     let _ = _backend_url; // unused; we use the actual backend URL
@@ -761,6 +763,7 @@ async fn test_client_disconnect_releases_permit() {
         priorities: llm_qdisc_proxy::config::Priorities::default(),
         request_timeout: None,
         context: None,
+        retry_policy: llm_qdisc_proxy::config::RetryPolicy::default(),
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));

@@ -152,6 +152,7 @@ fn build_e2e_proxy_with_config(
         priorities: Priorities::default(),
         request_timeout: None,
         context: None,
+        retry_policy: llm_qdisc_proxy::config::RetryPolicy::default(),
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));

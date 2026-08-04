@@ -41,6 +41,7 @@ fn build_test_app(backend_url: &str) -> (Router, Arc<llm_qdisc_proxy::metrics::M
         priorities: llm_qdisc_proxy::config::Priorities::default(),
         request_timeout: None,
         context: None,
+        retry_policy: llm_qdisc_proxy::config::RetryPolicy::default(),
     };
 
     // Touch the queue_depth GaugeVec with an "ephemeral" label so it appears
@@ -369,6 +370,7 @@ async fn test_streaming_tokens_count_completion_not_total() {
         priorities: llm_qdisc_proxy::config::Priorities::default(),
         request_timeout: None,
         context: None,
+        retry_policy: llm_qdisc_proxy::config::RetryPolicy::default(),
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
@@ -444,6 +446,7 @@ async fn test_active_gauge_during_streaming() {
         priorities: llm_qdisc_proxy::config::Priorities::default(),
         request_timeout: None,
         context: None,
+        retry_policy: llm_qdisc_proxy::config::RetryPolicy::default(),
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
@@ -528,6 +531,7 @@ async fn test_nonstream_tokens_count_completion_not_total() {
         priorities: llm_qdisc_proxy::config::Priorities::default(),
         request_timeout: None,
         context: None,
+        retry_policy: llm_qdisc_proxy::config::RetryPolicy::default(),
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
@@ -603,6 +607,7 @@ async fn test_active_gauge_during_nonstreaming() {
         priorities: llm_qdisc_proxy::config::Priorities::default(),
         request_timeout: None,
         context: None,
+        retry_policy: llm_qdisc_proxy::config::RetryPolicy::default(),
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
