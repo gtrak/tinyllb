@@ -84,6 +84,10 @@ pub struct Metrics {
     pub flow_priority_source_total: CounterVec,
     /// Observed inter-request gap per flow (seconds). Labeled by `flow_id`.
     pub flow_inter_request_seconds: HistogramVec,
+    // -- Premature stop retry family --
+    pub premature_stop_detected_total: prometheus::Counter,
+    pub premature_stop_retries_total: prometheus::Counter,
+    pub premature_stop_exhausted_total: prometheus::Counter,
 }
 
 impl Default for Metrics {
@@ -306,6 +310,25 @@ impl Metrics {
             &["flow_id"],
         )
         .expect("llm_flow_inter_request_seconds should be creatable");
+        // -- Premature stop retry family --
+        let premature_stop_detected_total = prometheus::Counter::new(
+            "llm_qdisc_premature_stop_detected_total",
+            "Premature stops detected (one per failed attempt)",
+        )
+        .expect("premature_stop_detected_total should be creatable");
+
+        let premature_stop_retries_total = prometheus::Counter::new(
+            "llm_qdisc_premature_stop_retries_total",
+            "Retry requests issued after a premature stop",
+        )
+        .expect("premature_stop_retries_total should be creatable");
+
+        let premature_stop_exhausted_total = prometheus::Counter::new(
+            "llm_qdisc_premature_stop_exhausted_total",
+            "Degenerate turns forwarded after all retries exhausted",
+        )
+        .expect("premature_stop_exhausted_total should be creatable");
+
         // Register all collectors with the registry.
         registry
             .register(Box::new(queue_depth.clone()))
@@ -392,6 +415,17 @@ impl Metrics {
         registry
             .register(Box::new(flow_inter_request_seconds.clone()))
             .expect("llm_flow_inter_request_seconds registration should succeed");
+        // Register premature stop retry metrics.
+        registry
+            .register(Box::new(premature_stop_detected_total.clone()))
+            .expect("premature_stop_detected_total registration should succeed");
+        registry
+            .register(Box::new(premature_stop_retries_total.clone()))
+            .expect("premature_stop_retries_total registration should succeed");
+        registry
+            .register(Box::new(premature_stop_exhausted_total.clone()))
+            .expect("premature_stop_exhausted_total registration should succeed");
+
 
         Metrics {
             registry,
@@ -422,6 +456,9 @@ impl Metrics {
             flow_priority_class,
             flow_priority_source_total,
             flow_inter_request_seconds,
+            premature_stop_detected_total,
+            premature_stop_retries_total,
+            premature_stop_exhausted_total,
         }
     }
 }
