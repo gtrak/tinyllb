@@ -348,6 +348,19 @@ pub fn spawn_retry_stream(
 
                             let retry_value =
                                 bump_temperature(fwd_value.as_ref().unwrap(), attempt, &policy);
+                            let bumped_temp = retry_value.get("temperature").and_then(|v| v.as_f64());
+                            tracing::warn!(
+                                retry_attempt = attempt,
+                                bumped_temperature = ?bumped_temp,
+                                "premature-stop retry (streaming): degenerate stop with no content/tool_calls, retrying with bumped temperature"
+                            );
+                            let notice = format!(
+                                ": llm-qdisc: premature-stop retry attempt={} fired — discarded failed reasoning, retrying\n\n",
+                                attempt
+                            );
+                            if tx.send(Ok(bytes::Bytes::from(notice))).await.is_err() {
+                                return; // client disconnected
+                            }
                             let retry_bytes = match serde_json::to_vec(&retry_value) {
                                 Ok(b) => b,
                                 Err(_) => {

@@ -647,12 +647,13 @@ pub async fn proxy_handler(
         .map(|v| v == "compressor")
         .unwrap_or(false);
     let policy = &state.retry_policy;
+    let mut retry_attempts: u32 = 0;
     if policy.enabled && policy.max_retries > 0 && is_chat && !is_internal_compressor {
         // Pre-parse the forwarded request body once for bump_temperature reuse.
         let forwarded_value: Option<serde_json::Value> =
             serde_json::from_slice(&forwarded_body).ok();
         if let Some(fwd_value) = forwarded_value {
-            let mut retry_attempts: u32 = 0;
+            // retry_attempts is hoisted; use the outer declaration.
             loop {
                 // Parse current response body to check premature.
                 let resp_value: Option<serde_json::Value> =
@@ -663,6 +664,12 @@ pub async fn proxy_handler(
                         state.metrics.premature_stop_retries_total.inc();
                         retry_attempts += 1;
                         let retry_value = bump_temperature(&fwd_value, retry_attempts, policy);
+                        let bumped_temp = retry_value.get("temperature").and_then(|v| v.as_f64());
+                        tracing::warn!(
+                            retry_attempt = retry_attempts,
+                            bumped_temperature = ?bumped_temp,
+                            "premature-stop retry: degenerate finish_reason=stop with no content/tool_calls, retrying with bumped temperature"
+                        );
                         let retry_bytes = match serde_json::to_vec(&retry_value) {
                             Ok(b) => b,
                             Err(_) => break, // fail-open
@@ -745,6 +752,12 @@ pub async fn proxy_handler(
     resp.headers_mut().insert(
         axum::http::HeaderName::from_static("x-request-id"),
         axum::http::HeaderValue::from_str(&request_id).expect("valid UUID header value"),
+    );
+    // Report premature-stop retry count.
+    resp.headers_mut().insert(
+        axum::http::HeaderName::from_static("x-llm-qdisc-premature-stop-retries"),
+        axum::http::HeaderValue::from_str(&retry_attempts.to_string())
+            .expect("retry count header value is valid"),
     );
     Ok(resp)
 }
