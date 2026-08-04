@@ -84,23 +84,20 @@ async fn main() {
         cfg.flows.default_priority,
     ));
 
-    // Create the backend monitor for KV-cache-aware admission.
+    // Create the backend monitor. Always start the polling task so that
+    // backend gauges (kv_cache_usage, kv_cache_free) are populated for
+    // observability regardless of whether KV admission policy is enabled.
+    // The KvPolicy itself short-circuits to Accept when disabled.
     let client = gateway::build_client();
-    let monitor = if cfg.kv_policy.enabled {
-        let (monitor, monitor_task) = llm_qdisc_proxy::backend::BackendMonitor::new(
-            &cfg.backend,
-            metrics.clone(),
-            client.clone(),
-        );
-        // Spawn the monitor background task (only when KV policy is enabled).
-        if let Some(task) = monitor_task {
-            tokio::spawn(task);
-        }
-        Arc::new(monitor)
-    } else {
-        // KV policy disabled — use an empty monitor (no /metrics polling).
-        Arc::new(llm_qdisc_proxy::backend::BackendMonitor::empty())
-    };
+    let (monitor, monitor_task) = llm_qdisc_proxy::backend::BackendMonitor::new(
+        &cfg.backend,
+        metrics.clone(),
+        client.clone(),
+    );
+    if let Some(task) = monitor_task {
+        tokio::spawn(task);
+    }
+    let monitor = Arc::new(monitor);
 
     let scheduler = llm_qdisc_proxy::scheduler::Scheduler::new(
         cfg.scheduler.algorithm,
