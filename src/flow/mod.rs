@@ -1,7 +1,8 @@
+pub mod cadence;
 pub mod identify;
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU8, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -70,6 +71,10 @@ pub struct Flow {
     pub enqueued_at: std::sync::RwLock<Option<Instant>>,
     /// Number of currently active (in-flight) requests for this flow.
     pub active: AtomicU32,
+    /// Source of the current `priority` value.
+    /// 0 = heuristic-derived (default), 1 = X-LLM-Priority header,
+    /// 2 = POST /flows admin API.
+    pub priority_source: AtomicU8,
 }
 
 impl Flow {
@@ -83,6 +88,7 @@ impl Flow {
             credit: AtomicI64::new(0),
             enqueued_at: std::sync::RwLock::new(None),
             active: AtomicU32::new(0),
+            priority_source: AtomicU8::new(0),
         }
     }
 
@@ -105,6 +111,17 @@ impl Flow {
     pub fn set_priority(&self, p: u32) {
         self.priority.store(p, Ordering::Relaxed);
     }
+
+    /// Read the current priority source.
+    pub fn priority_source(&self) -> u8 {
+        self.priority_source.load(Ordering::Relaxed)
+    }
+
+    /// Set the priority source.
+    pub fn set_priority_source(&self, s: u8) {
+        self.priority_source.store(s, Ordering::Relaxed);
+    }
+
 
     /// Check if this flow currently has active (in-flight) requests.
     pub fn is_active(&self) -> bool {
@@ -206,6 +223,7 @@ impl FlowRegistry {
                 credit: AtomicI64::new(0),
                 enqueued_at: std::sync::RwLock::new(None),
                 active: AtomicU32::new(0),
+                priority_source: AtomicU8::new(0),
             });
             self.flows.insert(FlowId::new(id.to_string()), flow);
             true // created

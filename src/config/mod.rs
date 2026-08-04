@@ -34,6 +34,9 @@ pub struct Config {
     /// Context-compression policy.  Defaults to `enabled: false`.
     #[serde(default)]
     pub context_policy: ContextPolicy,
+    /// Per-flow priority policy for the interactive-vs-batch heuristic.
+    #[serde(default)]
+    pub priority_policy: PriorityPolicy,
 }
 
 /// Backend LLM service.
@@ -185,6 +188,66 @@ impl Default for ContextPolicy {
         }
     }
 }
+
+/// Priority classification policy for the interactive-vs-batch heuristic.
+///
+/// Tracks per-flow request cadence and assigns priority classes based on
+/// inter-request timing.  Defaults to `enabled: true` with interactive
+/// threshold at 30s and background threshold at 2s.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PriorityPolicy {
+    #[serde(default = "PriorityPolicy::default_enabled")]
+    pub enabled: bool,
+    #[serde(
+        default = "PriorityPolicy::default_interactive_gap_min",
+        with = "loader::humantime_serde"
+    )]
+    pub interactive_gap_min: Duration,
+    #[serde(
+        default = "PriorityPolicy::default_background_gap_max",
+        with = "loader::humantime_serde"
+    )]
+    pub background_gap_max: Duration,
+    #[serde(default = "PriorityPolicy::default_sample_window")]
+    pub sample_window: usize,
+    #[serde(default = "PriorityPolicy::default_min_samples")]
+    pub min_samples: usize,
+}
+
+impl PriorityPolicy {
+    fn default_enabled() -> bool {
+        true
+    }
+
+    fn default_interactive_gap_min() -> Duration {
+        Duration::from_secs(30)
+    }
+
+    fn default_background_gap_max() -> Duration {
+        Duration::from_secs(2)
+    }
+
+    fn default_sample_window() -> usize {
+        20
+    }
+
+    fn default_min_samples() -> usize {
+        3
+    }
+}
+
+impl Default for PriorityPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            interactive_gap_min: Self::default_interactive_gap_min(),
+            background_gap_max: Self::default_background_gap_max(),
+            sample_window: Self::default_sample_window(),
+            min_samples: Self::default_min_samples(),
+        }
+    }
+}
+
 
 /// Scheduler configuration.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
