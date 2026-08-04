@@ -849,3 +849,646 @@ async fn retry_body_not_truncated_by_stale_content_length() {
         "first message content should be preserved"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Helper: parse SSE data payloads from client response body
+// ---------------------------------------------------------------------------
+
+/// Parse a client SSE response body into a Vec of `data:` payloads.
+/// Each SSE event is delimited by `\n\n`.  For each event, find lines
+/// starting with `data:` and collect the payload (everything after `data:`).
+fn parse_sse_data_payloads(body_bytes: &Bytes) -> Vec<String> {
+    let body_str = String::from_utf8_lossy(body_bytes);
+    let mut payloads = Vec::new();
+    // SSE events are delimited by double newlines.
+    for event in body_str.split("\n\n") {
+        if event.trim().is_empty() {
+            continue;
+        }
+        for line in event.lines() {
+            if let Some(payload) = line.strip_prefix("data:") {
+                payloads.push(payload.trim().to_string());
+            }
+        }
+    }
+    payloads
+}
+
+// ---------------------------------------------------------------------------
+// Streaming tests
+// ---------------------------------------------------------------------------
+
+/// Test: premature stop triggers retry, concatenated stream contains reasoning + content.
+#[tokio::test]
+async fn streaming_premature_triggers_retry_concatenated() {
+    let call_count = Arc::new(AtomicU32::new(0));
+
+    // Call 1: reasoning delta (no content) + premature terminal (no content/tool_calls).
+    // These frames get forwarded live (reasoning delta) and the terminal triggers retry.
+    // [DONE] and usage from call 1 are NOT forwarded (accepted == false).
+    let premature_b: String = [
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking...\"}}]}\n\n",
+        "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n",
+    ]
+    .concat();
+
+    // Call 2: content delta + terminal with content + usage + [DONE].
+    // All frames forwarded (accepted == true after terminal).
+    let good_b: String = [
+        "data: {\"choices\":[{\"delta\":{\"content\":\"final answer\"}}]}\n\n",
+        "data: {\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{\"content\":\"\"}}]}\n\n",
+        "data: {\"usage\":{\"completion_tokens\":7}}\n\n",
+        "data: [DONE]\n\n",
+    ]
+    .concat();
+
+    let cc = call_count.clone();
+    let handler = move |_req: Request<Body>| {
+        let cc = cc.clone();
+        let premature_b = premature_b.clone();
+        let good_b = good_b.clone();
+        async move {
+            let n = cc.fetch_add(1, Ordering::SeqCst);
+            let body = if n == 0 { premature_b } else { good_b };
+            let mut resp = Response::new(Body::from(body));
+            resp.headers_mut().insert(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("text/event-stream"),
+            );
+            resp
+        }
+    };
+
+    let backend_app = Router::new().route("/v1/chat/completions", post(handler));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, backend_app).await.unwrap(); });
+
+    let backend_url = format!("http://{}/", addr);
+    let retry_policy = RetryPolicy {
+        enabled: true,
+        max_retries: 2,
+        temperature_step: 0.3,
+        max_temperature: 1.5,
+        default_temperature: 0.0,
+    };
+
+    let (app, state_metrics) = build_proxy_app_with_retry(&backend_url, retry_policy);
+
+    let body = r#"{"model":"x","messages":[{"role":"user","content":"hi"}],"stream":true}"#;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body_bytes = collect_body_bytes(resp).await;
+    let payloads = parse_sse_data_payloads(&body_bytes);
+
+    // Client should see reasoning from call 1 AND content from call 2.
+    let body_str = String::from_utf8_lossy(&body_bytes);
+    assert!(
+        body_str.contains("thinking..."),
+        "client should receive reasoning delta from call 1"
+    );
+    assert!(
+        body_str.contains("final answer"),
+        "client should receive content delta from call 2"
+    );
+
+    // Exactly ONE finish_reason frame and ONE [DONE].
+    let finish_reason_count = payloads
+        .iter()
+        .filter(|p| p.contains("finish_reason"))
+        .count();
+    let done_count = payloads.iter().filter(|p| *p == "[DONE]").count();
+    assert_eq!(
+        finish_reason_count, 1,
+        "exactly one finish_reason frame in concatenated stream"
+    );
+    assert_eq!(done_count, 1, "exactly one [DONE] in concatenated stream");
+
+    // Metrics: one premature detection, one retry, no exhaustion.
+    assert_eq!(state_metrics.premature_stop_detected_total.get(), 1.0);
+    assert_eq!(state_metrics.premature_stop_retries_total.get(), 1.0);
+    assert_eq!(state_metrics.premature_stop_exhausted_total.get(), 0.0);
+    // Only the accepted attempt's usage is counted.
+    assert_eq!(
+        state_metrics.tokens_generated_total.get(),
+        7.0,
+        "tokens from accepted attempt only"
+    );
+}
+
+/// Test: normal streaming response (content present) does NOT trigger retry.
+#[tokio::test]
+async fn streaming_non_premature_no_retry() {
+    let call_count = Arc::new(AtomicU32::new(0));
+
+    let good_b: String = [
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
+        "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n",
+        "data: {\"usage\":{\"completion_tokens\":5}}\n\n",
+        "data: [DONE]\n\n",
+    ]
+    .concat();
+
+    let cc = call_count.clone();
+    let handler = move |_req: Request<Body>| {
+        let cc = cc.clone();
+        let good_b = good_b.clone();
+        async move {
+            let _ = cc.fetch_add(1, Ordering::SeqCst);
+            let mut resp = Response::new(Body::from(good_b));
+            resp.headers_mut().insert(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("text/event-stream"),
+            );
+            resp
+        }
+    };
+
+    let backend_app = Router::new().route("/v1/chat/completions", post(handler));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, backend_app).await.unwrap(); });
+
+    let backend_url = format!("http://{}/", addr);
+    let retry_policy = RetryPolicy {
+        enabled: true,
+        max_retries: 2,
+        temperature_step: 0.3,
+        max_temperature: 1.5,
+        default_temperature: 0.0,
+    };
+
+    let (app, state_metrics) = build_proxy_app_with_retry(&backend_url, retry_policy);
+
+    let body = r#"{"model":"x","messages":[{"role":"user","content":"hi"}],"stream":true}"#;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body_bytes = collect_body_bytes(resp).await;
+    let payloads = parse_sse_data_payloads(&body_bytes);
+
+    // Backend called ONCE (no retry).
+    assert_eq!(
+        call_count.load(Ordering::SeqCst),
+        1,
+        "backend should be called once"
+    );
+
+    // Client got the content.
+    let body_str = String::from_utf8_lossy(&body_bytes);
+    assert!(body_str.contains("hello"), "client should receive content");
+
+    // Exactly one finish_reason and one [DONE].
+    let finish_reason_count = payloads
+        .iter()
+        .filter(|p| p.contains("finish_reason"))
+        .count();
+    let done_count = payloads.iter().filter(|p| *p == "[DONE]").count();
+    assert_eq!(finish_reason_count, 1);
+    assert_eq!(done_count, 1);
+
+    // No premature-stop activity.
+    assert_eq!(state_metrics.premature_stop_detected_total.get(), 0.0);
+    assert_eq!(state_metrics.premature_stop_retries_total.get(), 0.0);
+    assert_eq!(state_metrics.premature_stop_exhausted_total.get(), 0.0);
+    assert_eq!(state_metrics.tokens_generated_total.get(), 5.0);
+}
+
+/// Test: tool_calls finish_reason does NOT trigger retry.
+#[tokio::test]
+async fn streaming_finish_reason_tool_calls_no_retry() {
+    let call_count = Arc::new(AtomicU32::new(0));
+
+    let tool_b: String = [
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call_1\",\"function\":{\"name\":\"search\"}}]}}]}\n\n",
+        "data: {\"choices\":[{\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: {\"usage\":{\"completion_tokens\":3}}\n\n",
+        "data: [DONE]\n\n",
+    ]
+    .concat();
+
+    let cc = call_count.clone();
+    let handler = move |_req: Request<Body>| {
+        let cc = cc.clone();
+        let tool_b = tool_b.clone();
+        async move {
+            let _ = cc.fetch_add(1, Ordering::SeqCst);
+            let mut resp = Response::new(Body::from(tool_b));
+            resp.headers_mut().insert(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("text/event-stream"),
+            );
+            resp
+        }
+    };
+
+    let backend_app = Router::new().route("/v1/chat/completions", post(handler));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, backend_app).await.unwrap(); });
+
+    let backend_url = format!("http://{}/", addr);
+    let retry_policy = RetryPolicy {
+        enabled: true,
+        max_retries: 2,
+        temperature_step: 0.3,
+        max_temperature: 1.5,
+        default_temperature: 0.0,
+    };
+
+    let (app, state_metrics) = build_proxy_app_with_retry(&backend_url, retry_policy);
+
+    let body = r#"{"model":"x","messages":[{"role":"user","content":"hi"}],"stream":true}"#;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body_bytes = collect_body_bytes(resp).await;
+    let payloads = parse_sse_data_payloads(&body_bytes);
+
+    assert_eq!(
+        call_count.load(Ordering::SeqCst),
+        1,
+        "backend should be called once (tool_calls is not premature)"
+    );
+
+    // Exactly one finish_reason == "tool_calls" and one [DONE].
+    let finish_reason_count = payloads
+        .iter()
+        .filter(|p| p.contains("finish_reason"))
+        .count();
+    let done_count = payloads.iter().filter(|p| *p == "[DONE]").count();
+    assert_eq!(finish_reason_count, 1);
+    assert_eq!(done_count, 1);
+    assert!(
+        payloads
+            .iter()
+            .any(|p| p.contains("\"tool_calls\"")),
+        "should contain tool_calls finish_reason"
+    );
+
+    assert_eq!(state_metrics.premature_stop_detected_total.get(), 0.0);
+    assert_eq!(state_metrics.premature_stop_retries_total.get(), 0.0);
+    assert_eq!(state_metrics.premature_stop_exhausted_total.get(), 0.0);
+}
+
+/// Test: all three attempts return premature; last attempt's terminal + usage + [DONE]
+/// is forwarded (fail-open by accepting). When retries run out and the last terminal
+/// is still degenerate (premature-shaped: stop + no content + no tool_calls),
+/// `premature_stop_exhausted_total` is incremented to match the non-streaming path.
+///
+/// Tracing the retry loop (max_retries=2):
+/// - attempt 0: premature (0 < 2) -> detected=1, retries=1, attempt=1, swap
+/// - attempt 1: premature (1 < 2) -> detected=2, retries=2, attempt=2, swap
+/// - attempt 2: accepted (2 >= 2), degenerate -> exhausted=1. Forward terminal+usage+[DONE].
+/// Expected: detected=2, retries=2, exhausted=1.
+#[tokio::test]
+async fn streaming_exhausted_forwards_last() {
+    let call_count = Arc::new(AtomicU32::new(0));
+
+    // Calls 1 and 2: reasoning + premature terminal (no content).
+    let premature_b: String = [
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking...\"}}]}\n\n",
+        "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n",
+    ]
+    .concat();
+
+    // Call 3 (last): same + usage + [DONE]. The terminal is ACCEPTED
+    // (attempt=2 >= max_retries=2), so usage and [DONE] are forwarded.
+    let last_b: String = [
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking...\"}}]}\n\n",
+        "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n",
+        "data: {\"usage\":{\"completion_tokens\":7}}\n\n",
+        "data: [DONE]\n\n",
+    ]
+    .concat();
+
+    let cc = call_count.clone();
+    let handler = move |_req: Request<Body>| {
+        let cc = cc.clone();
+        let premature_b = premature_b.clone();
+        let last_b = last_b.clone();
+        async move {
+            let n = cc.fetch_add(1, Ordering::SeqCst);
+            let body = if n == 2 { last_b } else { premature_b };
+            let mut resp = Response::new(Body::from(body));
+            resp.headers_mut().insert(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("text/event-stream"),
+            );
+            resp
+        }
+    };
+
+    let backend_app = Router::new().route("/v1/chat/completions", post(handler));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, backend_app).await.unwrap(); });
+
+    let backend_url = format!("http://{}/", addr);
+    let retry_policy = RetryPolicy {
+        enabled: true,
+        max_retries: 2,
+        temperature_step: 0.3,
+        max_temperature: 1.5,
+        default_temperature: 0.0,
+    };
+
+    let (app, state_metrics) = build_proxy_app_with_retry(&backend_url, retry_policy);
+
+    let body = r#"{"model":"x","messages":[{"role":"user","content":"hi"}],"stream":true}"#;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body_bytes = collect_body_bytes(resp).await;
+    let payloads = parse_sse_data_payloads(&body_bytes);
+
+    let body_str = String::from_utf8_lossy(&body_bytes);
+
+    // Backend called 3 times (initial + 2 retries).
+    assert_eq!(
+        call_count.load(Ordering::SeqCst),
+        3,
+        "backend should be called 3 times (initial + 2 retries)"
+    );
+
+    // Client receives exactly 1 finish_reason (from the last attempt) and 1 [DONE].
+    let finish_reason_count = payloads
+        .iter()
+        .filter(|p| p.contains("finish_reason"))
+        .count();
+    let done_count = payloads.iter().filter(|p| *p == "[DONE]").count();
+    assert_eq!(
+        finish_reason_count, 1,
+        "exactly one finish_reason from the last (accepted) attempt"
+    );
+    assert_eq!(done_count, 1, "exactly one [DONE] from the last attempt");
+
+    // Reasoning from all attempts may appear (forwarded live), but no content.
+    assert!(
+        body_str.contains("thinking..."),
+        "reasoning deltas are forwarded live"
+    );
+
+    // Metrics: 2 premature detections, 2 retries, 1 exhausted
+    // (degenerate fail-open on last attempt after retries exhausted).
+    assert_eq!(
+        state_metrics.premature_stop_detected_total.get(),
+        2.0,
+        "two premature detections (calls 1 and 2)"
+    );
+    assert_eq!(
+        state_metrics.premature_stop_retries_total.get(),
+        2.0,
+        "two retries attempted"
+    );
+    assert_eq!(
+        state_metrics.premature_stop_exhausted_total.get(),
+        1.0,
+        "degenerate fail-open on last attempt after retries exhausted (matches non-streaming)"
+    );
+}
+
+/// Test: retry disabled -> passthrough. Premature terminal + [DONE] forwarded AS-IS.
+#[tokio::test]
+async fn streaming_disabled_passthrough() {
+    let call_count = Arc::new(AtomicU32::new(0));
+
+    // Premature response: reasoning + stop (no content) + usage + [DONE].
+    // With retry disabled, ALL frames are forwarded as-is.
+    let premature_b: String = [
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking...\"}}]}\n\n",
+        "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n",
+        "data: {\"usage\":{\"completion_tokens\":7}}\n\n",
+        "data: [DONE]\n\n",
+    ]
+    .concat();
+
+    let cc = call_count.clone();
+    let handler = move |_req: Request<Body>| {
+        let cc = cc.clone();
+        let premature_b = premature_b.clone();
+        async move {
+            let _ = cc.fetch_add(1, Ordering::SeqCst);
+            let mut resp = Response::new(Body::from(premature_b));
+            resp.headers_mut().insert(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("text/event-stream"),
+            );
+            resp
+        }
+    };
+
+    let backend_app = Router::new().route("/v1/chat/completions", post(handler));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, backend_app).await.unwrap(); });
+
+    let backend_url = format!("http://{}/", addr);
+    let retry_policy = RetryPolicy {
+        enabled: false,
+        ..Default::default()
+    };
+
+    let (app, state_metrics) = build_proxy_app_with_retry(&backend_url, retry_policy);
+
+    let body = r#"{"model":"x","messages":[{"role":"user","content":"hi"}],"stream":true}"#;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body_bytes = collect_body_bytes(resp).await;
+    let payloads = parse_sse_data_payloads(&body_bytes);
+
+    assert_eq!(
+        call_count.load(Ordering::SeqCst),
+        1,
+        "backend should be called once (retry disabled)"
+    );
+
+    // Client receives the premature terminal + [DONE] as-is.
+    let finish_reason_count = payloads
+        .iter()
+        .filter(|p| p.contains("finish_reason"))
+        .count();
+    let done_count = payloads.iter().filter(|p| *p == "[DONE]").count();
+    assert_eq!(finish_reason_count, 1);
+    assert_eq!(done_count, 1);
+
+    // No premature-stop activity (retry disabled).
+    assert_eq!(state_metrics.premature_stop_detected_total.get(), 0.0);
+    assert_eq!(state_metrics.premature_stop_retries_total.get(), 0.0);
+    assert_eq!(state_metrics.premature_stop_exhausted_total.get(), 0.0);
+    // MetricStream path (retry disabled) counts tokens via TokenAccumulator.
+    assert_eq!(
+        state_metrics.tokens_generated_total.get(),
+        7.0,
+        "MetricStream counts tokens in disabled-passthrough path"
+    );
+}
+
+/// Test: retry HTTP failure -> fail-open. The stream ends with whatever was
+/// forwarded before the retry (reasoning delta), no terminal/[DONE].
+///
+/// Implementation behavior verified in src/gateway/stream.rs:
+/// The retry-failure arm reads:
+///   ```
+///   _ => {
+///       metrics.premature_stop_exhausted_total.inc();
+///       return; // fail-open
+///   }
+///   ```
+/// This means the spawned task returns immediately on retry failure.
+/// The client receives the forwarded frames (reasoning from call 1) but
+/// NO terminal frame, NO [DONE], and NO usage — the stream just ends.
+#[tokio::test]
+async fn streaming_retry_http_failure_fail_open() {
+    let call_count = Arc::new(AtomicU32::new(0));
+
+    // Call 1: reasoning + premature terminal.
+    let premature_b: String = [
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking...\"}}]}\n\n",
+        "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n",
+    ]
+    .concat();
+
+    let cc = call_count.clone();
+    let handler = move |_req: Request<Body>| {
+        let cc = cc.clone();
+        let premature_b = premature_b.clone();
+        async move {
+            let n = cc.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                let mut resp = Response::new(Body::from(premature_b));
+                resp.headers_mut().insert(
+                    axum::http::header::CONTENT_TYPE,
+                    axum::http::HeaderValue::from_static("text/event-stream"),
+                );
+                resp
+            } else {
+                // Retry: return HTTP 500 to simulate network failure.
+                let mut resp =
+                    Response::new(Body::from("internal server error".to_string()));
+                *resp.status_mut() = axum::http::StatusCode::INTERNAL_SERVER_ERROR;
+                resp.headers_mut().insert(
+                    axum::http::header::CONTENT_TYPE,
+                    axum::http::HeaderValue::from_static("text/plain"),
+                );
+                resp
+            }
+        }
+    };
+
+    let backend_app = Router::new().route("/v1/chat/completions", post(handler));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, backend_app).await.unwrap(); });
+
+    let backend_url = format!("http://{}/", addr);
+    let retry_policy = RetryPolicy {
+        enabled: true,
+        max_retries: 2,
+        temperature_step: 0.3,
+        max_temperature: 1.5,
+        default_temperature: 0.0,
+    };
+
+    let (app, state_metrics) = build_proxy_app_with_retry(&backend_url, retry_policy);
+
+    let body = r#"{"model":"x","messages":[{"role":"user","content":"hi"}],"stream":true}"#;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body_bytes = collect_body_bytes(resp).await;
+
+    let body_str = String::from_utf8_lossy(&body_bytes);
+
+    // Client received the reasoning from call 1 but no terminal/[DONE].
+    assert!(
+        body_str.contains("thinking..."),
+        "client should receive reasoning forwarded before retry"
+    );
+    assert!(
+        !body_str.contains("finish_reason"),
+        "no finish_reason frame should appear (stream ended on retry failure)"
+    );
+    assert!(
+        !body_str.contains("[DONE]"),
+        "no [DONE] should appear (stream ended on retry failure)"
+    );
+
+    // Backend called twice (initial + failed retry).
+    assert_eq!(
+        call_count.load(Ordering::SeqCst),
+        2,
+        "backend should be called twice (initial + 1 failed retry)"
+    );
+
+    // Retry failure increments exhausted.
+    assert_eq!(state_metrics.premature_stop_detected_total.get(), 1.0);
+    assert_eq!(state_metrics.premature_stop_retries_total.get(), 1.0);
+    assert_eq!(
+        state_metrics.premature_stop_exhausted_total.get(),
+        1.0,
+        "retry HTTP failure increments exhausted"
+    );
+}

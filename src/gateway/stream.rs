@@ -336,9 +336,10 @@ pub fn spawn_retry_stream(
                     }
 
                     if let Some(ref _fr) = cls.finish_reason {
+                        let fr = _fr.clone();
                         // Terminal frame: decide whether to accept or retry.
                         let premature =
-                            _fr == "stop" && !saw_content && !saw_tool_calls && attempt < policy.max_retries && can_retry;
+                            fr == "stop" && !saw_content && !saw_tool_calls && attempt < policy.max_retries && can_retry;
 
                         if premature {
                             metrics.premature_stop_detected_total.inc();
@@ -387,6 +388,12 @@ pub fn spawn_retry_stream(
                         } else {
                             // Accepted terminal: forward + count combined usage.
                             accepted = true;
+                            // If we accepted only because retries are exhausted and the turn is still
+                            // degenerate (premature-shaped: stop + no content + no tool_calls), count
+                            // it as an exhausted fail-open (matches the non-streaming post-loop check).
+                            if fr == "stop" && !saw_content && !saw_tool_calls && attempt >= policy.max_retries {
+                                metrics.premature_stop_exhausted_total.inc();
+                            }
                             if cls.has_usage {
                                 let t = completion_tokens_from_frame(&frame);
                                 if t > 0 {
