@@ -1,0 +1,851 @@
+use axum::body::Body;
+use axum::http::Request;
+use axum::response::Response;
+use axum::routing::{get, post};
+use axum::Router;
+use bytes::Bytes;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+use tower::ServiceExt;
+
+use llm_qdisc_proxy::config::{BackpressureMode, RetryPolicy};
+use llm_qdisc_proxy::flow::FlowRegistry;
+use llm_qdisc_proxy::gateway;
+use llm_qdisc_proxy::metrics;
+use llm_qdisc_proxy::scheduler;
+
+// ---------------------------------------------------------------------------
+// Harness
+// ---------------------------------------------------------------------------
+
+fn build_proxy_app_with_retry(
+    backend_url: &str,
+    retry_policy: RetryPolicy,
+) -> (Router, Arc<llm_qdisc_proxy::metrics::Metrics>) {
+    let metrics = metrics::create_metrics();
+    let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
+    let scheduler = scheduler::Scheduler::new_with_defaults(
+        llm_qdisc_proxy::config::Algorithm::Fifo,
+        4,
+        metrics.clone(),
+        flow_registry.clone(),
+        BackpressureMode::Blocking,
+        100,
+        std::time::Duration::from_secs(10),
+        std::time::Duration::from_secs(1),
+    );
+    let state = gateway::AppState {
+        client: gateway::build_client(),
+        backend_url: Arc::new(url::Url::parse(backend_url).expect("valid backend URL")),
+        metrics: metrics.clone(),
+        scheduler: Arc::new(scheduler),
+        flow_registry,
+        backpressure: llm_qdisc_proxy::config::Backpressure::default(),
+        priorities: llm_qdisc_proxy::config::Priorities::default(),
+        request_timeout: None,
+        context: None,
+        retry_policy,
+    };
+
+    let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
+    let gateway_router = gateway::create_router().with_state(state.clone());
+    let metrics_router = Router::new()
+        .route(
+            "/metrics",
+            get(llm_qdisc_proxy::metrics::endpoint::metrics_handler),
+        )
+        .with_state(state.clone());
+    let admin_router = llm_qdisc_proxy::api::create_router().with_state(state.clone());
+
+    let app = Router::new()
+        .merge(health_router)
+        .merge(metrics_router)
+        .merge(gateway_router)
+        .merge(admin_router)
+        .with_state(state);
+
+    (app, metrics)
+}
+
+async fn collect_body_bytes(resp: Response<Body>) -> Bytes {
+    axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap()
+}
+
+// ---------------------------------------------------------------------------
+// Helper: response body builders (return owned Vec<u8>)
+// ---------------------------------------------------------------------------
+
+fn premature_response_bytes() -> Vec<u8> {
+    r#"{"choices":[{"finish_reason":"stop","message":{"role":"assistant"}}],"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}}"#
+        .as_bytes()
+        .to_vec()
+}
+
+fn good_response_bytes(content: &str) -> Vec<u8> {
+    serde_json::json!({
+        "choices": [{
+            "finish_reason": "stop",
+            "message": {
+                "role": "assistant",
+                "content": content
+            }
+        }],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6}
+    })
+    .to_string()
+    .into_bytes()
+}
+
+fn length_response_bytes() -> Vec<u8> {
+    r#"{"choices":[{"finish_reason":"length","message":{"role":"assistant"}}],"usage":{"prompt_tokens":5,"completion_tokens":0,"total_tokens":5}}"#
+        .as_bytes()
+        .to_vec()
+}
+
+fn tool_calls_response_bytes() -> Vec<u8> {
+    serde_json::json!({
+        "choices": [{
+            "finish_reason": "tool_calls",
+            "message": {
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": "call_1",
+                    "function": {"name": "search"},
+                    "type": "function"
+                }]
+            }
+        }],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}
+    })
+    .to_string()
+    .into_bytes()
+}
+
+fn completions_stop_response_bytes() -> Vec<u8> {
+    r#"{"choices":[{"finish_reason":"stop","text":""}],"usage":{"prompt_tokens":5,"completion_tokens":0,"total_tokens":5}}"#
+        .as_bytes()
+        .to_vec()
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+/// Test: premature stop triggers retry, good response returned on call 2.
+#[tokio::test]
+async fn premature_stop_triggers_retry_returns_good_body() {
+    let call_count = Arc::new(AtomicU32::new(0));
+    let premature_b = premature_response_bytes();
+    let good_b = good_response_bytes("hello");
+
+    let cc = call_count.clone();
+    let handler = move |_req: Request<Body>| {
+        let cc = cc.clone();
+        let premature_b = premature_b.clone();
+        let good_b = good_b.clone();
+        async move {
+            let n = cc.fetch_add(1, Ordering::SeqCst);
+            let body = if n == 0 { premature_b } else { good_b };
+            let mut resp = Response::new(Body::from(body));
+            resp.headers_mut().insert(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("application/json"),
+            );
+            resp
+        }
+    };
+
+    let backend_app = Router::new().route("/v1/chat/completions", post(handler));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, backend_app).await.unwrap(); });
+
+    let backend_url = format!("http://{}/", addr);
+    let retry_policy = RetryPolicy {
+        enabled: true,
+        max_retries: 2,
+        temperature_step: 0.3,
+        max_temperature: 1.5,
+        default_temperature: 0.0,
+    };
+
+    let (app, state_metrics) = build_proxy_app_with_retry(&backend_url, retry_policy);
+
+    let body = r#"{"model":"llama-2","messages":[{"role":"user","content":"hi"}]}"#;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+
+    let body_bytes = collect_body_bytes(resp).await;
+    let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(
+        response_json["choices"][0]["message"]["content"],
+        "hello"
+    );
+    assert_eq!(
+        call_count.load(Ordering::SeqCst),
+        2,
+        "backend should be called twice (initial + 1 retry)"
+    );
+    assert_eq!(state_metrics.premature_stop_detected_total.get(), 1.0);
+    assert_eq!(state_metrics.premature_stop_retries_total.get(), 1.0);
+    assert_eq!(state_metrics.premature_stop_exhausted_total.get(), 0.0);
+}
+
+/// Test: non-premature response (content present) does NOT trigger retry.
+#[tokio::test]
+async fn non_premature_response_no_retry() {
+    let call_count = Arc::new(AtomicU32::new(0));
+    let good_b = good_response_bytes("hello world");
+
+    let cc = call_count.clone();
+    let handler = move |_req: Request<Body>| {
+        let cc = cc.clone();
+        let good_b = good_b.clone();
+        async move {
+            let _ = cc.fetch_add(1, Ordering::SeqCst);
+            let mut resp = Response::new(Body::from(good_b));
+            resp.headers_mut().insert(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("application/json"),
+            );
+            resp
+        }
+    };
+
+    let backend_app = Router::new().route("/v1/chat/completions", post(handler));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, backend_app).await.unwrap(); });
+
+    let backend_url = format!("http://{}/", addr);
+    let retry_policy = RetryPolicy {
+        enabled: true,
+        max_retries: 2,
+        temperature_step: 0.3,
+        max_temperature: 1.5,
+        default_temperature: 0.0,
+    };
+
+    let (app, state_metrics) = build_proxy_app_with_retry(&backend_url, retry_policy);
+
+    let body = r#"{"model":"llama-2","messages":[{"role":"user","content":"hi"}]}"#;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+
+    let body_bytes = collect_body_bytes(resp).await;
+    let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(response_json["choices"][0]["message"]["content"], "hello world");
+
+    assert_eq!(
+        call_count.load(Ordering::SeqCst),
+        1,
+        "backend should be called once (no retry)"
+    );
+    assert_eq!(state_metrics.premature_stop_detected_total.get(), 0.0);
+    assert_eq!(state_metrics.premature_stop_retries_total.get(), 0.0);
+    assert_eq!(state_metrics.premature_stop_exhausted_total.get(), 0.0);
+}
+
+/// Test: finish_reason "length" with empty content does NOT trigger retry.
+#[tokio::test]
+async fn finish_reason_length_no_retry() {
+    let call_count = Arc::new(AtomicU32::new(0));
+    let length_b = length_response_bytes();
+
+    let cc = call_count.clone();
+    let handler = move |_req: Request<Body>| {
+        let cc = cc.clone();
+        let length_b = length_b.clone();
+        async move {
+            let _ = cc.fetch_add(1, Ordering::SeqCst);
+            let mut resp = Response::new(Body::from(length_b));
+            resp.headers_mut().insert(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("application/json"),
+            );
+            resp
+        }
+    };
+
+    let backend_app = Router::new().route("/v1/chat/completions", post(handler));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, backend_app).await.unwrap(); });
+
+    let backend_url = format!("http://{}/", addr);
+    let retry_policy = RetryPolicy {
+        enabled: true,
+        max_retries: 2,
+        temperature_step: 0.3,
+        max_temperature: 1.5,
+        default_temperature: 0.0,
+    };
+
+    let (app, _) = build_proxy_app_with_retry(&backend_url, retry_policy);
+
+    let body = r#"{"model":"llama-2","messages":[{"role":"user","content":"hi"}]}"#;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body_bytes = collect_body_bytes(resp).await;
+    let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(response_json["choices"][0]["finish_reason"], "length");
+    assert_eq!(call_count.load(Ordering::SeqCst), 1);
+}
+
+/// Test: finish_reason "tool_calls" with tool_calls present does NOT trigger retry.
+#[tokio::test]
+async fn finish_reason_tool_calls_no_retry() {
+    let call_count = Arc::new(AtomicU32::new(0));
+    let tool_b = tool_calls_response_bytes();
+
+    let cc = call_count.clone();
+    let handler = move |_req: Request<Body>| {
+        let cc = cc.clone();
+        let tool_b = tool_b.clone();
+        async move {
+            let _ = cc.fetch_add(1, Ordering::SeqCst);
+            let mut resp = Response::new(Body::from(tool_b));
+            resp.headers_mut().insert(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("application/json"),
+            );
+            resp
+        }
+    };
+
+    let backend_app = Router::new().route("/v1/chat/completions", post(handler));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, backend_app).await.unwrap(); });
+
+    let backend_url = format!("http://{}/", addr);
+    let retry_policy = RetryPolicy {
+        enabled: true,
+        max_retries: 2,
+        temperature_step: 0.3,
+        max_temperature: 1.5,
+        default_temperature: 0.0,
+    };
+
+    let (app, _) = build_proxy_app_with_retry(&backend_url, retry_policy);
+
+    let body = r#"{"model":"llama-2","messages":[{"role":"user","content":"hi"}]}"#;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body_bytes = collect_body_bytes(resp).await;
+    let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(response_json["choices"][0]["finish_reason"], "tool_calls");
+    assert_eq!(call_count.load(Ordering::SeqCst), 1);
+}
+
+/// Test: retries exhausted -> last degenerate forwarded, metrics correct.
+#[tokio::test]
+async fn retries_exhausted_forwards_last_degenerate() {
+    let call_count = Arc::new(AtomicU32::new(0));
+    let premature_b = premature_response_bytes();
+
+    let cc = call_count.clone();
+    let handler = move |_req: Request<Body>| {
+        let cc = cc.clone();
+        let premature_b = premature_b.clone();
+        async move {
+            let _ = cc.fetch_add(1, Ordering::SeqCst);
+            let mut resp = Response::new(Body::from(premature_b));
+            resp.headers_mut().insert(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("application/json"),
+            );
+            resp
+        }
+    };
+
+    let backend_app = Router::new().route("/v1/chat/completions", post(handler));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, backend_app).await.unwrap(); });
+
+    let backend_url = format!("http://{}/", addr);
+    let retry_policy = RetryPolicy {
+        enabled: true,
+        max_retries: 2,
+        temperature_step: 0.3,
+        max_temperature: 1.5,
+        default_temperature: 0.0,
+    };
+
+    let (app, state_metrics) = build_proxy_app_with_retry(&backend_url, retry_policy);
+
+    let body = r#"{"model":"llama-2","messages":[{"role":"user","content":"hi"}]}"#;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body_bytes = collect_body_bytes(resp).await;
+    let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(response_json["choices"][0]["finish_reason"], "stop");
+    assert!(response_json["choices"][0]["message"].get("content").is_none());
+
+    assert_eq!(
+        call_count.load(Ordering::SeqCst),
+        3,
+        "backend should be called 3 times (initial + 2 retries)"
+    );
+    assert_eq!(state_metrics.premature_stop_detected_total.get(), 2.0);
+    assert_eq!(state_metrics.premature_stop_retries_total.get(), 2.0);
+    assert_eq!(state_metrics.premature_stop_exhausted_total.get(), 1.0);
+}
+
+/// Test: retry policy disabled -> zero behavioral change, passthrough.
+#[tokio::test]
+async fn disabled_no_retry_passthrough() {
+    let call_count = Arc::new(AtomicU32::new(0));
+    let premature_b = premature_response_bytes();
+
+    let cc = call_count.clone();
+    let handler = move |_req: Request<Body>| {
+        let cc = cc.clone();
+        let premature_b = premature_b.clone();
+        async move {
+            let _ = cc.fetch_add(1, Ordering::SeqCst);
+            let mut resp = Response::new(Body::from(premature_b));
+            resp.headers_mut().insert(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("application/json"),
+            );
+            resp
+        }
+    };
+
+    let backend_app = Router::new().route("/v1/chat/completions", post(handler));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, backend_app).await.unwrap(); });
+
+    let backend_url = format!("http://{}/", addr);
+    let retry_policy = RetryPolicy {
+        enabled: false,
+        ..Default::default()
+    };
+
+    let (app, state_metrics) = build_proxy_app_with_retry(&backend_url, retry_policy);
+
+    let body = r#"{"model":"llama-2","messages":[{"role":"user","content":"hi"}]}"#;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body_bytes = collect_body_bytes(resp).await;
+    let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(response_json["choices"][0]["finish_reason"], "stop");
+    assert_eq!(call_count.load(Ordering::SeqCst), 1, "backend should be called once");
+    assert_eq!(state_metrics.premature_stop_detected_total.get(), 0.0);
+    assert_eq!(state_metrics.premature_stop_retries_total.get(), 0.0);
+    assert_eq!(state_metrics.premature_stop_exhausted_total.get(), 0.0);
+}
+
+/// Test: internal compressor requests are skipped even when retry is enabled.
+#[tokio::test]
+async fn internal_compressor_skipped() {
+    let call_count = Arc::new(AtomicU32::new(0));
+    let premature_b = premature_response_bytes();
+
+    let cc = call_count.clone();
+    let handler = move |_req: Request<Body>| {
+        let cc = cc.clone();
+        let premature_b = premature_b.clone();
+        async move {
+            let _ = cc.fetch_add(1, Ordering::SeqCst);
+            let mut resp = Response::new(Body::from(premature_b));
+            resp.headers_mut().insert(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("application/json"),
+            );
+            resp
+        }
+    };
+
+    let backend_app = Router::new().route("/v1/chat/completions", post(handler));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, backend_app).await.unwrap(); });
+
+    let backend_url = format!("http://{}/", addr);
+    let retry_policy = RetryPolicy {
+        enabled: true,
+        max_retries: 2,
+        temperature_step: 0.3,
+        max_temperature: 1.5,
+        default_temperature: 0.0,
+    };
+
+    let (app, state_metrics) = build_proxy_app_with_retry(&backend_url, retry_policy);
+
+    let body = r#"{"model":"llama-2","messages":[{"role":"user","content":"hi"}]}"#;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-llm-internal", "compressor")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body_bytes = collect_body_bytes(resp).await;
+    let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(response_json["choices"][0]["finish_reason"], "stop");
+    assert_eq!(
+        call_count.load(Ordering::SeqCst),
+        1,
+        "backend should be called once (internal compressor skipped)"
+    );
+    assert_eq!(state_metrics.premature_stop_detected_total.get(), 0.0);
+    assert_eq!(state_metrics.premature_stop_retries_total.get(), 0.0);
+    assert_eq!(state_metrics.premature_stop_exhausted_total.get(), 0.0);
+}
+
+/// Test: non-chat-completions routes are not retried.
+#[tokio::test]
+async fn only_chat_completions_retries() {
+    let call_count = Arc::new(AtomicU32::new(0));
+    let stop_b = completions_stop_response_bytes();
+
+    let cc = call_count.clone();
+    let completions_handler = move |_req: Request<Body>| {
+        let cc = cc.clone();
+        let stop_b = stop_b.clone();
+        async move {
+            let _ = cc.fetch_add(1, Ordering::SeqCst);
+            let mut resp = Response::new(Body::from(stop_b));
+            resp.headers_mut().insert(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("application/json"),
+            );
+            resp
+        }
+    };
+
+    let chat_handler = move |_req: Request<Body>| async {
+        let json = r#"{"choices":[{}]}"#;
+        let mut resp = Response::new(Body::from(json.as_bytes()));
+        resp.headers_mut().insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/json"),
+        );
+        resp
+    };
+
+    let backend_app = Router::new()
+        .route("/v1/chat/completions", post(chat_handler))
+        .route("/v1/completions", post(completions_handler));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, backend_app).await.unwrap(); });
+
+    let backend_url = format!("http://{}/", addr);
+    let retry_policy = RetryPolicy {
+        enabled: true,
+        max_retries: 2,
+        temperature_step: 0.3,
+        max_temperature: 1.5,
+        default_temperature: 0.0,
+    };
+
+    let (app, state_metrics) = build_proxy_app_with_retry(&backend_url, retry_policy);
+
+    let body = r#"{"model":"llama-2","prompt":"hi"}"#;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        call_count.load(Ordering::SeqCst),
+        1,
+        "backend should be called once (completions route not retried)"
+    );
+    assert_eq!(state_metrics.premature_stop_detected_total.get(), 0.0);
+    assert_eq!(state_metrics.premature_stop_retries_total.get(), 0.0);
+    assert_eq!(state_metrics.premature_stop_exhausted_total.get(), 0.0);
+}
+
+/// Test: retry HTTP failure (500 on retry) -> fail-open with initial body.
+#[tokio::test]
+async fn retry_http_failure_fail_open() {
+    let call_count = Arc::new(AtomicU32::new(0));
+    let premature_b = premature_response_bytes();
+
+    let cc = call_count.clone();
+    let handler = move |_req: Request<Body>| {
+        let cc = cc.clone();
+        let premature_b = premature_b.clone();
+        async move {
+            let n = cc.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                let mut resp = Response::new(Body::from(premature_b));
+                resp.headers_mut().insert(
+                    axum::http::header::CONTENT_TYPE,
+                    axum::http::HeaderValue::from_static("application/json"),
+                );
+                resp
+            } else {
+                let mut resp =
+                    Response::new(Body::from("internal server error".to_string()));
+                *resp.status_mut() = axum::http::StatusCode::INTERNAL_SERVER_ERROR;
+                resp.headers_mut().insert(
+                    axum::http::header::CONTENT_TYPE,
+                    axum::http::HeaderValue::from_static("text/plain"),
+                );
+                resp
+            }
+        }
+    };
+
+    let backend_app = Router::new().route("/v1/chat/completions", post(handler));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, backend_app).await.unwrap(); });
+
+    let backend_url = format!("http://{}/", addr);
+    let retry_policy = RetryPolicy {
+        enabled: true,
+        max_retries: 2,
+        temperature_step: 0.3,
+        max_temperature: 1.5,
+        default_temperature: 0.0,
+    };
+
+    let (app, state_metrics) = build_proxy_app_with_retry(&backend_url, retry_policy);
+
+    let body = r#"{"model":"llama-2","messages":[{"role":"user","content":"hi"}]}"#;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body_bytes = collect_body_bytes(resp).await;
+    let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(
+        response_json["choices"][0]["finish_reason"],
+        "stop",
+        "client should receive the initial premature body (fail-open)"
+    );
+    assert_eq!(
+        call_count.load(Ordering::SeqCst),
+        2,
+        "backend should be called twice (initial + 1 failed retry)"
+    );
+    assert_eq!(state_metrics.premature_stop_detected_total.get(), 1.0);
+    assert_eq!(state_metrics.premature_stop_retries_total.get(), 1.0);
+    assert_eq!(
+        state_metrics.premature_stop_exhausted_total.get(),
+        0.0,
+        "exhausted should be 0 (retry failed, not all retries exhausted)"
+    );
+}
+
+/// Test: retry body arrives intact (not truncated by stale Content-Length).
+/// Regression for: bump_temperature changes body length, but stale Content-Length
+/// header on retry send truncates the body to the original length.
+#[tokio::test]
+async fn retry_body_not_truncated_by_stale_content_length() {
+    let call_count = Arc::new(AtomicU32::new(0));
+    // Shared cell to capture the request body on the retry (call #2).
+    let captured_retry_body: Arc<std::sync::Mutex<Option<Vec<u8>>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let good_b = good_response_bytes("retry-success");
+    let premature_b = premature_response_bytes();
+
+    let cc = call_count.clone();
+    let captured = captured_retry_body.clone();
+    let handler = move |req: Request<Body>| {
+        let cc = cc.clone();
+        let captured = captured.clone();
+        let good_b = good_b.clone();
+        let premature_b = premature_b.clone();
+        async move {
+            let n = cc.fetch_add(1, Ordering::SeqCst);
+            // Capture the request body on call #2 (the retry).
+            if n == 1 {
+                let body_bytes = axum::body::to_bytes(req.into_body(), 1024 * 1024)
+                    .await
+                    .unwrap();
+                let mut captured = captured.lock().unwrap();
+                *captured = Some(body_bytes.to_vec());
+            } else {
+                // Drain body on other calls to avoid leaked resources.
+                let _ = axum::body::to_bytes(req.into_body(), 1024 * 1024).await;
+            }
+            let body = if n == 0 { premature_b } else { good_b };
+            let mut resp = Response::new(Body::from(body));
+            resp.headers_mut().insert(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("application/json"),
+            );
+            resp
+        }
+    };
+
+    let backend_app = Router::new().route("/v1/chat/completions", post(handler));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, backend_app).await.unwrap(); });
+
+    let backend_url = format!("http://{}/", addr);
+    let retry_policy = RetryPolicy {
+        enabled: true,
+        max_retries: 2,
+        temperature_step: 0.3,
+        max_temperature: 1.5,
+        default_temperature: 0.0,
+    };
+
+    let (app, _) = build_proxy_app_with_retry(&backend_url, retry_policy);
+
+    // Send a non-streaming request with NO temperature field — bump_temperature
+    // will add one, changing the body length (this is the truncation trigger).
+    // Explicitly set Content-Length to the ORIGINAL body length so the retry
+    // send (with a longer body) would be truncated by the stale header if the
+    // proxy did not strip it. Without this header, `oneshot` never adds one
+    // (the transport normally does, over the wire) and the bug cannot reproduce.
+    let body = r#"{"model":"llama-2","messages":[{"role":"user","content":"hi"}]}"#;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("content-length", body.len().to_string())
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body_bytes = collect_body_bytes(resp).await;
+    let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(
+        response_json["choices"][0]["message"]["content"],
+        "retry-success",
+        "client should get the good response from the retry"
+    );
+
+    // Assert the captured retry body is the full bumped JSON.
+    let captured = captured_retry_body.lock().unwrap();
+    let captured_body = captured.as_ref().expect("retry body should have been captured");
+
+    // Parse as JSON — a truncated body would fail this.
+    let retry_json: serde_json::Value =
+        serde_json::from_slice(captured_body).expect("retry body should be valid JSON");
+
+    // Verify temperature was bumped to default_temperature + 1*step = 0.3.
+    let temp = retry_json
+        .get("temperature")
+        .and_then(|v| v.as_f64())
+        .expect("retry body should have temperature field");
+    assert_eq!(temp, 0.3, "retry body temperature should be 0.3");
+
+    // Verify messages are preserved.
+    let messages = retry_json.get("messages").expect("retry body should have messages");
+    assert!(messages.is_array(), "messages should be an array");
+    assert_eq!(
+        messages.as_array().unwrap().len(),
+        1,
+        "messages array should be preserved"
+    );
+    assert_eq!(
+        messages[0]["role"],
+        "user",
+        "first message role should be preserved"
+    );
+    assert_eq!(
+        messages[0]["content"],
+        "hi",
+        "first message content should be preserved"
+    );
+}

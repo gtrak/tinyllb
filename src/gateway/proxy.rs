@@ -17,6 +17,8 @@ use crate::scheduler::mode_label;
 
 use super::AppState;
 
+use crate::gateway::retry::{is_premature_stop, bump_temperature};
+
 /// Maximum allowed request body size (32 MiB).
 const MAX_BODY_SIZE: u64 = 32 * 1024 * 1024;
 
@@ -389,9 +391,16 @@ pub async fn proxy_handler(
     // it). Only forwarded requests are modified; the client-facing body is
     // unaffected. When modified, the forwarded Content-Length must be dropped
     // (reqwest recomputes it from the new body).
+    // Capture the exact forwarded body for potential retry reuse.
+    // `forwarded_body` is the body after rewrite_messages + include_usage injection.
     let mut headers = headers;
-    let mut builder = state.client.request(method, backend_url);
-    if let Some(injected) = inject_include_usage(&body_bytes) {
+    let injected = inject_include_usage(&body_bytes);
+    let forwarded_body: Bytes = match &injected {
+        Some(b) => b.clone(),
+        None => body_bytes.clone(),
+    };
+    let mut builder = state.client.request(method.clone(), backend_url.clone());
+    if let Some(injected) = injected {
         headers.remove(axum::http::header::CONTENT_LENGTH);
         builder = builder.body(injected);
     } else {
@@ -579,7 +588,7 @@ pub async fn proxy_handler(
     let _guard = RequestActiveGuard::new(Arc::clone(&state.metrics));
 
     // Collect the response body with optional timeout.
-    let body_bytes = if let Some(timeout) = state.request_timeout {
+    let mut body_bytes = if let Some(timeout) = state.request_timeout {
         match tokio::time::timeout(timeout, collect_response_body(response, "normal-response"))
             .await
         {
@@ -596,6 +605,85 @@ pub async fn proxy_handler(
     } else {
         collect_response_body(response, "normal-response").await?
     };
+
+    // --- Premature-stop retry loop (non-streaming path) ---
+    // Gate: only /v1/chat/completions, not internal compressor, policy enabled.
+    let is_chat = original_path == "/v1/chat/completions";
+    let is_internal_compressor = headers
+        .get("x-llm-internal")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v == "compressor")
+        .unwrap_or(false);
+    let policy = &state.retry_policy;
+    if policy.enabled && policy.max_retries > 0 && is_chat && !is_internal_compressor {
+        // Pre-parse the forwarded request body once for bump_temperature reuse.
+        let forwarded_value: Option<serde_json::Value> =
+            serde_json::from_slice(&forwarded_body).ok();
+        if let Some(fwd_value) = forwarded_value {
+            let mut retry_attempts: u32 = 0;
+            loop {
+                // Parse current response body to check premature.
+                let resp_value: Option<serde_json::Value> =
+                    serde_json::from_slice(&body_bytes).ok();
+                match resp_value {
+                    Some(rv) if is_premature_stop(&rv) && retry_attempts < policy.max_retries => {
+                        state.metrics.premature_stop_detected_total.inc();
+                        state.metrics.premature_stop_retries_total.inc();
+                        retry_attempts += 1;
+                        let retry_value = bump_temperature(&fwd_value, retry_attempts, policy);
+                        let retry_bytes = match serde_json::to_vec(&retry_value) {
+                            Ok(b) => b,
+                            Err(_) => break, // fail-open
+                        };
+                        // Build retry request directly to the backend (bypass scheduler).
+                        // Strip Content-Length so hyper recomputes from the new body
+                        // (bump_temperature changes body length; stale header truncates).
+                        let mut retry_headers = headers.clone();
+                        retry_headers.remove(axum::http::header::CONTENT_LENGTH);
+                        let mut retry_builder = state
+                            .client
+                            .request(method.clone(), backend_url.clone());
+                        // Re-apply the filtered headers (without stale Content-Length).
+                        for (name, value) in retry_headers.iter() {
+                            retry_builder = retry_builder.header(name, value);
+                        }
+                        retry_builder = retry_builder.body(retry_bytes);
+                        // Send with optional timeout (mirror the first send).
+                        let send_result = if let Some(timeout) = state.request_timeout {
+                            match tokio::time::timeout(timeout, retry_builder.send()).await {
+                                Ok(Ok(resp)) => Ok(resp),
+                                Ok(Err(_)) => Err(()),
+                                Err(_) => Err(()), // timeout
+                            }
+                        } else {
+                            retry_builder.send().await.map_err(|_| ())
+                        };
+                        match send_result {
+                            Ok(resp) if resp.status().is_success() => {
+                                match resp.bytes().await {
+                                    Ok(b) => {
+                                        // Replace body with retry response.
+                                        body_bytes = b;
+                                    }
+                                    Err(_) => break, // fail-open: keep last body
+                                }
+                            }
+                            _ => break, // non-2xx or send error -> fail-open
+                        }
+                    }
+                    _ => break,
+                }
+            } // end loop
+            // Exhausted check: only if we used all retries AND the final body is still premature.
+            if retry_attempts >= policy.max_retries {
+                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+                    if is_premature_stop(&v) {
+                        state.metrics.premature_stop_exhausted_total.inc();
+                    }
+                }
+            }
+        }
+    }
 
     // Best-effort: extract completion_tokens from the JSON response.
     let completion_tokens = extract_completion_tokens(&body_bytes);
