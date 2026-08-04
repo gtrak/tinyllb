@@ -155,10 +155,11 @@ Every incoming request resolves to exactly one flow identifier, enabling downstr
 
 ## Purpose
 
-Resolution guarantees every request produces a flow identifier using three sources with fixed precedence. No consumer path observes an absent or unresolved identifier.
+Resolution guarantees every request produces a flow identifier using multiple sources with fixed precedence. No consumer path observes an absent or unresolved identifier.
 
-- Three identification sources: designated request header, JSON body metadata, and auto-generated fallback.
+- Recognizes an explicit override header, harness session headers (Claude Code, opencode, pi), JSON body metadata, and an auto-generated fallback.
 - Fixed precedence order determines which source wins when multiple supply values.
+- Harness session headers group all requests of one agentic session into a single stable flow instead of per-request ephemeral identifiers.
 - Opaque identifier type distinguishes user-supplied from auto-generated ephemeral identifiers.
 - Ephemeral identifiers collapse to a single metric label, preventing unbounded cardinality.
 
@@ -170,14 +171,23 @@ Flow identification resolves the identifier; it does not interpret, validate, or
 - Authentication, authorization, and rate limiting based on the identifier are not performed.
 - Identifier lifetime, expiration, and cross-request consistency are not tracked.
 - Non-JSON body formats are not parsed for identifiers.
+- Subagent correlation identifiers are not used for flow identity; subagent requests are scheduled with their session.
 
 ## Interface
 
 The resolution contract accepts pre-extracted request headers and body bytes, and produces a FlowId guaranteed to always succeed.
 
 - **Resolution input** — caller provides headers and body separately; both optional; absence triggers auto-generated fallback.
-- **Precedence** — `X-LLM-Flow-ID` header first, then JSON body `metadata.flow_id`, then auto-generated ephemeral identifier.
-- **Source acceptance** — header must be valid UTF-8 and non-empty; body must be parseable JSON with a `metadata` object containing non-empty `flow_id` string.
+- **Precedence** — `X-LLM-Flow-ID` header first, then harness session headers in order, then JSON body `metadata.flow_id`, then auto-generated ephemeral identifier:
+  1. `X-LLM-Flow-ID` (explicit override)
+  2. `x-claude-code-session-id` (Claude Code)
+  3. `x-session-id` (de-facto standard: opencode, pi, vLLM, Anthropic-compatible proxy convention)
+  4. `x-session-affinity` (opencode, pi)
+  5. `x-client-request-id` (pi, Codex OpenAI-compatible paths)
+  6. `session_id` (pi, Codex Responses wire header)
+  7. `metadata.flow_id` (JSON body)
+  8. Auto-generated `ephemeral-{UUIDv4}`
+- **Source acceptance** — header values must be valid UTF-8 and non-empty after trimming whitespace; session header names are matched case-insensitively; body must be parseable JSON with a `metadata` object containing non-empty `flow_id` string.
 - **FlowId constructor** — accepts any string, including empty and `ephemeral-` prefixed.
 - **FlowId Display** — yields the exact underlying string value.
 - **Ephemeral test** — returns true when identifier begins with `ephemeral-`.
@@ -188,26 +198,29 @@ The resolution contract accepts pre-extracted request headers and body bytes, an
 The following properties hold regardless of implementation changes.
 
 - Every request yields exactly one flow identifier; no unresolved or error outcome.
-- When the header source yields a usable value, it exclusively determines the result.
+- When the first source in precedence yields a usable value, it exclusively determines the result.
 - If no source supplies a usable identifier, the result is an auto-generated ephemeral identifier.
 - Each invocation of auto-generation produces a statistically distinct identifier.
 - Ephemeral classification is determined precisely by the `ephemeral-` prefix.
+- Requests sharing a harness session identifier resolve to the same flow identifier.
 
 ## Constraints
 
 The identification contract operates within strict boundaries on input acceptance and output classification.
 
-- Empty strings from any source are treated as absent; never adopted as the flow identifier.
+- Empty or whitespace-only values from any source are treated as absent; never adopted as the flow identifier.
 - Body source requires specific JSON structure: `metadata` object with string-valued `flow_id`.
 - Sources that fail are silently skipped; no diagnostic is emitted and no error propagates.
-- No cross-request persistence; same client does not resolve to the same identifier unless explicitly provided.
+- No server-side cross-request persistence; repeated requests resolve to the same flow only when the client repeats an identifier.
 - User-supplied identifiers beginning with `ephemeral-` are indistinguishable from auto-generated ones.
+- Parent/agent identifiers (`x-parent-session-id`, `x-claude-code-agent-id`, `x-claude-code-parent-agent-id`) are not identity sources; they remain available for trace attribution.
 
 ## Rationale
 
 Fixed precedence and guaranteed resolution exist to make downstream attribution deterministic and safe.
 
 - Fixed precedence eliminates ambiguity: callers know exactly which source dominates.
+- Harness session headers let one agentic conversation share a flow, so fair scheduling and metrics operate on sessions rather than single requests.
 - Guaranteed resolution prevents downstream systems from handling null-identifier paths.
 - Rejecting empty strings avoids adopting values with no attribution signal.
 - Silently skipping unusable sources prevents malformed requests from surfacing errors.
@@ -219,5 +232,5 @@ Related concepts and source code for flow identification.
 
 - Flow context management that consumes the resolved identifier.
 - Metric aggregation using flow identifier labels.
-- [[src/flow/identify.rs]] — Resolution implementation.
+- [[src/flow/identify.rs]] — Resolution implementation, including harness session-header extraction.
 - [[src/flow/mod.rs]] — Flow identifier type and ephemeral classification.
