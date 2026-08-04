@@ -85,6 +85,7 @@ fn build_proxy_app(
         scheduler: scheduler.clone(),
         flow_registry,
         backpressure: llm_qdisc_proxy::config::Backpressure::default(),
+        priorities: llm_qdisc_proxy::config::Priorities::default(),
         request_timeout: None,
         context: None,
     };

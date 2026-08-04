@@ -23,7 +23,7 @@ use tower::ServiceExt;
 
 use llm_qdisc_proxy::backend::BackendMonitor;
 use llm_qdisc_proxy::config::{
-    Algorithm, Backpressure, BackpressureMode, CompletionBias, KvPolicyConfig,
+    Algorithm, Backpressure, BackpressureMode, CompletionBias, KvPolicyConfig, Priorities,
 };
 use llm_qdisc_proxy::flow::FlowId;
 use llm_qdisc_proxy::gateway;
@@ -147,6 +147,7 @@ fn build_e2e_proxy_with_config(
         scheduler: scheduler.clone(),
         flow_registry,
         backpressure,
+        priorities: Priorities::default(),
         request_timeout: None,
         context: None,
     };

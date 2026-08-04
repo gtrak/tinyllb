@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tower::ServiceExt;
 
-use llm_qdisc_proxy::config::{Algorithm, Backpressure, BackpressureMode};
+use llm_qdisc_proxy::config::{Algorithm, Backpressure, BackpressureMode, Priorities};
 use llm_qdisc_proxy::flow::FlowRegistry;
 use llm_qdisc_proxy::gateway;
 use llm_qdisc_proxy::metrics;
@@ -239,6 +239,7 @@ fn build_proxy_with_fifo(backend_url: &str) -> (Router, Arc<metrics::Metrics>) {
         scheduler: Arc::new(scheduler),
         flow_registry,
         backpressure: Backpressure::default(),
+        priorities: Priorities::default(),
         request_timeout: None,
         context: None,
     };
@@ -284,6 +285,7 @@ fn build_proxy_with_drr(backend_url: &str) -> (Router, Arc<metrics::Metrics>, Ar
         scheduler: scheduler_arc.clone(),
         flow_registry,
         backpressure: Backpressure::default(),
+        priorities: Priorities::default(),
         request_timeout: None,
         context: None,
     };
@@ -750,6 +752,7 @@ fn build_proxy_with_drr_and_timeout(
         scheduler: scheduler_arc.clone(),
         flow_registry,
         backpressure: Backpressure::default(),
+        priorities: Priorities::default(),
         request_timeout: Some(timeout),
         context: None,
     };

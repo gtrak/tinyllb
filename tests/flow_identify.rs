@@ -44,6 +44,7 @@ fn build_flow_test_app_with_handles(
         scheduler: Arc::new(scheduler),
         flow_registry: flow_registry.clone(),
         backpressure: llm_qdisc_proxy::config::Backpressure::default(),
+        priorities: llm_qdisc_proxy::config::Priorities::default(),
         request_timeout: None,
         context: None,
     };
@@ -105,7 +106,7 @@ async fn test_header_flow_id_resolved() {
     headers.insert("x-llm-flow-id", HeaderValue::from_static("agent-1"));
     let body = Bytes::from_static(r#"{"model":"llama-2"}"#.as_bytes());
 
-    let id = identify::resolve(&headers, &body);
+    let id = identify::resolve(&headers, &body).flow_id;
     assert_eq!(id.to_string(), "agent-1");
     assert!(!id.is_ephemeral());
 }
@@ -121,7 +122,7 @@ async fn test_metadata_flow_id_resolved() {
     let headers = HeaderMap::new();
     let body = Bytes::from(r#"{"metadata":{"flow_id":"agent-2"},"model":"llama-2"}"#.as_bytes());
 
-    let id = identify::resolve(&headers, &body);
+    let id = identify::resolve(&headers, &body).flow_id;
     assert_eq!(id.to_string(), "agent-2");
     assert!(!id.is_ephemeral());
 }
@@ -137,7 +138,7 @@ async fn test_ephemeral_flow_id_generated() {
     let headers = HeaderMap::new();
     let body = Bytes::from_static(r#"{"model":"llama-2"}"#.as_bytes());
 
-    let id = identify::resolve(&headers, &body);
+    let id = identify::resolve(&headers, &body).flow_id;
     assert!(id.is_ephemeral());
     assert!(id.to_string().starts_with("ephemeral-"));
 }
@@ -156,7 +157,7 @@ async fn test_header_wins_over_metadata() {
     let body =
         Bytes::from(r#"{"metadata":{"flow_id":"metadata-losing"},"model":"llama-2"}"#.as_bytes());
 
-    let id = identify::resolve(&headers, &body);
+    let id = identify::resolve(&headers, &body).flow_id;
     assert_eq!(id.to_string(), "header-wins");
     assert!(!id.is_ephemeral());
 }
@@ -172,7 +173,7 @@ async fn test_non_json_body_falls_through_to_ephemeral() {
     let headers = HeaderMap::new();
     let body = Bytes::from_static(b"not-json-binary-data");
 
-    let id = identify::resolve(&headers, &body);
+    let id = identify::resolve(&headers, &body).flow_id;
     assert!(id.is_ephemeral());
 }
 
@@ -185,7 +186,7 @@ async fn test_get_request_gets_ephemeral_id() {
     let headers = HeaderMap::new();
     let body = Bytes::new();
 
-    let id = identify::resolve(&headers, &body);
+    let id = identify::resolve(&headers, &body).flow_id;
     assert!(id.is_ephemeral());
 }
 
@@ -408,7 +409,7 @@ async fn test_x_session_id_resolves_to_stable_flow() {
     );
     let body = Bytes::from_static(r#"{"model":"llama-2"}"#.as_bytes());
 
-    let id = identify::resolve(&headers, &body);
+    let id = identify::resolve(&headers, &body).flow_id;
     assert_eq!(id.to_string(), "integ-session");
     assert!(!id.is_ephemeral());
 }
@@ -426,7 +427,7 @@ async fn test_x_session_affinity_resolves_to_stable_flow() {
     );
     let body = Bytes::from_static(r#"{"model":"llama-2"}"#.as_bytes());
 
-    let id = identify::resolve(&headers, &body);
+    let id = identify::resolve(&headers, &body).flow_id;
     assert_eq!(id.to_string(), "integ-affinity");
     assert!(!id.is_ephemeral());
 }
@@ -446,14 +447,14 @@ async fn test_same_session_id_yields_same_flow() {
     let mut headers1 = HeaderMap::new();
     headers1.insert("x-session-id", HeaderValue::from_static(session));
     let body1 = Bytes::from_static(r#"{"model":"llama-2"}"#.as_bytes());
-    let id1 = identify::resolve(&headers1, &body1);
+    let id1 = identify::resolve(&headers1, &body1).flow_id;
 
     // Second request, same session header, different body
     let mut headers2 = HeaderMap::new();
     headers2.insert("x-session-id", HeaderValue::from_static(session));
     let body2 =
         Bytes::from(r#"{"model":"llama-2","messages":[{"role":"user","content":"turn 2"}]}"#.as_bytes());
-    let id2 = identify::resolve(&headers2, &body2);
+    let id2 = identify::resolve(&headers2, &body2).flow_id;
 
     assert_eq!(id1, id2);
     assert_eq!(id1.to_string(), session);
@@ -473,7 +474,7 @@ async fn test_claude_code_session_id_resolves_to_stable_flow() {
     );
     let body = Bytes::from_static(r#"{"model":"llama-2"}"#.as_bytes());
 
-    let id = identify::resolve(&headers, &body);
+    let id = identify::resolve(&headers, &body).flow_id;
     assert_eq!(id.to_string(), "claude-ses-123");
     assert!(!id.is_ephemeral());
 }

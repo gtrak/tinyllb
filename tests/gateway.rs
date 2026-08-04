@@ -182,6 +182,7 @@ fn build_proxy_app(backend_url: &str) -> Router {
         scheduler: std::sync::Arc::new(scheduler),
         flow_registry,
         backpressure: llm_qdisc_proxy::config::Backpressure::default(),
+        priorities: llm_qdisc_proxy::config::Priorities::default(),
         request_timeout: None,
         context: None,
     };
@@ -610,6 +611,7 @@ fn build_proxy_app_with_max(
         scheduler: Arc::new(scheduler),
         flow_registry,
         backpressure: llm_qdisc_proxy::config::Backpressure::default(),
+        priorities: llm_qdisc_proxy::config::Priorities::default(),
         request_timeout: None,
         context: None,
     };
@@ -756,6 +758,7 @@ async fn test_client_disconnect_releases_permit() {
         scheduler: Arc::new(scheduler),
         flow_registry,
         backpressure: llm_qdisc_proxy::config::Backpressure::default(),
+        priorities: llm_qdisc_proxy::config::Priorities::default(),
         request_timeout: None,
         context: None,
     };

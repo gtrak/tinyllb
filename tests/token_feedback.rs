@@ -23,7 +23,7 @@ use tower::ServiceExt;
 
 use llm_qdisc_proxy::backend::BackendMonitor;
 use llm_qdisc_proxy::config::{
-    Algorithm, Backpressure, BackpressureMode, CompletionBias, KvPolicyConfig,
+    Algorithm, Backpressure, BackpressureMode, CompletionBias, KvPolicyConfig, Priorities,
 };
 use llm_qdisc_proxy::flow::{FlowId, FlowRegistry};
 use llm_qdisc_proxy::gateway;
@@ -204,6 +204,7 @@ fn build_drr_proxy(backend_url: &str) -> (Router, Arc<metrics::Metrics>, Arc<Sch
         scheduler: scheduler_arc.clone(),
         flow_registry,
         backpressure: Backpressure::default(),
+        priorities: Priorities::default(),
         request_timeout: None,
         context: None,
     };

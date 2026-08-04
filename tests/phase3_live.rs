@@ -27,7 +27,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use tower::ServiceExt;
 
-use llm_qdisc_proxy::config::{Algorithm, Backpressure, BackpressureMode};
+use llm_qdisc_proxy::config::{Algorithm, Backpressure, BackpressureMode, Priorities};
 use llm_qdisc_proxy::flow::FlowRegistry;
 use llm_qdisc_proxy::gateway;
 use llm_qdisc_proxy::metrics;
@@ -78,6 +78,7 @@ fn build_live_proxy(
         scheduler: Arc::new(scheduler),
         flow_registry,
         backpressure,
+        priorities: Priorities::default(),
         request_timeout: None,
         context: None,
     };

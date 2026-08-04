@@ -360,7 +360,8 @@ pub async fn proxy_handler(
     }
 
     // Resolve the flow ID from headers + body (header takes precedence).
-    let flow_id = identify::resolve(&original_headers, &body_bytes);
+    let resolved = identify::resolve(&original_headers, &body_bytes);
+    let flow_id = resolved.flow_id;
 
     // Check if the request explicitly wants streaming.
     let wants_streaming = body_wants_streaming(&body_bytes);
@@ -396,6 +397,14 @@ pub async fn proxy_handler(
     } else {
         builder = builder.body(body_bytes);
     }
+
+    // Apply any explicit priority override from the X-LLM-Priority header.
+    state.flow_registry.apply_priority_override(
+        &flow_id,
+        resolved.priority_override,
+        resolved.unset_override,
+        &state.priorities,
+    );
 
     // Admit through the scheduler: blocks until a slot is available,
     // returns a RAII ticket that releases the slot on drop.

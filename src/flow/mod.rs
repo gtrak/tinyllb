@@ -8,6 +8,37 @@ use std::time::Instant;
 
 use dashmap::DashMap;
 
+/// Explicit priority class for the `X-LLM-Priority` header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PriorityClass {
+    Interactive,
+    Agent,
+    Background,
+}
+
+/// Case-insensitive parse of a priority token.
+/// Returns `None` for unknown values (caller logs a warning).
+pub fn resolve_priority_token(s: &str) -> Option<PriorityClass> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "interactive" => Some(PriorityClass::Interactive),
+        "agent" => Some(PriorityClass::Agent),
+        "background" => Some(PriorityClass::Background),
+        _ => None,
+    }
+}
+
+/// Result of resolving a request's flow identity + priority override.
+pub struct ResolvedFlow {
+    /// The resolved flow ID (from existing resolution order).
+    pub flow_id: FlowId,
+    /// Explicit priority class from `X-LLM-Priority` header, if a valid
+    /// class token was sent. `None` when absent or `auto`.
+    pub priority_override: Option<PriorityClass>,
+    /// True when the client sent `X-LLM-Priority: auto`, requesting the
+    /// override be cleared and the heuristic resumed.
+    pub unset_override: bool,
+}
+
 /// Opaque identifier for a flow.
 ///
 /// Internally a `String`, but `FlowId` is a distinct type to prevent
@@ -213,6 +244,7 @@ impl FlowRegistry {
         if let Some(entry) = self.flows.get_mut(&id) {
             entry.value().weight.store(weight_bits, Ordering::Relaxed);
             entry.value().priority.store(priority, Ordering::Relaxed);
+            entry.value().priority_source.store(2, Ordering::Relaxed);
             false // updated
         } else {
             let flow = Arc::new(Flow {
@@ -223,7 +255,7 @@ impl FlowRegistry {
                 credit: AtomicI64::new(0),
                 enqueued_at: std::sync::RwLock::new(None),
                 active: AtomicU32::new(0),
-                priority_source: AtomicU8::new(0),
+                priority_source: AtomicU8::new(2),
             });
             self.flows.insert(FlowId::new(id.to_string()), flow);
             true // created
@@ -283,6 +315,40 @@ impl FlowRegistry {
             waiting,
             flows,
         }
+    }
+
+    /// Apply (or clear) an explicit priority override on a flow.
+    ///
+    /// - `unset == true`: clear any prior pin, set `priority_source = 0`
+    ///   (heuristic resumes), and reset priority to `classes.agent` (the
+    ///   default). Idempotent — safe to call when no pin was set.
+    /// - `override_class == Some(c)`: set priority to the class's numeric
+    ///   value and `priority_source = 1` (header).
+    /// - `override_class == None && !unset`: no header in this request,
+    ///   keep existing state (the heuristic or a prior pin stays in effect).
+    pub fn apply_priority_override(
+        &self,
+        flow_id: &FlowId,
+        override_class: Option<PriorityClass>,
+        unset: bool,
+        classes: &crate::config::Priorities,
+    ) {
+        let flow = self.get_or_create(flow_id.clone());
+        if unset {
+            flow.set_priority_source(0);
+            flow.set_priority(classes.agent);
+            return;
+        }
+        if let Some(class) = override_class {
+            let v = match class {
+                PriorityClass::Interactive => classes.interactive,
+                PriorityClass::Agent => classes.agent,
+                PriorityClass::Background => classes.background,
+            };
+            flow.set_priority(v);
+            flow.set_priority_source(1); // header
+        }
+        // None && !unset: no header, keep state.
     }
 }
 

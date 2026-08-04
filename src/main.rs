@@ -153,6 +153,7 @@ async fn main() {
         scheduler: Arc::new(scheduler),
         flow_registry,
         backpressure: cfg.backpressure,
+        priorities: cfg.priorities.clone(),
         request_timeout: cfg.request_timeout,
         context: context_state,
     };
@@ -199,6 +200,7 @@ mod tests {
             scheduler: Arc::new(scheduler),
             flow_registry,
             backpressure: config::Backpressure::default(),
+            priorities: config::Priorities::default(),
             request_timeout: None,
             context: None,
         };

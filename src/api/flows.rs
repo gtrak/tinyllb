@@ -25,6 +25,8 @@ pub struct RegisterFlowResponse {
     pub priority: u32,
     /// `"created"` for new flows, `"updated"` for existing flows.
     pub status: String,
+    /// Source of the priority value: 0=heuristic, 1=header, 2=admin.
+    pub priority_source: u8,
 }
 
 /// Handler for `POST /flows`.
@@ -75,6 +77,7 @@ pub async fn register_handler(
             } else {
                 "updated".to_string()
             },
+            priority_source: 2,
         }),
     ))
 }

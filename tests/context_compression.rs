@@ -199,6 +199,7 @@ async fn build_compression_test_app(
         scheduler: Arc::new(scheduler),
         flow_registry,
         backpressure: llm_qdisc_proxy::config::Backpressure::default(),
+        priorities: llm_qdisc_proxy::config::Priorities::default(),
         request_timeout: None,
         context: ctx,
     };

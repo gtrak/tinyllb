@@ -2,9 +2,9 @@ use axum::http::HeaderMap;
 use bytes::Bytes;
 use uuid::Uuid;
 
-use super::FlowId;
+use super::{FlowId, ResolvedFlow, resolve_priority_token};
 
-/// Resolve a `FlowId` from a request.
+/// Resolve a request's flow identity and priority override.
 ///
 /// Resolution order (highest to lowest precedence):
 /// 1. `X-LLM-Flow-ID` request header (explicit override).
@@ -18,31 +18,59 @@ use super::FlowId;
 ///    non-JSON bodies).
 /// 4. Auto-generated ephemeral ID (`ephemeral-{UUIDv4}`).
 ///
-/// Header matching is case-insensitive (`http::HeaderMap` normalizes).
-/// Empty or whitespace-only header values fall through to the next source.
+/// Additionally parses `X-LLM-Priority` header (case-insensitive):
+/// - `interactive` / `agent` / `background` → `priority_override = Some(class)`
+/// - `auto` → `unset_override = true` (clear any prior pin, resume heuristic)
+/// - Unknown value → logged as warning, treated as absent (`None`, `unset=false`)
+/// - Absent header → `priority_override = None`, `unset_override = false`
 ///
-/// Returns the resolved `FlowId`.
+/// Returns a `ResolvedFlow` containing the resolved flow ID and priority override state.
 // @lat: [[flow#Flow Identification]]
-pub fn resolve(headers: &HeaderMap, body: &Bytes) -> FlowId {
+pub fn resolve(headers: &HeaderMap, body: &Bytes) -> ResolvedFlow {
     // 1. Check the X-LLM-Flow-ID header first (highest precedence).
-    if let Some(header_id) = extract_flow_id_from_header(headers) {
-        return header_id;
-    }
+    let mut flow_id: Option<FlowId> = extract_flow_id_from_header(headers);
 
     // 2. Try harness session headers (Claude Code, opencode, pi, standard).
-    if let Some(session_id) = extract_flow_id_from_session_headers(headers) {
-        return session_id;
+    if flow_id.is_none() {
+        flow_id = extract_flow_id_from_session_headers(headers);
     }
 
     // 3. Try to extract from JSON body metadata.flow_id.
     //    This is best-effort: if the body isn't valid JSON or doesn't have
     //    the metadata field, fall through to ephemeral.
-    if let Some(metadata_id) = extract_flow_id_from_body(body) {
-        return metadata_id;
+    if flow_id.is_none() {
+        flow_id = extract_flow_id_from_body(body);
     }
 
-    // 4. Generate an ephemeral flow ID.
-    generate_ephemeral_id()
+    // 4. Generate an ephemeral flow ID if nothing else resolved.
+    let flow_id: FlowId = flow_id.unwrap_or_else(generate_ephemeral_id);
+
+    // Parse X-LLM-Priority header (case-insensitive).
+    let (priority_override, unset_override) = match headers
+        .get("x-llm-priority")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        None => (None, false), // absent header: no state change
+        Some(val) => {
+            if val.eq_ignore_ascii_case("auto") {
+                (None, true) // explicit resume-heuristic request
+            } else if let Some(class) = resolve_priority_token(val) {
+                (Some(class), false)
+            } else {
+                // Unknown value: log warning, proceed as if absent.
+                tracing::warn!(value = %val, "unknown X-LLM-Priority value, ignoring");
+                (None, false)
+            }
+        }
+    };
+
+    ResolvedFlow {
+        flow_id,
+        priority_override,
+        unset_override,
+    }
 }
 
 /// Extract a flow ID from the `X-LLM-Flow-ID` header.
@@ -125,7 +153,7 @@ mod tests {
         headers.insert("x-llm-flow-id", HeaderValue::from_static("agent-1"));
         let body = Bytes::from_static(b"{}");
 
-        let id = resolve(&headers, &body);
+        let id = resolve(&headers, &body).flow_id;
         assert_eq!(id.to_string(), "agent-1");
     }
 
@@ -135,7 +163,7 @@ mod tests {
         headers.insert("x-llm-flow-id", HeaderValue::from_static(""));
         let body = Bytes::from_static(b"{}");
 
-        let id = resolve(&headers, &body);
+        let id = resolve(&headers, &body).flow_id;
         assert!(id.is_ephemeral());
     }
 
@@ -145,7 +173,7 @@ mod tests {
         let body =
             Bytes::from(r#"{"metadata":{"flow_id":"agent-2"},"model":"llama-2"}"#.as_bytes());
 
-        let id = resolve(&headers, &body);
+        let id = resolve(&headers, &body).flow_id;
         assert_eq!(id.to_string(), "agent-2");
     }
 
@@ -157,7 +185,7 @@ mod tests {
             r#"{"metadata":{"flow_id":"metadata-losing"},"model":"llama-2"}"#.as_bytes(),
         );
 
-        let id = resolve(&headers, &body);
+        let id = resolve(&headers, &body).flow_id;
         assert_eq!(id.to_string(), "header-wins");
     }
 
@@ -166,7 +194,7 @@ mod tests {
         let headers = HeaderMap::new();
         let body = Bytes::from_static(b"not-json-binary-data");
 
-        let id = resolve(&headers, &body);
+        let id = resolve(&headers, &body).flow_id;
         assert!(id.is_ephemeral());
     }
 
@@ -175,7 +203,7 @@ mod tests {
         let headers = HeaderMap::new();
         let body = Bytes::new();
 
-        let id = resolve(&headers, &body);
+        let id = resolve(&headers, &body).flow_id;
         assert!(id.is_ephemeral());
     }
 
@@ -211,7 +239,7 @@ mod tests {
         );
         let body = Bytes::from_static(b"{}");
 
-        let id = resolve(&headers, &body);
+        let id = resolve(&headers, &body).flow_id;
         assert_eq!(id.to_string(), "ses_abc");
         assert!(!id.is_ephemeral());
     }
@@ -222,7 +250,7 @@ mod tests {
         headers.insert("x-session-id", HeaderValue::from_static("ses_xyz"));
         let body = Bytes::from_static(b"{}");
 
-        let id = resolve(&headers, &body);
+        let id = resolve(&headers, &body).flow_id;
         assert_eq!(id.to_string(), "ses_xyz");
     }
 
@@ -235,7 +263,7 @@ mod tests {
         );
         let body = Bytes::from_static(b"{}");
 
-        let id = resolve(&headers, &body);
+        let id = resolve(&headers, &body).flow_id;
         assert_eq!(id.to_string(), "ses_42");
     }
 
@@ -248,7 +276,7 @@ mod tests {
         );
         let body = Bytes::from_static(b"{}");
 
-        let id = resolve(&headers, &body);
+        let id = resolve(&headers, &body).flow_id;
         assert_eq!(id.to_string(), "abc-uuid");
     }
 
@@ -261,7 +289,7 @@ mod tests {
         );
         let body = Bytes::from_static(b"{}");
 
-        let id = resolve(&headers, &body);
+        let id = resolve(&headers, &body).flow_id;
         assert_eq!(id.to_string(), "codex-s-1");
     }
 
@@ -275,7 +303,7 @@ mod tests {
         );
         let body = Bytes::from_static(b"{}");
 
-        let id = resolve(&headers, &body);
+        let id = resolve(&headers, &body).flow_id;
         assert_eq!(id.to_string(), "my-flow");
     }
 
@@ -288,7 +316,7 @@ mod tests {
         );
         let body = Bytes::from_static(b"{}");
 
-        let id = resolve(&headers, &body);
+        let id = resolve(&headers, &body).flow_id;
         assert_eq!(id.to_string(), "Ses_1");
     }
 
@@ -299,7 +327,7 @@ mod tests {
         let body =
             Bytes::from(r#"{"metadata":{"flow_id":"agent-2"},"model":"llama-2"}"#.as_bytes());
 
-        let id = resolve(&headers, &body);
+        let id = resolve(&headers, &body).flow_id;
         assert_eq!(id.to_string(), "agent-2");
     }
 
@@ -309,7 +337,7 @@ mod tests {
         headers.insert("x-session-id", HeaderValue::from_static(""));
         let body = Bytes::from_static(b"{}");
 
-        let id = resolve(&headers, &body);
+        let id = resolve(&headers, &body).flow_id;
         assert!(id.is_ephemeral());
     }
 
@@ -321,7 +349,7 @@ mod tests {
             r#"{"metadata":{"flow_id":"agent-b"},"model":"llama-2"}"#.as_bytes(),
         );
 
-        let id = resolve(&headers, &body);
+        let id = resolve(&headers, &body).flow_id;
         assert_eq!(id.to_string(), "ses_a");
     }
 
@@ -338,7 +366,7 @@ mod tests {
         );
         let body = Bytes::from_static(b"{}");
 
-        let id = resolve(&headers, &body);
+        let id = resolve(&headers, &body).flow_id;
         assert_eq!(id.to_string(), "claude-wins");
     }
 
@@ -348,7 +376,7 @@ mod tests {
         headers.insert("x-session-id", HeaderValue::from_static("   "));
         let body = Bytes::from_static(b"{}");
 
-        let id = resolve(&headers, &body);
+        let id = resolve(&headers, &body).flow_id;
         assert!(id.is_ephemeral());
     }
 }

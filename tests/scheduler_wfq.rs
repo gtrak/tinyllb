@@ -472,6 +472,7 @@ async fn test_wfq_e2e_weight_ratio() {
         scheduler: Arc::new(scheduler),
         flow_registry,
         backpressure: llm_qdisc_proxy::config::Backpressure::default(),
+        priorities: llm_qdisc_proxy::config::Priorities::default(),
         request_timeout: None,
         context: None,
     };

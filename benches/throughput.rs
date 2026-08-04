@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use axum::routing::get;
 use axum::Router;
-use llm_qdisc_proxy::config::{Algorithm, Backpressure, BackpressureMode};
+use llm_qdisc_proxy::config::{Algorithm, Backpressure, BackpressureMode, Priorities};
 use llm_qdisc_proxy::flow::FlowRegistry;
 use llm_qdisc_proxy::gateway;
 use llm_qdisc_proxy::metrics;
@@ -89,6 +89,7 @@ fn build_proxy_app(backend_url: &str, max_active_flows: u32) -> (Router, Arc<met
         scheduler: Arc::new(scheduler),
         flow_registry,
         backpressure: Backpressure::default(),
+        priorities: Priorities::default(),
         request_timeout: None,
         context: None,
     };

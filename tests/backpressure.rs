@@ -45,6 +45,7 @@ fn build_proxy_app_with_backpressure(
         scheduler: Arc::new(scheduler),
         flow_registry,
         backpressure,
+        priorities: llm_qdisc_proxy::config::Priorities::default(),
         request_timeout: None,
         context: None,
     };
@@ -480,6 +481,7 @@ async fn test_backpressure_rejections_metric() {
         scheduler: Arc::new(scheduler),
         flow_registry: Arc::new(FlowRegistry::new(1.0, 50)),
         backpressure: bp,
+        priorities: llm_qdisc_proxy::config::Priorities::default(),
         request_timeout: None,
         context: None,
     };

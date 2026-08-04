@@ -8,7 +8,7 @@ use std::sync::Arc;
 use url::Url;
 
 use self::proxy::proxy_handler;
-use crate::config::Backpressure;
+use crate::config::{Backpressure, Priorities};
 use crate::context::ContextState;
 use crate::flow::FlowRegistry;
 use crate::metrics::Metrics;
@@ -24,6 +24,7 @@ pub struct AppState {
     pub scheduler: Arc<Scheduler>,
     pub flow_registry: Arc<FlowRegistry>,
     pub backpressure: Backpressure,
+    pub priorities: Priorities,
     /// Optional request-level timeout. When set, cancels forwarded requests
     /// (both streaming and non-streaming) that exceed this duration.
     pub request_timeout: Option<std::time::Duration>,

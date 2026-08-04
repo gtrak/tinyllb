@@ -38,6 +38,7 @@ fn build_test_app(backend_url: &str) -> (Router, Arc<llm_qdisc_proxy::metrics::M
         scheduler: Arc::new(scheduler),
         flow_registry,
         backpressure: llm_qdisc_proxy::config::Backpressure::default(),
+        priorities: llm_qdisc_proxy::config::Priorities::default(),
         request_timeout: None,
         context: None,
     };
@@ -365,6 +366,7 @@ async fn test_streaming_tokens_count_completion_not_total() {
         scheduler: Arc::new(scheduler),
         flow_registry,
         backpressure: llm_qdisc_proxy::config::Backpressure::default(),
+        priorities: llm_qdisc_proxy::config::Priorities::default(),
         request_timeout: None,
         context: None,
     };
@@ -439,6 +441,7 @@ async fn test_active_gauge_during_streaming() {
         scheduler: Arc::new(scheduler),
         flow_registry,
         backpressure: llm_qdisc_proxy::config::Backpressure::default(),
+        priorities: llm_qdisc_proxy::config::Priorities::default(),
         request_timeout: None,
         context: None,
     };
@@ -522,6 +525,7 @@ async fn test_nonstream_tokens_count_completion_not_total() {
         scheduler: Arc::new(scheduler),
         flow_registry,
         backpressure: llm_qdisc_proxy::config::Backpressure::default(),
+        priorities: llm_qdisc_proxy::config::Priorities::default(),
         request_timeout: None,
         context: None,
     };
@@ -596,6 +600,7 @@ async fn test_active_gauge_during_nonstreaming() {
         scheduler: Arc::new(scheduler),
         flow_registry,
         backpressure: llm_qdisc_proxy::config::Backpressure::default(),
+        priorities: llm_qdisc_proxy::config::Priorities::default(),
         request_timeout: None,
         context: None,
     };
