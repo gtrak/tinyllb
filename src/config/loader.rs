@@ -95,6 +95,11 @@ pub fn load() -> anyhow::Result<Config> {
         )?
         .set_default("context_policy.sidecar_request_timeout", "60s")?
         .set_default("context_policy.compression_retries", 3u64)?
+        .set_default("retry_policy.enabled", false)?
+        .set_default("retry_policy.max_retries", 2u64)?
+        .set_default("retry_policy.temperature_step", 0.3f64)?
+        .set_default("retry_policy.max_temperature", 1.5f64)?
+        .set_default("retry_policy.default_temperature", 0.0f64)?
         .set_default("priority_policy.enabled", true)?
         .set_default("priority_policy.interactive_gap_min", "30s")?
         .set_default("priority_policy.background_gap_max", "2s")?
@@ -246,6 +251,32 @@ fn validate(cfg: &Config) -> anyhow::Result<()> {
         if cp.compression_retries == 0 {
             return Err(anyhow::anyhow!(
                 "context_policy.compression_retries must be > 0"
+            ));
+        }
+    }
+
+
+    // Validate retry policy constraints.
+    let rp = &cfg.retry_policy;
+    if rp.enabled {
+        if rp.max_retries == 0 {
+            return Err(anyhow::anyhow!(
+                "retry_policy.max_retries must be > 0"
+            ));
+        }
+        if rp.temperature_step <= 0.0 {
+            return Err(anyhow::anyhow!(
+                "retry_policy.temperature_step must be > 0.0"
+            ));
+        }
+        if rp.max_temperature < rp.default_temperature {
+            return Err(anyhow::anyhow!(
+                "retry_policy.max_temperature must be >= default_temperature"
+            ));
+        }
+        if rp.max_temperature > 2.0 {
+            return Err(anyhow::anyhow!(
+                "retry_policy.max_temperature must be <= 2.0 (OpenAI-compatible range)"
             ));
         }
     }

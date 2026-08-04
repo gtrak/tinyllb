@@ -34,6 +34,9 @@ pub struct Config {
     /// Context-compression policy.  Defaults to `enabled: false`.
     #[serde(default)]
     pub context_policy: ContextPolicy,
+    /// Premature-stop retry policy.  Defaults to `enabled: false`.
+    #[serde(default)]
+    pub retry_policy: RetryPolicy,
     /// Per-flow priority policy for the interactive-vs-batch heuristic.
     #[serde(default)]
     pub priority_policy: PriorityPolicy,
@@ -188,6 +191,60 @@ impl Default for ContextPolicy {
         }
     }
 }
+
+/// Premature-stop retry policy configuration.
+///
+/// When enabled, the proxy re-sends `/v1/chat/completions` requests that
+/// receive a degenerate stop (finish_reason: stop, no content, no tool_calls)
+/// with bumped temperature.  Defaults to `enabled: false`.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RetryPolicy {
+    #[serde(default = "RetryPolicy::default_enabled")]
+    pub enabled: bool,
+    #[serde(default = "RetryPolicy::default_max_retries")]
+    pub max_retries: u32,
+    #[serde(default = "RetryPolicy::default_temperature_step")]
+    pub temperature_step: f64,
+    #[serde(default = "RetryPolicy::default_max_temperature")]
+    pub max_temperature: f64,
+    #[serde(default = "RetryPolicy::default_default_temperature")]
+    pub default_temperature: f64,
+}
+
+impl RetryPolicy {
+    fn default_enabled() -> bool {
+        false
+    }
+
+    fn default_max_retries() -> u32 {
+        2
+    }
+
+    fn default_temperature_step() -> f64 {
+        0.3
+    }
+
+    fn default_max_temperature() -> f64 {
+        1.5
+    }
+
+    fn default_default_temperature() -> f64 {
+        0.0
+    }
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            max_retries: Self::default_max_retries(),
+            temperature_step: Self::default_temperature_step(),
+            max_temperature: Self::default_max_temperature(),
+            default_temperature: Self::default_default_temperature(),
+        }
+    }
+}
+
 
 /// Priority classification policy for the interactive-vs-batch heuristic.
 ///
