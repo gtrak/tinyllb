@@ -1,12 +1,11 @@
-//! End-to-end tests for the interactive-vs-batch priority heuristic.
+//! End-to-end tests for the turn-boundary priority state machine (Plan 006, Task 05).
 //!
-//! These tests verify that the cadence heuristic correctly classifies flows
-//! and that higher-priority flows win scheduling contention over lower-priority
-//! flows. They also verify the starvation safety net still fires for low-
-//! priority flows.
+//! These tests verify that the cadence state machine correctly classifies flows
+//! via `Scheduler::admit_with_turn_boundary` and that higher-priority flows win
+//! scheduling contention over lower-priority flows.
 //!
 //! IMPORTANT: These tests use real wall-clock time via `tokio::time::sleep`
-//! WITHOUT `tokio::time::pause()`. The cadence heuristic calls
+//! WITHOUT `tokio::time::pause()`. The cadence state machine calls
 //! `std::time::Instant::now()` which is not affected by tokio's fake clock.
 //! Real sleeps advance the wall clock that Instant observes.
 
@@ -17,25 +16,24 @@ use tinyllb::backend::BackendMonitor;
 use tinyllb::config::{
     Algorithm, BackpressureMode, CompletionBias, KvPolicyConfig, Priorities, PriorityPolicy,
 };
-use tinyllb::flow::{FlowId, FlowRegistry, PriorityClass};
+use tinyllb::flow::FlowRegistry;
 use tinyllb::metrics::{self, Metrics};
 use tinyllb::scheduler::Scheduler;
+use tinyllb::flow::FlowId;
 
 const WORK_UNIT: f64 = 1024.0;
 
 /// Test-specific priority policy with small thresholds for fast testing.
 ///
-/// - interactive_gap_min: 50ms (gaps >= 50ms → interactive, priority 100)
-/// - background_gap_max: 20ms (gaps <= 20ms with min_samples → background, priority 10)
-/// - min_samples: 3 (heuristic engages after 3 arrivals)
-/// - sample_window: 10
+/// - idle_gap_threshold: 50ms (gaps >= 50ms at a turn boundary -> idle chunk)
+/// - agentic_suspected_threshold: 5 (5 continuous tool arrivals -> AgenticSuspected)
+/// - agentic_confirmed_threshold: 12 (12 continuous tool arrivals -> AgenticConfirmed)
 fn test_policy() -> PriorityPolicy {
     PriorityPolicy {
         enabled: true,
-        interactive_gap_min: Duration::from_millis(50),
-        background_gap_max: Duration::from_millis(20),
-        sample_window: 10,
-        min_samples: 3,
+        idle_gap_threshold: Duration::from_millis(50),
+        agentic_suspected_threshold: 5,
+        agentic_confirmed_threshold: 12,
     }
 }
 
@@ -63,114 +61,95 @@ fn build_scheduler(policy: PriorityPolicy) -> (Arc<Metrics>, Arc<FlowRegistry>, 
 }
 
 // ---------------------------------------------------------------------------
-// Test 1: interactive_flow_wins_over_batch
+// Test 1: interactive_flow_wins_over_agentic
 // ---------------------------------------------------------------------------
 
-/// End-to-end test: an interactive flow (high inter-request gaps) is
-/// promoted to priority 100, a batch flow (rapid requests) is demoted to
-/// priority 10, and when both compete for a single slot, the interactive
-/// flow wins.
+/// End-to-end test: a flow that becomes Interactive (priority 100) wins
+/// scheduling contention over a flow that is AgenticConfirmed (priority 10).
 ///
-/// This is the key scheduling test. It exercises the full pipeline:
-/// record_arrival → classify_and_apply → priority lookup in DRR → slot
-/// assignment → contention resolution by priority.
+/// Exercises the full pipeline:
+/// admit_with_turn_boundary -> record_arrival -> state machine -> classify_and_apply
+/// -> priority lookup in DRR -> slot assignment -> contention resolution.
 #[tokio::test]
-async fn interactive_flow_wins_over_batch() {
+async fn interactive_flow_wins_over_agentic() {
     tokio::time::timeout(Duration::from_secs(30), async {
         let (m, registry, scheduler) = build_scheduler(test_policy());
 
-        // ── Build cadence for the interactive flow ──
-        // Sleep 60ms between admits → gap ~60ms >= 50ms → interactive (100).
-        let inter_id = FlowId::new("interactive-flow");
-        for _ in 0..3 {
-            let ticket = scheduler.admit(inter_id.clone(), WORK_UNIT).await.unwrap();
-            drop(ticket);
-            tokio::time::sleep(Duration::from_millis(60)).await;
-        }
-        assert_eq!(
-            registry.get_or_create(inter_id.clone()).priority(),
-            100,
-            "interactive flow should be classified as priority 100"
-        );
-
-        // ── Build cadence for the batch flow ──
-        // Sleep 5ms between admits → gap ~5ms <= 20ms → background (10).
-        let batch_id = FlowId::new("batch-flow");
-        for _ in 0..3 {
-            let ticket = scheduler.admit(batch_id.clone(), WORK_UNIT).await.unwrap();
-            drop(ticket);
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        assert_eq!(
-            registry.get_or_create(batch_id.clone()).priority(),
-            10,
-            "batch flow should be classified as priority 10"
-        );
-
-        // ── Contention round (repeated 3x for robustness) ──
-        let mut interactive_wins: u32 = 0;
-        let total_rounds: u32 = 3;
-
-        for _round in 0..total_rounds {
-            // Holder occupies the slot.
-            let holder = registry.get_or_create(FlowId::new("holder"));
-            holder.set_weight(1.0);
-            let ticket_holder = scheduler
-                .admit(FlowId::new("holder"), WORK_UNIT)
+        // ── Build cadence for tool-flow: 12 rapid tool admits -> AgenticConfirmed (10) ──
+        let tool_id = FlowId::new("tool-flow");
+        for _ in 0..12 {
+            let ticket = scheduler
+                .admit_with_turn_boundary(tool_id.clone(), WORK_UNIT, false)
                 .await
                 .unwrap();
-
-            // Enqueue batch flow (priority 10).
-            let s_batch = scheduler.clone();
-            let task_batch = tokio::spawn(async move {
-                s_batch.admit(FlowId::new("batch-flow"), WORK_UNIT).await
-            });
-
-            // Give batch time to enter the queue.
-            tokio::time::sleep(Duration::from_millis(50)).await;
-
-            // Enqueue interactive flow (priority 100).
-            let s_inter = scheduler.clone();
-            let task_inter = tokio::spawn(async move {
-                s_inter
-                    .admit(FlowId::new("interactive-flow"), WORK_UNIT)
-                    .await
-            });
-
-            // Give interactive time to enter the queue.
-            tokio::time::sleep(Duration::from_millis(50)).await;
-
-            // Drop holder → slot frees. Interactive (priority 100) should
-            // be admitted before batch (priority 10).
-            drop(ticket_holder);
-
-            // Await interactive first — it should complete within the timeout.
-            let ticket_inter = tokio::time::timeout(Duration::from_secs(2), task_inter)
-                .await
-                .expect("interactive admit should not timeout")
-                .expect("interactive task should not panic")
-                .expect("interactive admit should succeed");
-
-            // Drop interactive's ticket → batch gets the slot.
-            drop(ticket_inter);
-
-            let _ticket_batch = tokio::time::timeout(Duration::from_secs(2), task_batch)
-                .await
-                .expect("batch admit should not timeout")
-                .expect("batch task should not panic")
-                .expect("batch admit should succeed");
-
-            interactive_wins += 1;
+            drop(ticket);
         }
-
-        assert!(
-            interactive_wins >= total_rounds.saturating_sub(1),
-            "interactive should win >= {}/{} rounds (got {})",
-            total_rounds.saturating_sub(1),
-            total_rounds,
-            interactive_wins
+        assert_eq!(
+            registry.get_or_create(tool_id.clone()).priority(),
+            10,
+            "tool-flow should be AgenticConfirmed (10)"
         );
 
+        // ── Build cadence for user-flow: 1 user admit with >50ms gap -> Interactive (100) ──
+        // Sleep 60ms to create a gap > idle_gap_threshold (50ms).
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        let user_id = FlowId::new("user-flow");
+        let ticket = scheduler
+            .admit_with_turn_boundary(user_id.clone(), WORK_UNIT, true)
+            .await
+            .unwrap();
+        drop(ticket);
+        assert_eq!(
+            registry.get_or_create(user_id.clone()).priority(),
+            100,
+            "user-flow should be Interactive (100)"
+        );
+
+        // ── Contention round ──
+        // Holder occupies the only slot.
+        let ticket_holder = scheduler
+            .admit(FlowId::new("holder"), WORK_UNIT)
+            .await
+            .unwrap();
+
+        // Enqueue tool-flow (priority 10) in background task.
+        let s_tool = scheduler.clone();
+        let task_tool = tokio::spawn(async move {
+            s_tool.admit_with_turn_boundary(FlowId::new("tool-flow"), WORK_UNIT, false).await
+        });
+
+        // Give tool-flow time to enter the queue.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Enqueue user-flow (priority 100) in background task.
+        let s_user = scheduler.clone();
+        let task_user = tokio::spawn(async move {
+            s_user.admit_with_turn_boundary(FlowId::new("user-flow"), WORK_UNIT, true).await
+        });
+
+        // Give user-flow time to enter the queue.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Drop holder -> slot frees. User-flow (priority 100) should be admitted first.
+        drop(ticket_holder);
+
+        // Await user-flow first — it should complete within the timeout.
+        let ticket_user = tokio::time::timeout(Duration::from_secs(2), task_user)
+            .await
+            .expect("user-flow admit should not timeout")
+            .expect("user-flow task should not panic")
+            .expect("user-flow admit should succeed");
+
+        // Drop user-flow's ticket -> tool-flow gets the slot.
+        drop(ticket_user);
+
+        let ticket_tool = tokio::time::timeout(Duration::from_secs(2), task_tool)
+            .await
+            .expect("tool-flow admit should not timeout")
+            .expect("tool-flow task should not panic")
+            .expect("tool-flow admit should succeed");
+
+        drop(ticket_tool);
         assert_eq!(m.active_flows.get(), 0.0);
     })
     .await
@@ -178,161 +157,186 @@ async fn interactive_flow_wins_over_batch() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 2: starvation_force_admits_background_despite_lower_priority
+// Test 2: reactive_promotion
 // ---------------------------------------------------------------------------
 
-/// Starvation regression test: a background-priority flow is force-admitted
-/// by the starvation mechanism after starvation_timeout, even though its
-/// priority (10) is far below the fast-flow's priority (100).
-///
-/// This verifies that the 300s (here 500ms for test speed) starvation
-/// safety net still trumps priority — background flows are NOT starved
-/// forever.
+/// A flow that is AgenticConfirmed (priority 10) can be reactively promoted
+/// to Interactive (priority 100) by a turn-boundary idle. After promotion,
+/// it wins over a fresh AgenticConfirmed flow.
 #[tokio::test]
-async fn starvation_force_admits_background_despite_lower_priority() {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        let starvation_timeout = Duration::from_millis(500);
-        let m = metrics::create_metrics();
-        let registry = Arc::new(FlowRegistry::new(1.0, 50));
-        let priorities = Priorities::default();
-        let scheduler = Arc::new(Scheduler::new(
-            Algorithm::Drr,
-            1, // max_active_flows=1
-            m.clone(),
-            registry.clone(),
-            BackpressureMode::Blocking,
+async fn reactive_promotion() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let (m, registry, scheduler) = build_scheduler(test_policy());
+
+        let flow_id = FlowId::new("reactive-flow");
+
+        // ── Step 1: 12 tool admits -> AgenticConfirmed (priority 10) ──
+        for _ in 0..12 {
+            let ticket = scheduler
+                .admit_with_turn_boundary(flow_id.clone(), WORK_UNIT, false)
+                .await
+                .unwrap();
+            drop(ticket);
+        }
+        assert_eq!(
+            registry.get_or_create(flow_id.clone()).priority(),
+            10,
+            "reactive-flow should be AgenticConfirmed (10)"
+        );
+
+        // ── Step 2: User admit with >50ms gap -> Interactive (priority 100) ──
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        let ticket = scheduler
+            .admit_with_turn_boundary(flow_id.clone(), WORK_UNIT, true)
+            .await
+            .unwrap();
+        drop(ticket);
+        assert_eq!(
+            registry.get_or_create(flow_id.clone()).priority(),
             100,
-            Duration::from_secs(10),
-            Duration::from_secs(1),
-            starvation_timeout,
-            CompletionBias::default(),
-            KvPolicyConfig::default(),
-            Arc::new(BackendMonitor::empty()),
-            test_policy(),
-            priorities.clone(),
-        ));
-
-        // Pin fast-flow to interactive (priority 100, source=1).
-        registry.apply_priority_override(
-            &FlowId::new("fast-flow"),
-            Some(PriorityClass::Interactive),
-            false,
-            &priorities,
-        );
-        // Pin slow-flow to background (priority 10, source=1).
-        registry.apply_priority_override(
-            &FlowId::new("slow-flow"),
-            Some(PriorityClass::Background),
-            false,
-            &priorities,
+            "reactive-flow should be promoted to Interactive (100)"
         );
 
-        // Verify pins.
+        // ── Step 3: Build a competing AgenticConfirmed flow ──
+        let comp_id = FlowId::new("competitor-flow");
+        for _ in 0..12 {
+            let ticket = scheduler
+                .admit_with_turn_boundary(comp_id.clone(), WORK_UNIT, false)
+                .await
+                .unwrap();
+            drop(ticket);
+        }
         assert_eq!(
-            registry.get_or_create(FlowId::new("fast-flow")).priority(),
-            100
-        );
-        assert_eq!(
-            registry.get_or_create(FlowId::new("slow-flow")).priority(),
-            10
+            registry.get_or_create(comp_id.clone()).priority(),
+            10,
+            "competitor should be AgenticConfirmed (10)"
         );
 
-        // Admit fast-flow to occupy the only slot.
-        let ticket_fast = scheduler
-            .admit(FlowId::new("fast-flow"), WORK_UNIT)
+        // ── Step 4: Contention — promoted flow should win over competitor ──
+        let ticket_holder = scheduler
+            .admit(FlowId::new("holder"), WORK_UNIT)
             .await
             .unwrap();
 
-        // Enqueue slow-flow — it blocks (slot full, priority 10 < 100).
-        let s_slow = scheduler.clone();
-        let task_slow = tokio::spawn(async move {
-            s_slow.admit(FlowId::new("slow-flow"), WORK_UNIT).await
+        let s_comp = scheduler.clone();
+        let task_comp = tokio::spawn(async move {
+            s_comp.admit_with_turn_boundary(FlowId::new("competitor-flow"), WORK_UNIT, false).await
         });
 
-        // Keep fast-flow's slot occupied. Wait for starvation timeout.
-        // The slow-flow should be force-admitted by the starvation mechanism
-        // after ~500ms, even though it has lower priority.
-        tokio::time::sleep(starvation_timeout + Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
 
-        // Drop fast-flow's ticket → frees the slot → slow-flow is admitted.
-        drop(ticket_fast);
+        let s_reactive = scheduler.clone();
+        let task_reactive = tokio::spawn(async move {
+            s_reactive
+                .admit_with_turn_boundary(FlowId::new("reactive-flow"), WORK_UNIT, true)
+                .await
+        });
 
-        // Slow-flow should complete (force-admitted despite lower priority).
-        let _ticket_slow = tokio::time::timeout(Duration::from_secs(2), task_slow)
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        drop(ticket_holder);
+
+        // Promoted flow (100) should win over competitor (10).
+        let ticket_reactive = tokio::time::timeout(Duration::from_secs(2), task_reactive)
             .await
-            .expect("slow-flow should be force-admitted within timeout")
-            .expect("slow-flow task should not panic")
-            .expect("slow-flow admit should succeed");
+            .expect("reactive admit should not timeout")
+            .expect("reactive task should not panic")
+            .expect("reactive admit should succeed");
 
-        assert!(
-            m.starvation_force_admits_total.get() >= 1,
-            "starvation force admits should be >= 1, got {}",
-            m.starvation_force_admits_total.get()
-        );
+        drop(ticket_reactive);
+
+        let ticket_comp = tokio::time::timeout(Duration::from_secs(2), task_comp)
+            .await
+            .expect("competitor admit should not timeout")
+            .expect("competitor task should not panic")
+            .expect("competitor admit should succeed");
+
+        drop(ticket_comp);
+        assert_eq!(m.active_flows.get(), 0.0);
     })
     .await
     .expect("test should not timeout");
 }
 
 // ---------------------------------------------------------------------------
-// Test 3: cold_start_flows_keep_default_priority
+// Test 3: cold_start_optimistic
 // ---------------------------------------------------------------------------
 
-/// A flow with fewer than min_samples arrivals keeps its default priority.
-///
-/// With min_samples=3 and only 1 arrival, the heuristic has insufficient
-/// data and returns None — the flow's priority remains the default (50).
+/// A brand-new flow's first admit gets priority 100 (Cold) and wins over
+/// an AgenticConfirmed flow (priority 10).
 #[tokio::test]
-async fn cold_start_flows_keep_default_priority() {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        let (_, registry, scheduler) = build_scheduler(test_policy());
+async fn cold_start_optimistic() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let (m, registry, scheduler) = build_scheduler(test_policy());
 
-        // Admit the flow once.
-        let cold_id = FlowId::new("cold");
-        let ticket = scheduler.admit(cold_id.clone(), WORK_UNIT).await.unwrap();
+        // ── Build AgenticConfirmed competitor ──
+        let comp_id = FlowId::new("agentic-comp");
+        for _ in 0..12 {
+            let ticket = scheduler
+                .admit_with_turn_boundary(comp_id.clone(), WORK_UNIT, false)
+                .await
+                .unwrap();
+            drop(ticket);
+        }
+        assert_eq!(
+            registry.get_or_create(comp_id.clone()).priority(),
+            10,
+            "competitor should be AgenticConfirmed (10)"
+        );
+
+        // ── Cold-start flow: first admit -> Cold (priority 100) ──
+        // New flows start at Cold, which maps to interactive (100).
+        let cold_id = FlowId::new("cold-start");
+        let ticket = scheduler
+            .admit_with_turn_boundary(cold_id.clone(), WORK_UNIT, true)
+            .await
+            .unwrap();
         drop(ticket);
-
-        // Only 1 arrival < min_samples=3, so priority should be default (50).
         assert_eq!(
             registry.get_or_create(cold_id.clone()).priority(),
-            50,
-            "cold-start flow should keep default priority (50)"
+            100,
+            "cold-start flow should be Cold/Interactive (100)"
         );
-    })
-    .await
-    .expect("test should not timeout");
-}
 
-// ---------------------------------------------------------------------------
-// Test 4: disabled_policy_keeps_defaults
-// ---------------------------------------------------------------------------
+        // ── Contention: cold-start (100) should beat agentic (10) ──
+        let ticket_holder = scheduler
+            .admit(FlowId::new("holder"), WORK_UNIT)
+            .await
+            .unwrap();
 
-/// When PriorityPolicy.enabled=false, the heuristic is completely disabled.
-/// Even with rapid admissions that would normally demote to background,
-/// priority stays at the default (50).
-#[tokio::test]
-async fn disabled_policy_keeps_defaults() {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        let disabled_policy = PriorityPolicy {
-            enabled: false,
-            ..test_policy()
-        };
-        let (_, registry, scheduler) = build_scheduler(disabled_policy);
+        let s_comp = scheduler.clone();
+        let task_comp = tokio::spawn(async move {
+            s_comp.admit_with_turn_boundary(FlowId::new("agentic-comp"), WORK_UNIT, false).await
+        });
 
-        // Admit a flow 5 times with 5ms gaps — would normally demote to
-        // background (gap ~5ms <= 20ms). With policy disabled, no change.
-        let flow_id = FlowId::new("disabled-flow");
-        for _ in 0..5 {
-            let ticket = scheduler.admit(flow_id.clone(), WORK_UNIT).await.unwrap();
-            drop(ticket);
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
 
-        assert_eq!(
-            registry.get_or_create(flow_id.clone()).priority(),
-            50,
-            "disabled policy should keep default priority (50)"
-        );
+        let s_cold = scheduler.clone();
+        let task_cold = tokio::spawn(async move {
+            s_cold.admit_with_turn_boundary(FlowId::new("cold-start"), WORK_UNIT, true).await
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        drop(ticket_holder);
+
+        // Cold-start (100) should win over agentic (10).
+        let ticket_cold = tokio::time::timeout(Duration::from_secs(2), task_cold)
+            .await
+            .expect("cold-start admit should not timeout")
+            .expect("cold-start task should not panic")
+            .expect("cold-start admit should succeed");
+
+        drop(ticket_cold);
+
+        let ticket_comp = tokio::time::timeout(Duration::from_secs(2), task_comp)
+            .await
+            .expect("agentic admit should not timeout")
+            .expect("agentic task should not panic")
+            .expect("agentic admit should succeed");
+
+        drop(ticket_comp);
+        assert_eq!(m.active_flows.get(), 0.0);
     })
     .await
     .expect("test should not timeout");

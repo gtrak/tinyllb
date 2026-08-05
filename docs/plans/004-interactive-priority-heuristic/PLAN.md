@@ -1,5 +1,11 @@
 # Plan 004 — Interactive-vs-Batch Priority Heuristic
 
+> **Note (2026-08-04):** The median-gap classifier described in this plan
+> was replaced by a turn-boundary state machine in Plan 006. The header
+> API, `CadenceRegistry`, metrics, and scheduler integration from this plan
+> are preserved; only the classification logic and config schema changed.
+> See `docs/plans/006-turn-boundary-priority/PLAN.md`.
+
 ## Why
 
 The proxy already has three priority classes (`interactive: 100`,

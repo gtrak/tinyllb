@@ -84,6 +84,8 @@ pub struct Metrics {
     pub flow_priority_source_total: CounterVec,
     /// Observed inter-request gap per flow (seconds). Labeled by `flow_id`.
     pub flow_inter_request_seconds: HistogramVec,
+    /// Per-flow cadence state machine state. Labeled by `flow_id`.
+    pub flow_cadence_state: GaugeVec,
     // -- Premature stop retry family --
     pub premature_stop_detected_total: prometheus::Counter,
     pub premature_stop_retries_total: prometheus::Counter,
@@ -310,6 +312,15 @@ impl Metrics {
             &["flow_id"],
         )
         .expect("llm_flow_inter_request_seconds should be creatable");
+
+        let flow_cadence_state = GaugeVec::new(
+            Opts::new(
+                "llm_flow_cadence_state",
+                "Per-flow cadence state machine state (0=cold, 1=interactive, 2=agentic_suspected, 3=agentic_confirmed)",
+            ),
+            &["flow_id"],
+        )
+        .expect("llm_flow_cadence_state should be creatable");
         // -- Premature stop retry family --
         let premature_stop_detected_total = prometheus::Counter::new(
             "tinyllb_premature_stop_detected_total",
@@ -415,6 +426,9 @@ impl Metrics {
         registry
             .register(Box::new(flow_inter_request_seconds.clone()))
             .expect("llm_flow_inter_request_seconds registration should succeed");
+        registry
+            .register(Box::new(flow_cadence_state.clone()))
+            .expect("llm_flow_cadence_state registration should succeed");
         // Register premature stop retry metrics.
         registry
             .register(Box::new(premature_stop_detected_total.clone()))
@@ -456,6 +470,7 @@ impl Metrics {
             flow_priority_class,
             flow_priority_source_total,
             flow_inter_request_seconds,
+            flow_cadence_state,
             premature_stop_detected_total,
             premature_stop_retries_total,
             premature_stop_exhausted_total,

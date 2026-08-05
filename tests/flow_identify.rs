@@ -298,11 +298,13 @@ async fn test_named_flow_registers_with_defaults() {
     let _body = collect_body_string(resp).await;
 
     // Verify the flow exists in the registry with default_weight=1.0 and
-    // default_priority=50 (the values used in build_flow_test_app_with_handles).
+    // Verify the flow exists in the registry with default_weight=1.0.
+    // After the first admit, the cadence state machine sets priority to 100
+    // (Cold state = optimistic interactive) unless the heuristic is disabled.
     let flow = flow_registry.get_or_create(FlowId::new("coding-agent"));
     assert_eq!(flow.id.to_string(), "coding-agent");
     assert_eq!(flow.weight(), 1.0);
-    assert_eq!(flow.priority(), 50);
+    assert_eq!(flow.priority(), 100);
 }
 
 /// Test: ephemeral flows aggregate to "ephemeral" label; named flows get

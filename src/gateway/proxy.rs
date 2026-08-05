@@ -143,6 +143,43 @@ fn extract_max_tokens(body: &Bytes) -> f64 {
     }
 }
 
+/// Determine whether this request represents a turn boundary (the user
+/// is initiating a new message) vs an intra-turn continuation (the agent
+/// is sending a tool result or prefill).
+///
+/// Rule:
+/// - `messages[last].role == "user"` or `"system"` -> turn boundary
+/// - `messages[last].role == "tool"` or `"assistant"` -> NOT a turn boundary
+/// - Non-JSON body, no `messages` array, or empty array -> turn boundary
+///   (optimistic -- consistent with the cold-start philosophy)
+///
+/// This signal tells the cadence state machine whether the *previous* gap
+/// was human think time (idle, at a turn boundary) or tool execution time
+/// (intra-turn). See `docs/plans/006-turn-boundary-priority/PLAN.md`.
+fn is_turn_boundary_request(body: &bytes::Bytes) -> bool {
+    if body.is_empty() {
+        return true;
+    }
+    let value: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => return true,
+    };
+    let messages = match value.get("messages").and_then(|m| m.as_array()) {
+        Some(m) if !m.is_empty() => m,
+        _ => return true,
+    };
+    match messages.last() {
+        Some(msg) => {
+            let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
+            // "tool" and "assistant" are intra-turn (agent working).
+            // Everything else (user, system, unknown) is a turn boundary.
+            role != "tool" && role != "assistant"
+        }
+        None => true,
+    }
+}
+
+
 /// Build the backend URL by joining the base URL with the request path and query.
 fn build_backend_url(
     backend_url: &url::Url,
@@ -383,6 +420,9 @@ pub async fn proxy_handler(
         body_bytes
     };
 
+    // Detect turn boundary before body_bytes is moved into the request builder.
+    let is_turn_boundary = is_turn_boundary_request(&body_bytes);
+
     // Build the backend URL, preserving the query string.
     let backend_url = build_backend_url(&state.backend_url, &original_path, query.as_deref())?;
 
@@ -434,7 +474,10 @@ pub async fn proxy_handler(
     // Under backpressure, this may reject with 429.
     // Clone flow_id so we can use it for lifecycle tracking.
     let flow_id_for_admit = flow_id.clone();
-    let _ticket = match state.scheduler.admit(flow_id_for_admit, work_unit).await {
+    let _ticket = match state.scheduler
+        .admit_with_turn_boundary(flow_id_for_admit, work_unit, is_turn_boundary)
+        .await
+    {
         Ok(ticket) => ticket,
         Err(rejected) => {
             // Increment backpressure rejection counter.
@@ -884,5 +927,69 @@ mod tests {
         assert_eq!(v["max_tokens"], 128);
         assert!(v["messages"].is_array());
         assert_eq!(v["messages"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn turn_boundary_user_message() {
+        let body = bytes::Bytes::from(
+            r#"{"messages":[{"role":"user","content":"hi"}]}"#
+        );
+        assert!(is_turn_boundary_request(&body));
+    }
+
+    #[test]
+    fn turn_boundary_tool_message_is_not_turn() {
+        let body = bytes::Bytes::from(
+            r#"{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hi"},{"role":"tool","content":"result"}]}"#
+        );
+        assert!(!is_turn_boundary_request(&body));
+    }
+
+    #[test]
+    fn turn_boundary_assistant_message_is_not_turn() {
+        let body = bytes::Bytes::from(
+            r#"{"messages":[{"role":"assistant","content":"prefill"}]}"#
+        );
+        assert!(!is_turn_boundary_request(&body));
+    }
+
+    #[test]
+    fn turn_boundary_system_message_is_turn() {
+        let body = bytes::Bytes::from(
+            r#"{"messages":[{"role":"system","content":"you are..."}]}"#
+        );
+        assert!(is_turn_boundary_request(&body));
+    }
+
+    #[test]
+    fn turn_boundary_empty_messages_is_turn() {
+        let body = bytes::Bytes::from(r#"{"messages":[]}"#);
+        assert!(is_turn_boundary_request(&body));
+    }
+
+    #[test]
+    fn turn_boundary_non_chat_is_turn() {
+        let body = bytes::Bytes::from(r#"{"prompt":"hello"}"#);
+        assert!(is_turn_boundary_request(&body));
+    }
+
+    #[test]
+    fn turn_boundary_empty_body_is_turn() {
+        let body = bytes::Bytes::from("");
+        assert!(is_turn_boundary_request(&body));
+    }
+
+    #[test]
+    fn turn_boundary_non_json_is_turn() {
+        let body = bytes::Bytes::from("not json");
+        assert!(is_turn_boundary_request(&body));
+    }
+
+    #[test]
+    fn turn_boundary_unknown_role_is_turn() {
+        let body = bytes::Bytes::from(
+            r#"{"messages":[{"role":"unknown","content":"x"}]}"#
+        );
+        assert!(is_turn_boundary_request(&body));
     }
 }

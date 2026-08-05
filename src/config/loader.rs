@@ -101,10 +101,9 @@ pub fn load() -> anyhow::Result<Config> {
         .set_default("retry_policy.max_temperature", 1.5f64)?
         .set_default("retry_policy.default_temperature", 0.0f64)?
         .set_default("priority_policy.enabled", true)?
-        .set_default("priority_policy.interactive_gap_min", "30s")?
-        .set_default("priority_policy.background_gap_max", "2s")?
-        .set_default("priority_policy.sample_window", 20u64)?
-        .set_default("priority_policy.min_samples", 3u64)?
+        .set_default("priority_policy.idle_gap_threshold", "30s")?
+        .set_default("priority_policy.agentic_suspected_threshold", 5u32)?
+        .set_default("priority_policy.agentic_confirmed_threshold", 12u32)?
 
         .add_source(
             config::File::from(std::path::PathBuf::from(&config_path))
@@ -283,14 +282,14 @@ fn validate(cfg: &Config) -> anyhow::Result<()> {
 
     // Validate priority-policy constraints.
     let pp = &cfg.priority_policy;
-    if pp.interactive_gap_min <= pp.background_gap_max {
+    if pp.agentic_confirmed_threshold <= pp.agentic_suspected_threshold {
         return Err(anyhow::anyhow!(
-            "priority_policy.interactive_gap_min must be strictly greater than background_gap_max"
+            "priority_policy.agentic_confirmed_threshold must be strictly greater than agentic_suspected_threshold"
         ));
     }
-    if pp.sample_window < pp.min_samples {
+    if pp.agentic_suspected_threshold == 0 {
         return Err(anyhow::anyhow!(
-            "priority_policy.sample_window must be >= min_samples"
+            "priority_policy.agentic_suspected_threshold must be >= 1"
         ));
     }
 

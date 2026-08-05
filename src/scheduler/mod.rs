@@ -244,8 +244,9 @@ impl Scheduler {
 
     /// Attempt to admit a request into the active set.
     ///
-    /// KV policy runs first (accept/delay/reject based on KV-cache pressure).
-    /// If KV policy accepts, delegates to the underlying flow scheduler.
+    /// Backward-compatible wrapper: defaults `is_turn_boundary = true`
+    /// (optimistic). All existing test/bench callers use this. The proxy
+    /// handler uses `admit_with_turn_boundary` to pass the detected value.
     #[tracing::instrument(skip(self, flow_id, work_unit), fields(
         flow_id = %flow_id,
         queue_depth_before,
@@ -256,12 +257,36 @@ impl Scheduler {
         flow_id: crate::flow::FlowId,
         work_unit: f64,
     ) -> Result<QueueTicket, BackpressureRejected> {
-        // Record queue depth before the admit process begins.
+        self.admit_with_turn_boundary(flow_id, work_unit, true).await
+    }
+
+    /// Admit with an explicit turn-boundary flag.
+    ///
+    /// `is_turn_boundary = true` means the current request's last message has
+    /// `role: "user"` (or non-chat / optimistic). `false` means `role: "tool"`
+    /// or `"assistant"` (intra-turn continuation). The cadence state machine
+    /// uses this to distinguish turn-boundary idles from tool-execution gaps.
+    #[tracing::instrument(skip(self, flow_id, work_unit), fields(
+        flow_id = %flow_id,
+        queue_depth_before,
+        algorithm = self.algorithm_label,
+        is_turn_boundary,
+    ))]
+    pub async fn admit_with_turn_boundary(
+        &self,
+        flow_id: crate::flow::FlowId,
+        work_unit: f64,
+        is_turn_boundary: bool,
+    ) -> Result<QueueTicket, BackpressureRejected> {
         tracing::Span::current().record("queue_depth_before", self.queue_depth());
 
         // ── Priority cadence heuristic ──
         let flow = self.registry.get_or_create(flow_id.clone());
-        let gap = self.cadence.record_arrival(&flow_id, std::time::Instant::now());
+        let gap = self.cadence.record_arrival(
+            &flow_id,
+            std::time::Instant::now(),
+            is_turn_boundary,
+        );
         self.cadence.classify_and_apply(&flow, &flow_id);
         tracing::Span::current().record("priority", flow.priority());
         tracing::Span::current().record("priority_source", flow.priority_source());
@@ -271,6 +296,10 @@ impl Scheduler {
             .flow_priority_class
             .with_label_values(&[flow_id.metric_label()])
             .set(flow.priority() as f64);
+        self.metrics
+            .flow_cadence_state
+            .with_label_values(&[flow_id.metric_label()])
+            .set(self.cadence.state_of(&flow_id) as u32 as f64);
         if let Some(gap) = gap {
             self.metrics
                 .flow_inter_request_seconds
@@ -288,13 +317,14 @@ impl Scheduler {
             SchedulerImpl::Drr(s) => s.admit(flow_id, work_unit).await,
         };
 
-        // Emit terminal decision event (accept or reject) inside the admit span.
         let wait_secs = enter.elapsed().as_secs_f64();
         match &result {
             Ok(_) => {
                 tracing::info!(
                     decision = "accept",
                     wait_seconds = wait_secs,
+                    is_turn_boundary = is_turn_boundary,
+                    priority = flow.priority(),
                     "admit decision"
                 );
             }
@@ -302,6 +332,8 @@ impl Scheduler {
                 tracing::info!(
                     decision = "reject",
                     wait_seconds = wait_secs,
+                    is_turn_boundary = is_turn_boundary,
+                    priority = flow.priority(),
                     "admit decision"
                 );
             }

@@ -246,29 +246,24 @@ impl Default for RetryPolicy {
 }
 
 
-/// Priority classification policy for the interactive-vs-batch heuristic.
+/// Priority classification policy for the turn-boundary state machine.
 ///
 /// Tracks per-flow request cadence and assigns priority classes based on
-/// inter-request timing.  Defaults to `enabled: true` with interactive
-/// threshold at 30s and background threshold at 2s.
+/// turn-boundary detection.  Defaults to `enabled: true` with idle gap
+/// threshold at 30s, suspected threshold at 5, and confirmed threshold at 12.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PriorityPolicy {
     #[serde(default = "PriorityPolicy::default_enabled")]
     pub enabled: bool,
     #[serde(
-        default = "PriorityPolicy::default_interactive_gap_min",
+        default = "PriorityPolicy::default_idle_gap_threshold",
         with = "loader::humantime_serde"
     )]
-    pub interactive_gap_min: Duration,
-    #[serde(
-        default = "PriorityPolicy::default_background_gap_max",
-        with = "loader::humantime_serde"
-    )]
-    pub background_gap_max: Duration,
-    #[serde(default = "PriorityPolicy::default_sample_window")]
-    pub sample_window: usize,
-    #[serde(default = "PriorityPolicy::default_min_samples")]
-    pub min_samples: usize,
+    pub idle_gap_threshold: Duration,
+    #[serde(default = "PriorityPolicy::default_agentic_suspected_threshold")]
+    pub agentic_suspected_threshold: u32,
+    #[serde(default = "PriorityPolicy::default_agentic_confirmed_threshold")]
+    pub agentic_confirmed_threshold: u32,
 }
 
 impl PriorityPolicy {
@@ -276,20 +271,16 @@ impl PriorityPolicy {
         true
     }
 
-    fn default_interactive_gap_min() -> Duration {
+    fn default_idle_gap_threshold() -> Duration {
         Duration::from_secs(30)
     }
 
-    fn default_background_gap_max() -> Duration {
-        Duration::from_secs(2)
+    fn default_agentic_suspected_threshold() -> u32 {
+        5
     }
 
-    fn default_sample_window() -> usize {
-        20
-    }
-
-    fn default_min_samples() -> usize {
-        3
+    fn default_agentic_confirmed_threshold() -> u32 {
+        12
     }
 }
 
@@ -297,10 +288,9 @@ impl Default for PriorityPolicy {
     fn default() -> Self {
         Self {
             enabled: Self::default_enabled(),
-            interactive_gap_min: Self::default_interactive_gap_min(),
-            background_gap_max: Self::default_background_gap_max(),
-            sample_window: Self::default_sample_window(),
-            min_samples: Self::default_min_samples(),
+            idle_gap_threshold: Self::default_idle_gap_threshold(),
+            agentic_suspected_threshold: Self::default_agentic_suspected_threshold(),
+            agentic_confirmed_threshold: Self::default_agentic_confirmed_threshold(),
         }
     }
 }

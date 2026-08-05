@@ -170,6 +170,28 @@ async fn test_metrics_endpoint_returns_all_metrics() {
         body2.contains("llm_starvation_force_admits_total"),
         "llm_starvation_force_admits_total should appear in scrape output"
     );
+
+    // Cadence state gauge — touch it so it appears in the scrape.
+    metrics
+        .flow_cadence_state
+        .with_label_values(&["test"])
+        .set(1.0);
+    let resp3 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp3.status(), 200);
+    let body3 = collect_body_string(resp3).await;
+    assert!(
+        body3.contains("llm_flow_cadence_state"),
+        "llm_flow_cadence_state should appear in scrape output"
+    );
 }
 
 /// Test: metrics are initialized correctly (all counters start at 0, gauges at 0).
