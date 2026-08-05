@@ -237,7 +237,7 @@ Metrics families provide a structured, cross-task view of system health and perf
 - Throughput family tracks cumulative token output and approximate instantaneous rate.
 - All collectors share one registry, making every metric family available to every task without additional wiring.
 - Additional metric families beyond the three primary groups reside in the same registry (backpressure, scheduling, starvation protection, request lifecycle, KV cache).
-- Priority heuristic family tracks per-flow priority class, priority source events, and inter-request gap distribution for cadence-based classification diagnostics.
+- Priority heuristic family tracks per-flow priority class, cadence state-machine state, priority source events, and inter-request gap distribution for turn-boundary classification diagnostics.
 
 ## Non-goals
 
@@ -286,7 +286,8 @@ The interface provides construction surfaces, a scrape endpoint, and metric fami
 - `llm_tokens_per_second` — Gauge approximating instantaneous token throughput, derived from the cumulative counter at regular intervals.
 **Priority heuristic family.**
 
-- `llm_flow_priority_class` — Per-flow gauge of the current numeric priority value (100/50/10). Updated on every admission after the cadence heuristic runs. Labeled by `flow_id`; ephemeral flows aggregate to `"ephemeral"`.
+- `llm_flow_priority_class` — Per-flow gauge of the current numeric priority value (100/50/10). Updated on every admission after the turn-boundary state machine runs. Labeled by `flow_id`; ephemeral flows aggregate to `"ephemeral"`.
+- `llm_flow_cadence_state` — Per-flow gauge of the state-machine state (0=cold, 1=interactive, 2=agentic_suspected, 3=agentic_confirmed). Updated on every admission. Disambiguates Cold from Interactive (both priority 100). Labeled by `flow_id`; ephemeral flows aggregate to `"ephemeral"`.
 - `llm_flow_priority_source_total` — Counter of explicit priority-override events, labeled by `flow_id` and `source` (`header`, `admin`, `auto`). Incremented when a flow's priority is pinned via the `X-LLM-Priority` header, set via the admin API, or cleared via `auto`.
 - `llm_flow_inter_request_seconds` — Per-flow histogram of observed inter-request gaps (seconds). Observed on every admission after the first; the first arrival for a flow produces no observation. Buckets span 0.1s to 120s. Labeled by `flow_id`.
 

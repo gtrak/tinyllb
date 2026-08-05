@@ -41,7 +41,7 @@ The configuration surface presents contractual guarantees about what values are 
 - **KV-cache policy** declares `enabled` (default `false`), `reject_threshold` (default `0.95`), and `delay_threshold` (default `0.80`).
 - **Context policy** declares compression settings: `enabled` (default `false`), `compress_threshold` (default `100000`), `head_keep_turns` (default `3`), `live_keep_turns` (default `6`), `compress_chunk_turns` (default `8`), `summary_max_tokens` (default `2048`), `store_path`, `tokenizer_path`, `sidecar_request_timeout` (default `60s`), `compression_retries` (default `3`), and `prompt_template_path`. See [[context#Context Compression]].
 - **Retry policy** declares premature-stop retry settings: `enabled` (default `false`), `max_retries` (default `2`), `temperature_step` (default `0.3`), `max_temperature` (default `1.5`), and `default_temperature` (default `0.0`). When enabled, degenerate `/v1/chat/completions` responses are retried with bumped temperature.
-- **Priority policy** declares cadence-based priority heuristic settings: `enabled` (default `true`), `interactive_gap_min` (default `30s`), `background_gap_max` (default `2s`), `sample_window` (default `20`), and `min_samples` (default `3`). When enabled, the scheduler classifies flows by inter-request cadence and adjusts priority automatically. See [[scheduler#Scheduler Facade and Policy Selection]].
+- **Priority policy** declares turn-boundary state-machine heuristic settings: `enabled` (default `true`), `idle_gap_threshold` (default `30s`), `agentic_suspected_threshold` (default `5`), and `agentic_confirmed_threshold` (default `12`). When enabled, the scheduler classifies flows by turn-boundary idles versus continuous activity and adjusts priority automatically. See [[scheduler#Scheduler Facade and Policy Selection]].
 
 **Duration representation**
 
@@ -79,7 +79,7 @@ These limitations are inherent to the configuration model.
 - When `kv_policy.enabled` is `true`, thresholds must satisfy: `reject_threshold` in `(0, 1]`, `delay_threshold` in `[0, 1]`, and `delay_threshold` strictly less than `reject_threshold`. When `enabled` is `false`, these thresholds are not validated.
 - When `context_policy.enabled` is `true`, `compress_threshold`, `head_keep_turns`, `live_keep_turns`, `compress_chunk_turns`, `summary_max_tokens`, and `compression_retries` must all be positive, and `store_path` must be non-empty. When `enabled` is `false`, these fields are not validated. A leading `~` in `store_path`, `tokenizer_path`, and `prompt_template_path` is expanded to the user's home directory.
 - When `retry_policy.enabled` is `true`, `max_retries` must be > 0, `temperature_step` must be > 0.0, `max_temperature` must be >= `default_temperature`, and `max_temperature` must be <= 2.0. When `enabled` is `false`, these fields are not validated.
-- When `priority_policy.enabled` is `true` (or any state), `interactive_gap_min` must be strictly greater than `background_gap_max`, and `sample_window` must be greater than or equal to `min_samples`. These constraints are always validated regardless of the `enabled` flag.
+- `agentic_confirmed_threshold` must be strictly greater than `agentic_suspected_threshold`, and `agentic_suspected_threshold` must be at least 1. These constraints are validated regardless of the `enabled` flag.
 
 **Input format**
 

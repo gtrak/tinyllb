@@ -11,7 +11,7 @@ The scheduler facade guarantees that every admission attempt passes through a sh
 - Ensures queue depth and snapshot metrics always include KV-delayed requests.
 - Exposes shared policy state — completion bias, starvation timeout, flow progress — to all algorithm variants.
 - Supports algorithm-specific accounting through a uniform query interface.
-- Runs a per-flow cadence heuristic on every admission that classifies flows by inter-request timing and adjusts priority automatically, promoting interactive (slow-gapping) flows and demoting batch (rapid-fire) flows.
+- Runs a per-flow turn-boundary state machine on every admission that classifies flows as interactive (a turn-boundary idle followed by resumption) or agentic (continuous tool-call activity) and adjusts priority automatically.
 
 ## Non-goals
 
@@ -28,7 +28,7 @@ The facade deliberately does not implement scheduling logic or define policy par
 The facade exposes public contract surfaces: admission, queue observation, flow accounting, shared state access, construction, re-exported types, and a lifecycle submodule.
 
 **Admission.** A request to schedule a work unit for a flow. Accepts a flow identity and a work quantity; returns either a queue ticket confirming admission or a backpressure rejection carrying a retry-after duration. No admission succeeds without passing the KV-cache gate.
-Before the KV-cache gate, the facade records an arrival timestamp for the flow and runs the cadence classification heuristic, which may adjust the flow's priority based on its recent inter-request gap pattern. Flows with explicit priority overrides (header or admin) are skipped by the heuristic. See [[flow#Flow Registry and State]].
+Before the KV-cache gate, the facade records an arrival for the flow along with the `is_turn_boundary` signal and runs the turn-boundary state machine, which may adjust the flow's priority. Flows with explicit priority overrides (header or admin) are skipped by the state machine. See [[flow#Flow Registry and State]].
 
 **Queue observation.** Two read-only surfaces for inspecting queue state. The depth query returns the total number of queued requests, including those delayed by the KV gate. The snapshot query returns counts of active flows, waiting requests, and total flow count.
 
@@ -55,7 +55,7 @@ These statements hold regardless of which scheduling algorithm is configured or 
 **Algorithm-exhaustive dispatch.** Every public operation that delegates to the underlying scheduler covers all configured algorithm variants; no variant is left unhandled.
 
 **Neutral accounting for non-applicable algorithms.** Querying service total on a non-work-tracking algorithm always yields zero. Querying credit on a non-credit algorithm always yields zero. Reporting accounting to a non-accounting algorithm has no observable effect.
-**Cadence heuristic ordering.** The cadence classification step executes before the KV-cache gate on every admission. It records an arrival timestamp, computes the median inter-request gap over a rolling window, and may update the flow's priority. Flows with a non-zero priority source (explicit header or admin pin) are never modified by the heuristic. When the heuristic is disabled (`priority_policy.enabled = false`), no priority changes occur from the cadence step.
+**Cadence heuristic ordering.** The turn-boundary state machine executes before the KV-cache gate on every admission. It records an arrival and the `is_turn_boundary` flag, then transitions the flow's state: a turn-boundary idle gap at or above `idle_gap_threshold` promotes to Interactive (priority 100); continuous non-turn-boundary arrivals increment a counter that demotes through AgenticSuspected (priority 50) to AgenticConfirmed (priority 10). Flows with an explicit priority override (header or admin pin) are never modified by the state machine. When the heuristic is disabled (`priority_policy.enabled = false`), no priority changes occur from the state machine.
 
 ## Constraints
 
@@ -100,7 +100,7 @@ See also these related concepts and source files.
 - [[src/scheduler/wfq.rs]] — WFQ scheduler implementation
 - [[src/scheduler/drr.rs]] — DRR scheduler implementation
 - [[src/scheduler/lifecycle.rs]] — Lifecycle types and accounting
-- [[src/flow/cadence.rs]] — cadence heuristic implementation
+- [[src/flow/cadence.rs]] — turn-boundary state machine implementation
 - [[src/config/mod.rs#PriorityPolicy]] — priority policy configuration
 
 # FIFO Queueing Discipline
