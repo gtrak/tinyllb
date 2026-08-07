@@ -56,6 +56,7 @@ fn build_scheduler(policy: PriorityPolicy) -> (Arc<Metrics>, Arc<FlowRegistry>, 
         Arc::new(BackendMonitor::empty()),
         policy,
         Priorities::default(),
+        tinyllb::config::KvBias::default(),
     ));
     (m, registry, scheduler)
 }

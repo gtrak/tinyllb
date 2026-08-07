@@ -33,6 +33,7 @@ The configuration surface presents contractual guarantees about what values are 
 - **Scheduling algorithm** accepts three modes — `fifo`, `wfq`, `drr` — with `drr` as the default.
 - **Scheduler limits** declare `max_active_flows` (default `4`) and `starvation_timeout` (default `300s`).
 - **Completion bias** controls admission gating for new flows: `enabled` (default `true`), `target_active_flows` (default `0`, meaning "use `max_active_flows`"), and `predictive_admit` (default `false`).
+- **KV-cache-aware selection bias** controls scheduler selection reordering under pressure: `enabled` (default `true`), `bias_full_at` (default `0.9`, pressure at which footprint fully dominates selection), and `pressure_below` (default `0.5`, pressure below which the bias is inactive and selection is purely fair). Never rejects. See [[scheduler_policies#KV-Cache-Aware Selection Bias]].
 - **Flow defaults** declare `default_weight` (default `1.0`) and `default_priority` (default `50`).
 - **Priority classes** declare `interactive` (default `100`), `agent` (default `50`), and `background` (default `10`).
 - **Backpressure** declares a mode (`blocking`, `failfast`, `hybrid`; default `blocking`), `max_queue_depth` (default `100`), `max_wait` (default `10s`), and `retry_after_base` (default `1s`).

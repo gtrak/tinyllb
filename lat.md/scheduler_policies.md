@@ -256,6 +256,75 @@ This section lists related concepts and source references for the completion bia
 - [[src/flow/mod.rs#Flow]] — flow type
 - [[src/metrics/mod.rs]] — metrics infrastructure
 
+# KV-Cache-Aware Selection Bias
+
+Reorders selection among eligible waiting flows under KV-cache pressure so the flow with the largest resident KV footprint wins the next permit — never rejects or delays.
+
+Under KV-cache pressure, the scheduler reorders selection among *eligible* waiting flows so the flow holding the largest resident KV footprint is granted the next permit, letting it finish and free blocks rather than being preempted and paged into/out of CPU-offloaded KV cache. This is a scheduling bias: it never rejects or delays a request, it only picks which eligible flow wins a permit.
+
+## Purpose
+
+Reduce KV-cache thrash under pressure by continuing the flow that has already invested the most resident cache, instead of fairly rotating to a cold flow whose admission would evict the hot one.
+
+- Reorders DRR and WFQ `try_select` Phase 3 selection; FIFO is unaffected (no selection decision).
+- Footprint per flow = delivered tokens tracked by [[admission#Per-Flow Token Progress Tracking]].
+- Pressure is the backend's global KV usage gauge from [[backend#Backend KV-Cache Monitor]].
+- Bias strength ramps linearly from 0 below `pressure_below` to full dominance at/above `bias_full_at`; when all footprints are equal it collapses to existing priority→base→enqueue fairness.
+
+## Non-goals
+
+This bias is not an admission control mechanism.
+
+- Does not reject, delay, or 429 any request (contrast [[admission#KV-Cache-Aware Admission Gate]]).
+- Does not source per-flow KV block counts (vLLM exposes only a global gauge); footprint is a proxy via delivered tokens.
+- Does not influence FIFO scheduling, which has no choice among waiting flows.
+
+## Interface
+
+The bias handle ([`KvBiasHandle`](src/scheduler/kv_bias.rs)) is constructed in [`Policies::new`](src/scheduler/mod.rs) from the `KvBias` config, the backend monitor, and the shared `FlowProgressTracker`, then threaded into each scheduler's `admission_loop` and `try_select`.
+
+- `pressure() -> f64` reads the latest backend snapshot's `kv_usage`, clamped to `[0,1]`.
+- `bias_weight(pressure) -> f64` ramps `0` below `pressure_below`, `1` at/above `bias_full_at`.
+- `footprint(flow_id) -> f64` returns the flow's currently-delivered tokens (0 if unknown).
+- `select(candidates, pressure) -> Option<FlowId>` selects the best candidate by weighted footprint, falling back to [[scheduler_policies#Priority-Aware Flow Selection]] order on ties. When bias is disabled or pressure is 0, it delegates to `priority::select_best`.
+
+## Invariants
+
+The bias reorders eligible flows only; it never changes permit accounting or admission gating.
+
+- Selection only reorders *eligible* flows; it never changes permit accounting or admission gating.
+- When `bias_weight` is 0 (low pressure) or all candidate footprints are equal, the selected flow is identical to `priority::select_best` — no fairness regression.
+- Starvation force-selection ([[scheduler_policies#Starvation Protection]]) still takes precedence over the bias.
+
+## Constraints
+
+The bias uses a delivered-token proxy and a global pressure gauge.
+
+- Footprint is a proxy, not a direct KV-block count; a flow that has delivered many tokens is assumed to hold proportionally more resident cache.
+- `bias_full_at` must be >= `pressure_below`; otherwise both clamp to `pressure_below` (bias disabled).
+- The bias is consulted on every selection; pressure is read once per selection round from the watch channel.
+
+## Rationale
+
+Letting the high-footprint flow finish under pressure avoids the paging-in/out cost of CPU-offloaded KV cache, while keeping the existing fairness ordering when pressure is low or footprints are equal.
+
+- Delivered tokens as the footprint signal requires no tokenizer dependency and is already streamed via [[admission#Per-Flow Token Progress Tracking]].
+- A continuous weight (rather than a hard threshold) avoids a cliff where selection flips between fair and footprint-ordered as pressure hovers near the threshold.
+- Reusing the shared `FlowCandidate` + `select_best` path keeps DRR and WFQ consistent and leaves FIFO untouched.
+
+## Related
+
+Cross-concept links and source references for the KV-cache-aware selection bias.
+
+- [[admission#Per-Flow Token Progress Tracking]] — delivered-token source
+- [[backend#Backend KV-Cache Monitor]] — global pressure gauge
+- [[scheduler#Deficit Round Robin Discipline]] — DRR selection integration
+- [[scheduler#Weighted Fair Queueing Discipline]] — WFQ selection integration
+- [[scheduler_policies#Priority-Aware Flow Selection]] — fairness fallback ordering
+- [[scheduler_policies#KV-Cache-Aware Selection Bias]] — configuration
+- [[src/scheduler/kv_bias.rs#KvBiasHandle]] — bias implementation
+- [[src/scheduler/priority.rs]] — `FlowCandidate`, `select_best`, `cmp_fair`
+
 # Request Lifecycle and Credit Restoration
 
 The scheduler lifecycle guard accounts for every request at termination with correct metrics and scheduling credit. It reconciles estimated cost with actual delivered work so fair schedulers receive accurate charge-and-credit information.

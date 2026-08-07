@@ -114,6 +114,7 @@ async fn main() {
         monitor.clone(),
         cfg.priority_policy.clone(),
         cfg.priorities.clone(),
+        cfg.scheduler.kv_bias.clone(),
     );
 
     // Initialize context-compression state when enabled.

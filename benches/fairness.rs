@@ -78,6 +78,7 @@ fn build_proxy_app(
         Arc::new(BackendMonitor::empty()),
         PriorityPolicy::default(),
         Priorities::default(),
+        tinyllb::config::KvBias::default(),
     ));
 
     let state = gateway::AppState {

@@ -23,10 +23,12 @@ pub struct FlowCandidate {
     /// For WFQ this is the `service_done / weight` ratio.
     /// For DRR this is the round-robin cursor index.
     pub base_score: f64,
+    /// KV-cache footprint for KV-aware selection bias (delivered tokens).
+    /// 0 when bias is disabled or the footprint is unknown.
+    pub kv_footprint: f64,
 }
 
 /// Select the best flow from candidates using priority as the primary sort key.
-///
 /// Selection order:
 /// 1. Highest `priority` wins.
 /// 2. Ties broken by lowest `base_score` (base algorithm preference).
@@ -63,4 +65,25 @@ pub fn select_best(candidates: &[FlowCandidate]) -> Option<FlowId> {
     }
 
     best.map(|c| c.flow_id.clone())
+}
+
+/// Compare two candidates by the plain fairness ordering (no KV bias):
+/// 1. Higher priority, 2. lower base_score, 3. earlier enqueued_at.
+///
+/// Returns `Ordering::Less` when `a` should be preferred over `b`.
+// @lat: [[scheduler_policies#Priority-Aware Flow Selection]]
+pub fn cmp_fair(a: &FlowCandidate, b: &FlowCandidate) -> std::cmp::Ordering {
+    a.priority
+        .cmp(&b.priority)
+        .reverse()
+        .then_with(|| {
+            if (a.base_score - b.base_score).abs() < f64::EPSILON {
+                std::cmp::Ordering::Equal
+            } else if a.base_score < b.base_score {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Greater
+            }
+        })
+        .then_with(|| a.enqueued_at.cmp(&b.enqueued_at))
 }

@@ -122,7 +122,7 @@ impl DrrScheduler {
             registry.clone(),
             notify,
             Duration::from_secs(300),
-            flow_progress,
+            flow_progress.clone(),
         ));
         Self::new_inner(
             max_active_flows,
@@ -134,6 +134,14 @@ impl DrrScheduler {
             retry_after_base,
             Duration::from_secs(300),
             gate,
+            Arc::new(super::kv_bias::KvBiasHandle::new(
+                crate::config::KvBias {
+                    enabled: false,
+                    ..crate::config::KvBias::default()
+                },
+                Arc::new(crate::backend::BackendMonitor::empty()),
+                flow_progress,
+            )),
         )
     }
 
@@ -160,6 +168,7 @@ impl DrrScheduler {
             retry_after_base,
             starvation_timeout,
             policies.completion_bias,
+            policies.kv_bias,
         )
     }
 
@@ -174,6 +183,7 @@ impl DrrScheduler {
         retry_after_base: std::time::Duration,
         starvation_timeout: Duration,
         completion_bias_gate: Arc<CompletionBiasGate>,
+        kv_bias: Arc<super::kv_bias::KvBiasHandle>,
     ) -> Self {
         let notify = Arc::new(tokio::sync::Notify::new());
         let state = Arc::new(SharedState {
@@ -198,6 +208,7 @@ impl DrrScheduler {
             registry_clone,
             starvation_timeout,
             gate_clone,
+            kv_bias.clone(),
         ));
 
         Self {
@@ -220,6 +231,7 @@ impl DrrScheduler {
         registry: Arc<FlowRegistry>,
         starvation_timeout: Duration,
         gate: Arc<CompletionBiasGate>,
+        kv_bias: Arc<super::kv_bias::KvBiasHandle>,
     ) {
         loop {
             state.notify.notified().await;
@@ -234,7 +246,7 @@ impl DrrScheduler {
                 }
 
                 let (selection, credit_accumulated) =
-                    Self::try_select(&state, &registry, &metrics, starvation_timeout);
+                    Self::try_select(&state, &registry, &metrics, starvation_timeout, &kv_bias);
                 match selection {
                     None => {
                         if credit_accumulated {
@@ -290,6 +302,7 @@ impl DrrScheduler {
         registry: &FlowRegistry,
         metrics: &Metrics,
         starvation_timeout: Duration,
+        kv_bias: &Arc<super::kv_bias::KvBiasHandle>,
     ) -> (Option<(FlowId, Pending, f64)>, bool) {
         let mut s = state.inner.lock().unwrap();
         if s.available_permits == 0 {
@@ -423,12 +436,14 @@ impl DrrScheduler {
                         priority: flow.priority(),
                         enqueued_at: head._enqueued_at,
                         base_score: *idx as f64, // Lower index = earlier in RR = preferred
+                        kv_footprint: kv_bias.footprint(fid),
                     }
                 })
                 .collect();
 
+            let pressure = kv_bias.pressure();
             let selected_flow_id =
-                priority::select_best(&candidates).expect("candidates should not be empty");
+                kv_bias.select(&candidates, pressure).expect("candidates should not be empty");
 
             // Find the selected flow in eligible list.
             let (_selected_idx, _) = eligible_flows

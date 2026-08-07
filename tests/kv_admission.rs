@@ -42,6 +42,7 @@ fn build_scheduler_with_mode(
         monitor,
         PriorityPolicy::default(),
         Priorities::default(),
+        tinyllb::config::KvBias::default(),
     );
     Arc::new(scheduler)
 }
@@ -224,6 +225,7 @@ async fn kv_admission_decision_counter_increments() {
         monitor,
         PriorityPolicy::default(),
         Priorities::default(),
+        tinyllb::config::KvBias::default(),
     ));
 
     // 1 accept
@@ -299,6 +301,7 @@ async fn kv_admission_delay_to_accept_transition() {
         monitor,
         PriorityPolicy::default(),
         Priorities::default(),
+        tinyllb::config::KvBias::default(),
     ));
 
     // First request: accept immediately.
@@ -392,6 +395,7 @@ async fn kv_admission_hybrid_delay_timeout_rejected() {
         monitor,
         PriorityPolicy::default(),
         Priorities::default(),
+        tinyllb::config::KvBias::default(),
     ));
 
     // The request should be rejected after max_wait (200ms), not hung.
@@ -444,6 +448,7 @@ async fn kv_admission_delayed_visible_in_queue_depth() {
         monitor,
         PriorityPolicy::default(),
         Priorities::default(),
+        tinyllb::config::KvBias::default(),
     ));
 
     // Queue depth should be 0 before any admit.

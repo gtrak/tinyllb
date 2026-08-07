@@ -114,7 +114,7 @@ impl WfqScheduler {
             registry.clone(),
             notify,
             Duration::from_secs(300),
-            flow_progress,
+            flow_progress.clone(),
         ));
         Self::new_inner(
             max_active_flows,
@@ -126,6 +126,14 @@ impl WfqScheduler {
             retry_after_base,
             Duration::from_secs(300),
             gate,
+            Arc::new(super::kv_bias::KvBiasHandle::new(
+                crate::config::KvBias {
+                    enabled: false,
+                    ..crate::config::KvBias::default()
+                },
+                Arc::new(crate::backend::BackendMonitor::empty()),
+                flow_progress,
+            )),
         )
     }
 
@@ -152,6 +160,7 @@ impl WfqScheduler {
             retry_after_base,
             starvation_timeout,
             policies.completion_bias,
+            policies.kv_bias,
         )
     }
 
@@ -166,6 +175,7 @@ impl WfqScheduler {
         retry_after_base: std::time::Duration,
         starvation_timeout: Duration,
         completion_bias_gate: Arc<CompletionBiasGate>,
+        kv_bias: Arc<super::kv_bias::KvBiasHandle>,
     ) -> Self {
         let notify = Arc::new(tokio::sync::Notify::new());
         let state = Arc::new(SharedState {
@@ -189,6 +199,7 @@ impl WfqScheduler {
             registry_clone,
             starvation_timeout,
             gate_clone,
+            kv_bias.clone(),
         ));
 
         Self {
@@ -212,13 +223,15 @@ impl WfqScheduler {
         registry: Arc<FlowRegistry>,
         starvation_timeout: Duration,
         gate: Arc<CompletionBiasGate>,
+        kv_bias: Arc<super::kv_bias::KvBiasHandle>,
     ) {
         loop {
             state.notify.notified().await;
 
             // Keep trying to select while permits are available and flows are waiting.
             loop {
-                let selection = Self::try_select(&state, &registry, &metrics, starvation_timeout);
+                let selection =
+                    Self::try_select(&state, &registry, &metrics, starvation_timeout, &kv_bias);
                 match selection {
                     None => break,
                     Some((flow_id, pending, work_unit)) => {
@@ -297,6 +310,7 @@ impl WfqScheduler {
         registry: &FlowRegistry,
         metrics: &Metrics,
         starvation_timeout: Duration,
+        kv_bias: &Arc<super::kv_bias::KvBiasHandle>,
     ) -> Option<(FlowId, Pending, f64)> {
         let mut s = state.inner.lock().unwrap();
         if s.available_permits == 0 {
@@ -359,11 +373,13 @@ impl WfqScheduler {
                 priority: flow.priority(),
                 enqueued_at: head.enqueued_at,
                 base_score: ratio,
+                kv_footprint: kv_bias.footprint(flow_id),
             });
         }
 
-        // Select best candidate using priority-aware selection.
-        let flow_id = priority::select_best(&candidates)?;
+        // Select best candidate using priority-aware selection with KV bias.
+        let pressure = kv_bias.pressure();
+        let flow_id = kv_bias.select(&candidates, pressure)?;
 
         let pending = s.waiting.get_mut(&flow_id).and_then(|q| q.pop_front())?;
 

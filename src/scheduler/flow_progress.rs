@@ -78,6 +78,14 @@ impl FlowProgressTracker {
         }
     }
 
+    /// Delivered tokens currently tracked for a flow, or 0 if none.
+    pub fn delivered_for(&self, flow_id: &crate::flow::FlowId) -> i64 {
+        self.entries
+            .get(flow_id)
+            .map(|entry| entry.delivered)
+            .unwrap_or(0)
+    }
+
     /// Check if a specific flow is near done (delivered >= threshold * estimated).
     ///
     /// Returns `true` if the flow's delivered tokens meet or exceed the

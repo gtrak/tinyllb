@@ -310,6 +310,8 @@ pub struct Scheduler {
     pub starvation_timeout: Duration,
     #[serde(default)]
     pub completion_bias: CompletionBias,
+    #[serde(default)]
+    pub kv_bias: KvBias,
 }
 
 impl Scheduler {
@@ -329,6 +331,55 @@ impl Default for Scheduler {
             max_active_flows: Self::default_max_active_flows(),
             starvation_timeout: Self::default_starvation_timeout(),
             completion_bias: CompletionBias::default(),
+            kv_bias: KvBias::default(),
+        }
+    }
+}
+
+/// KV-cache-aware selection bias.
+///
+/// Reorders selection among *eligible* waiting flows so that, under KV-cache
+/// pressure, the flow holding the largest resident KV footprint is granted
+/// the next permit — letting it finish and free blocks rather than being
+/// preempted and paged into/out of CPU-offloaded KV cache. This is a
+/// scheduling bias, NOT admission control: it never rejects or delays a
+/// request, it only decides which eligible flow wins a permit.
+// @lat: [[scheduler_policies#KV-Cache-Aware Selection Bias]]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct KvBias {
+    #[serde(default = "KvBias::default_enabled")]
+    pub enabled: bool,
+    /// Fraction of KV cache above which the bias fully dominates selection.
+    /// Below this, the bias scales the selection toward larger footprints in
+    /// proportion to pressure. In [0,1].
+    #[serde(default = "KvBias::default_bias_full_above")]
+    pub bias_full_at: f64,
+    /// Fraction of KV cache below which the bias is treated as pressure=0
+    /// (falls back to pure fairness). In [0,1].
+    #[serde(default = "KvBias::default_pressure_below")]
+    pub pressure_below: f64,
+}
+
+impl KvBias {
+    fn default_enabled() -> bool {
+        true
+    }
+
+    fn default_bias_full_above() -> f64 {
+        0.9
+    }
+
+    fn default_pressure_below() -> f64 {
+        0.5
+    }
+}
+
+impl Default for KvBias {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            bias_full_at: Self::default_bias_full_above(),
+            pressure_below: Self::default_pressure_below(),
         }
     }
 }

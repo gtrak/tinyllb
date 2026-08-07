@@ -560,6 +560,7 @@ async fn test_predictive_admit_on_allows_pre_admit_when_near_done() {
             Arc::new(BackendMonitor::empty()),
             PriorityPolicy::default(),
             Priorities::default(),
+            tinyllb::config::KvBias::default(),
         ));
 
         // Fill target (2 active flows).
@@ -635,6 +636,7 @@ async fn test_predictive_admit_on_defers_when_not_near_done() {
             Arc::new(BackendMonitor::empty()),
             PriorityPolicy::default(),
             Priorities::default(),
+            tinyllb::config::KvBias::default(),
         ));
 
         // Fill target (2 active flows).

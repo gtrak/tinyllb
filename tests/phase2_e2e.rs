@@ -140,6 +140,7 @@ fn build_e2e_proxy_with_config(
         Arc::new(BackendMonitor::empty()),
         PriorityPolicy::default(),
         Priorities::default(),
+        tinyllb::config::KvBias::default(),
     ));
 
     let state = gateway::AppState {

@@ -4,6 +4,7 @@ mod drr;
 mod fifo;
 mod flow_progress;
 mod kv_admission;
+mod kv_bias;
 pub mod lifecycle;
 mod priority;
 mod starvation;
@@ -14,12 +15,14 @@ pub use drr::DrrScheduler;
 pub use fifo::{make_ticket, FifoScheduler, QueueTicket};
 pub use flow_progress::FlowProgressTracker;
 pub use kv_admission::KvPolicy;
+pub use kv_bias::KvBiasHandle;
 pub use lifecycle::AccountingReport;
 pub use wfq::WfqScheduler;
 
 use crate::backend::BackendMonitor;
 use crate::config::Algorithm;
 use crate::config::CompletionBias;
+use crate::config::KvBias;
 use crate::config::KvPolicyConfig;
 use crate::config::Priorities;
 use crate::config::PriorityPolicy;
@@ -43,9 +46,12 @@ pub(crate) struct Policies {
     notify: Arc<tokio::sync::Notify>,
     /// Flow progress tracker for predictive admit.
     flow_progress: Arc<flow_progress::FlowProgressTracker>,
+    /// KV-cache-aware selection bias handle.
+    kv_bias: Arc<kv_bias::KvBiasHandle>,
 }
 
 impl Policies {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         completion_bias: CompletionBias,
         max_active_flows: u32,
@@ -54,6 +60,8 @@ impl Policies {
         registry: Arc<FlowRegistry>,
         notify: Arc<tokio::sync::Notify>,
         flow_progress: Arc<flow_progress::FlowProgressTracker>,
+        kv_bias: KvBias,
+        monitor: Arc<BackendMonitor>,
     ) -> Self {
         let gate = completion_bias::CompletionBiasGate::new(
             completion_bias.enabled,
@@ -66,11 +74,13 @@ impl Policies {
             starvation_timeout,
             flow_progress.clone(),
         );
+        let kv_bias_handle = kv_bias::KvBiasHandle::new(kv_bias, monitor, flow_progress.clone());
         Self {
             completion_bias: Arc::new(gate),
             starvation_timeout,
             notify,
             flow_progress,
+            kv_bias: Arc::new(kv_bias_handle),
         }
     }
 }
@@ -126,6 +136,7 @@ impl Scheduler {
         monitor: Arc<BackendMonitor>,
         priority_policy: PriorityPolicy,
         priorities: Priorities,
+        kv_bias: KvBias,
     ) -> Self {
         let notify = Arc::new(tokio::sync::Notify::new());
         let flow_progress = Arc::new(flow_progress::FlowProgressTracker::new());
@@ -137,6 +148,8 @@ impl Scheduler {
             registry.clone(),
             notify.clone(),
             flow_progress.clone(),
+            kv_bias,
+            monitor.clone(),
         );
 
         let kv_policy = Arc::new(KvPolicy::new(
@@ -239,6 +252,7 @@ impl Scheduler {
             monitor,
             PriorityPolicy::default(),
             Priorities::default(),
+            KvBias::default(),
         )
     }
 

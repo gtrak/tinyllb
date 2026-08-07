@@ -52,6 +52,7 @@ async fn test_priority_higher_prio_selected_first() {
             Arc::new(BackendMonitor::empty()),
             PriorityPolicy::default(),
             Priorities::default(),
+            tinyllb::config::KvBias::default(),
         ));
 
         // Register flows with different priorities.
@@ -143,6 +144,7 @@ async fn test_priority_tiebreak_by_wfq_ratio() {
             Arc::new(BackendMonitor::empty()),
             PriorityPolicy::default(),
             Priorities::default(),
+            tinyllb::config::KvBias::default(),
         ));
 
         // All flows equal priority, equal weight → tiebreak by enqueue order.
@@ -234,6 +236,7 @@ async fn test_starvation_force_admit_after_timeout() {
             Arc::new(BackendMonitor::empty()),
             PriorityPolicy::default(),
             Priorities::default(),
+            tinyllb::config::KvBias::default(),
         ));
 
         // Flow A: holder
@@ -319,6 +322,7 @@ async fn test_completion_bias_blocks_new_flow() {
             Arc::new(BackendMonitor::empty()),
             PriorityPolicy::default(),
             Priorities::default(),
+            tinyllb::config::KvBias::default(),
         ));
 
         // Fill 2 slots with A and B.
@@ -392,6 +396,7 @@ async fn test_completion_bias_allows_active_flow_requests() {
             Arc::new(BackendMonitor::empty()),
             PriorityPolicy::default(),
             Priorities::default(),
+            tinyllb::config::KvBias::default(),
         ));
 
         // A gets admitted. active=1, target=1.
@@ -447,6 +452,7 @@ async fn test_combined_starvation_overrides_completion_bias() {
             Arc::new(BackendMonitor::empty()),
             PriorityPolicy::default(),
             Priorities::default(),
+            tinyllb::config::KvBias::default(),
         ));
 
         // Fill 2 slots with A and B.
@@ -522,6 +528,7 @@ async fn test_priority_drr_higher_prio_selected_first() {
             Arc::new(BackendMonitor::empty()),
             PriorityPolicy::default(),
             Priorities::default(),
+            tinyllb::config::KvBias::default(),
         ));
 
         registry.register(FlowRegistration {
@@ -596,6 +603,7 @@ async fn test_starvation_drr_force_admit() {
             Arc::new(BackendMonitor::empty()),
             PriorityPolicy::default(),
             Priorities::default(),
+            tinyllb::config::KvBias::default(),
         ));
 
         registry.register(FlowRegistration {
