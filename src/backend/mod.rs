@@ -245,11 +245,15 @@ impl BackendMonitor {
                 Ok(response) => match response.text().await {
                     Ok(body) => {
                         let result = parse_snapshot(&body);
-                        // Update the watch channel.
-                        let _ = tx.send(result.snapshot.clone());
-                        // Update Prometheus gauges.
-                        metrics.vllm_kv_cache_usage.set(result.snapshot.kv_usage);
-                        metrics.vllm_kv_cache_free.set(result.snapshot.kv_free);
+                        // Only update if the KV usage metric was actually
+                        // present. An empty/partial scrape (e.g. only
+                        // python_gc_* lines) returns defaults — writing those
+                        // would overwrite the last good reading with zeros.
+                        if result.found_usage {
+                            let _ = tx.send(result.snapshot.clone());
+                            metrics.vllm_kv_cache_usage.set(result.snapshot.kv_usage);
+                            metrics.vllm_kv_cache_free.set(result.snapshot.kv_free);
+                        }
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "failed to read /metrics body");

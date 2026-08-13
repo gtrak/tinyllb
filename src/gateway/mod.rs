@@ -50,9 +50,30 @@ pub fn create_router() -> Router<AppState> {
 }
 
 /// Build the reqwest HTTP client with sensible defaults.
+///
+/// A `pool_idle_timeout` of 30s evicts pooled connections before they go stale
+/// behind proxies (e.g. pasta) that silently drop idle TCP. `tcp_keepalive`
+/// keeps live connections probed. Without these, long-running instances
+/// accumulate dead pooled connections that add latency or cause failures.
 pub fn build_client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
+        .pool_idle_timeout(std::time::Duration::from_secs(30))
+        .tcp_keepalive(std::time::Duration::from_secs(30))
         .build()
         .expect("reqwest client should build with default TLS")
+}
+
+/// Build a short-timeout reqwest client for backend `/metrics` polling.
+///
+/// The BackendMonitor polls every second; a hung scrape should fail fast
+/// (not hold the watch channel's last snapshot for minutes). This client
+/// uses a 3s timeout so the monitor always reflects recent state.
+pub fn build_monitor_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .pool_idle_timeout(std::time::Duration::from_secs(10))
+        .tcp_keepalive(std::time::Duration::from_secs(10))
+        .build()
+        .expect("reqwest monitor client should build")
 }

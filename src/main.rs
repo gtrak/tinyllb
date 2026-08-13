@@ -89,10 +89,11 @@ async fn main() {
     // observability regardless of whether KV admission policy is enabled.
     // The KvPolicy itself short-circuits to Accept when disabled.
     let client = gateway::build_client();
+    let monitor_client = gateway::build_monitor_client();
     let (monitor, monitor_task) = tinyllb::backend::BackendMonitor::new(
         &cfg.backend,
         metrics.clone(),
-        client.clone(),
+        monitor_client,
     );
     if let Some(task) = monitor_task {
         tokio::spawn(task);
