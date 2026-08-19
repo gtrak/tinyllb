@@ -8,7 +8,6 @@ mod kv_bias;
 pub mod lifecycle;
 mod priority;
 mod starvation;
-mod wfq;
 
 pub use backpressure::{fail_fast_retry_after, mode_label, BackpressureRejected};
 pub use drr::DrrScheduler;
@@ -17,7 +16,6 @@ pub use flow_progress::FlowProgressTracker;
 pub use kv_admission::KvPolicy;
 pub use kv_bias::KvBiasHandle;
 pub use lifecycle::AccountingReport;
-pub use wfq::WfqScheduler;
 
 use crate::backend::BackendMonitor;
 use crate::config::Algorithm;
@@ -88,11 +86,10 @@ impl Policies {
 /// Internal enum for the scheduler algorithm implementation.
 enum SchedulerImpl {
     Fifo(FifoScheduler),
-    Wfq(WfqScheduler),
     Drr(DrrScheduler),
 }
 
-/// Unified scheduler type that dispatches to FIFO, WFQ, or DRR based on config.
+/// Unified scheduler type that dispatches to FIFO or DRR based on config.
 ///
 /// Wraps a shared `KvPolicy` gate that runs before the flow scheduler,
 /// enabling KV-cache-aware admission decisions.
@@ -164,7 +161,6 @@ impl Scheduler {
 
         let algorithm_label = match algorithm {
             Algorithm::Fifo => "fifo",
-            Algorithm::Wfq => "wfq",
             Algorithm::Drr => "drr",
         };
 
@@ -177,17 +173,6 @@ impl Scheduler {
                 max_queue_depth,
                 max_wait,
                 retry_after_base,
-                policies,
-            )),
-            Algorithm::Wfq => SchedulerImpl::Wfq(WfqScheduler::new_with_policies(
-                max_active_flows,
-                metrics.clone(),
-                registry.clone(),
-                backpressure_mode,
-                max_queue_depth,
-                max_wait,
-                retry_after_base,
-                starvation_timeout,
                 policies,
             )),
             Algorithm::Drr => SchedulerImpl::Drr(DrrScheduler::new_with_policies(
@@ -327,7 +312,6 @@ impl Scheduler {
         self.kv_policy.check().await?;
         let result = match &self.inner {
             SchedulerImpl::Fifo(s) => s.admit(flow_id, work_unit).await,
-            SchedulerImpl::Wfq(s) => s.admit(flow_id, work_unit).await,
             SchedulerImpl::Drr(s) => s.admit(flow_id, work_unit).await,
         };
 
@@ -362,7 +346,6 @@ impl Scheduler {
     pub fn queue_depth(&self) -> u32 {
         let inner_depth = match &self.inner {
             SchedulerImpl::Fifo(s) => s.queue_depth(),
-            SchedulerImpl::Wfq(s) => s.queue_depth(),
             SchedulerImpl::Drr(s) => s.queue_depth(),
         };
         inner_depth + self.kv_policy.delayed_count()
@@ -375,7 +358,6 @@ impl Scheduler {
     pub fn queue_snapshot(&self) -> crate::flow::QueueSnapshot {
         let inner_snapshot = match &self.inner {
             SchedulerImpl::Fifo(s) => s.queue_snapshot(),
-            SchedulerImpl::Wfq(s) => s.queue_snapshot(),
             SchedulerImpl::Drr(s) => s.queue_snapshot(),
         };
         // Add delayed count to the waiting total.
@@ -387,22 +369,20 @@ impl Scheduler {
         }
     }
 
-    /// Return the total service_done for the given flow (WFQ only).
-    /// For FIFO this always returns 0.0.
-    pub fn service_done(&self, flow_id: &crate::flow::FlowId) -> f64 {
+    /// Return the total service_done for the given flow.
+    /// Always returns 0.0 (no remaining scheduler tracks per-flow service).
+    pub fn service_done(&self, _flow_id: &crate::flow::FlowId) -> f64 {
         match &self.inner {
             SchedulerImpl::Fifo(_) => 0.0,
-            SchedulerImpl::Wfq(s) => s.service_done(flow_id),
             SchedulerImpl::Drr(_) => 0.0,
         }
     }
 
     /// Return the current credit for the given flow (DRR only).
-    /// For FIFO and WFQ this always returns 0.
+    /// For FIFO this always returns 0.
     pub fn credit(&self, flow_id: &crate::flow::FlowId) -> i64 {
         match &self.inner {
             SchedulerImpl::Fifo(_) => 0,
-            SchedulerImpl::Wfq(_) => 0,
             SchedulerImpl::Drr(s) => s.credit(flow_id),
         }
     }
@@ -410,11 +390,10 @@ impl Scheduler {
     /// Report accounting for a completed or cancelled request.
     ///
     /// DRR adjusts per-flow credit based on actual delivered tokens.
-    /// FIFO and WFQ are no-ops (they don't use per-request credit).
+    /// FIFO is a no-op (it doesn't use per-request credit).
     pub fn report_accounting(&self, flow_id: &crate::flow::FlowId, report: AccountingReport) {
         match &self.inner {
             SchedulerImpl::Fifo(_) => {}
-            SchedulerImpl::Wfq(_) => {}
             SchedulerImpl::Drr(s) => s.report_accounting(flow_id, report),
         }
     }

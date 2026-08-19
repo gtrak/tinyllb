@@ -1,8 +1,7 @@
 //! Priority-aware flow selection helpers.
 //!
 //! Among eligible waiting flows, the one with the highest `priority` value is
-//! preferred.  Ties are broken by the base algorithm's rule (min ratio for WFQ,
-//! RR order for DRR).
+//! preferred.  Ties are broken by the base algorithm's rule (RR order for DRR).
 //!
 //! This module provides the core priority selection logic used by each
 //! scheduler's `try_select` to integrate priority without duplicating code.
@@ -20,7 +19,6 @@ pub struct FlowCandidate {
     /// When this flow was enqueued (for FIFO tie-breaking).
     pub enqueued_at: Instant,
     /// Base algorithm tiebreak value (lower = preferred).
-    /// For WFQ this is the `service_done / weight` ratio.
     /// For DRR this is the round-robin cursor index.
     pub base_score: f64,
     /// KV-cache footprint for KV-aware selection bias (delivered tokens).

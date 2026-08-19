@@ -121,9 +121,8 @@ fn remove_from_queue(queue: &Mutex<VecDeque<FlowId>>, flow_id: &FlowId) {
 /// RAII ticket returned by `Scheduler::admit`.
 ///
 /// When dropped, it:
-/// 1. Releases the admission slot (semaphore permit for FIFO, internal counter for WFQ).
+/// 1. Releases the admission slot.
 /// 2. Decrements `llm_active_flows`.
-/// 3. Reports service_done for WFQ.
 ///
 /// This guarantees slot release on **all** exit paths: success, error,
 /// panic (Drop runs on unwind), and client disconnect (future handler drops).
@@ -131,7 +130,6 @@ pub struct QueueTicket {
     /// The flow ID associated with this ticket.
     pub flow_id: FlowId,
     /// Work unit (estimated max_tokens) for this request.
-    /// Used by WFQ to track service_done on completion.
     pub work_unit: f64,
     /// Combined drop handler: releases the permit and reports completion.
     /// Wrapped in Option so it can be taken() in Drop (FnOnce can only be
@@ -465,7 +463,7 @@ impl FifoScheduler {
 impl QueueTicket {
     /// Disarm this ticket so its drop handler does NOT run on Drop.
     ///
-    /// Used by the WFQ admission loop when the oneshot send fails: the receiver
+    /// Used by the admission loop when the oneshot send fails: the receiver
     /// is gone (timeout or abort), so we must prevent the drop handler from
     /// decrementing `active_flows`, crediting `service_done`, and releasing the
     /// permit. The caller is responsible for releasing the permit exactly once.
@@ -493,8 +491,7 @@ fn record_wait_and_active(scheduler: &FifoScheduler, enter: Instant) {
 /// Construct a `QueueTicket` from a flow ID, work unit, and a drop handler closure.
 ///
 /// The `drop_handler` closure is called on drop to release the permit
-/// and report completion. For FIFO this releases the semaphore permit;
-/// for WFQ it decrements the internal permit counter and increments service_done.
+/// and report completion. For FIFO this releases the semaphore permit.
 pub fn make_ticket(
     flow_id: FlowId,
     work_unit: f64,

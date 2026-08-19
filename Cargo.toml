@@ -33,9 +33,5 @@ name = "throughput"
 harness = false
 
 [[bench]]
-name = "fairness"
-harness = false
-
-[[bench]]
 name = "completion_bias"
 harness = false

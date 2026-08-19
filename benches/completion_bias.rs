@@ -107,6 +107,7 @@ fn build_proxy_app(
         priorities: Priorities::default(),
         request_timeout: None,
         retry_policy: tinyllb::config::RetryPolicy::default(),
+        stall_rx: tinyllb::backend::BackendMonitor::empty().stall_receiver(),
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));

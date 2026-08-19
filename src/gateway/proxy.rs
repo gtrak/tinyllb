@@ -127,7 +127,7 @@ fn inject_include_usage(body: &Bytes) -> Option<Bytes> {
     Some(serde_json::to_vec(&value).ok()?.into())
 }
 
-/// Extract `max_tokens` from the request body for WFQ work unit tracking.
+/// Extract `max_tokens` from the request body for work unit tracking.
 /// Falls back to a default of 1024 if `max_tokens` is absent or unparseable.
 fn extract_max_tokens(body: &Bytes) -> f64 {
     if body.is_empty() {
@@ -299,7 +299,7 @@ pub async fn proxy_handler(
     span.record("flow_id", flow_id.to_string());
     span.record("stream", wants_streaming);
 
-    // Extract max_tokens from the request body for WFQ work unit tracking.
+    // Extract max_tokens from the request body for work unit tracking.
     let work_unit = extract_max_tokens(&body_bytes);
 
     // Detect turn boundary before body_bytes is moved into the request builder.

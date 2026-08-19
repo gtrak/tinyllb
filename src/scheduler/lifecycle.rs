@@ -206,7 +206,7 @@ impl Drop for LifecycleGuard {
 
 /// Accounting report sent to the scheduler on request completion/cancel.
 ///
-/// DRR uses this to adjust per-flow credit. FIFO/WFQ ignore it.
+/// DRR uses this to adjust per-flow credit. FIFO ignores it.
 pub enum AccountingReport {
     /// Request completed: restore the difference between estimated and actual.
     Completed {

@@ -12,10 +12,10 @@
 //! is accounting-only and is not reset (it accumulates debits from
 //! selections and restores from cancels/completions).
 //!
-//! Architecture mirrors WFQ:
-//! - Same `Pending`, `SharedState`, admission loop, RAII guard, backpressure,
+//! Core architecture:
+//! - `Pending`, `SharedState`, admission loop, RAII guard, backpressure,
 //!   queue_snapshot, ticket/disarm pattern.
-//! - Selection differs: DRR round-robin cursor with credit bookkeeping.
+//! - Selection: DRR round-robin cursor with credit bookkeeping.
 //!
 //! Priority & starvation: `try_select` checks for starved flows first
 //! (force-select), then picks the highest-priority eligible flow.
@@ -44,7 +44,7 @@ struct Pending {
     /// Sender half of the oneshot channel. The admission loop sends the ticket
     /// through this when the request is selected.
     tx: tokio::sync::oneshot::Sender<QueueTicket>,
-    /// When this request was enqueued (kept for architectural symmetry with WFQ).
+    /// When this request was enqueued.
     _enqueued_at: Instant,
     /// Work unit (max_tokens estimate) for this request.
     work_unit: f64,

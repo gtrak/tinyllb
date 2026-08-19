@@ -347,7 +347,6 @@ impl Default for CompletionBias {
 #[serde(rename_all = "lowercase")]
 pub enum Algorithm {
     Fifo,
-    Wfq,
     #[default]
     Drr,
 }

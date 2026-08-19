@@ -1,7 +1,6 @@
 //! Phase 2 end-to-end integration tests (issue 14).
 //!
 //! Full-stack tests proving the agent-scheduling goals (PRD §G2, §G3):
-//! - Weighted fairness: WFQ distributes throughput proportional to weights.
 //! - No starvation: starvation_timeout force-admits neglected flows.
 //! - Completion bias: new flows gated until active drops below target.
 //! - GET /queue correctness: queue endpoint reflects real state mid-run.
@@ -25,7 +24,6 @@ use tinyllb::backend::BackendMonitor;
 use tinyllb::config::{
     Algorithm, Backpressure, BackpressureMode, CompletionBias, KvPolicyConfig, Priorities, PriorityPolicy,
 };
-use tinyllb::flow::FlowId;
 use tinyllb::gateway;
 use tinyllb::metrics;
 use tinyllb::scheduler::Scheduler;
@@ -217,147 +215,6 @@ async fn collect_body_string(resp: Response<Body>) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// TEST 1: Weighted fairness — WFQ distributes throughput proportional to weights
-// ---------------------------------------------------------------------------
-
-/// Headline test: 3 flows with weights 10/5/1 under a budget-limited run.
-///
-/// DESIGN: Use max_active_flows=1 (single-slot scheduler) with WFQ.
-/// Send many requests from flows A (weight=10), B (weight=5), C (weight=1)
-/// simultaneously. Measure service_done at a fixed wall-clock budget
-/// (NOT waiting for all to complete). A should have accumulated
-/// significantly more service_done than C due to WFQ's
-/// min(service_done/weight) selection rule.
-///
-/// DISCRIMINATES: With WFQ, A (weight=10) is selected ~10x more often than C
-/// (weight=1) in the first admissions because A's ratio (sd/10) stays low
-/// much longer than C's ratio (sd/1). A FIFO scheduler would produce
-/// roughly equal service_done for all flows at the same deadline.
-/// The assertion service_done_A > 3 * service_done_C proves WFQ discriminates
-/// by weight (FIFO would give ~1:1 ratio).
-#[tokio::test]
-async fn test_weighted_fairness_wfq_ratio() {
-    tokio::time::timeout(Duration::from_secs(30), async {
-        // Short stub time (5ms) for rapid admission cycling.
-        // With max_active_flows=1 and 5ms stub, each cycle takes ~5ms.
-        let (stub_addr, _stub_state) = start_tracking_stub(5).await;
-        let backend_url = format!("http://{}/", stub_addr);
-
-        let backpressure = Backpressure {
-            mode: BackpressureMode::Blocking,
-            max_queue_depth: 200,
-            max_wait: Duration::from_secs(60),
-            retry_after_base: Duration::from_secs(1),
-        };
-
-        // max_active_flows=1: only one request active at a time.
-        // This creates a genuine admission-order competition.
-        let (app, m, scheduler) = build_e2e_proxy_with_config(
-            &backend_url,
-            Algorithm::Wfq,
-            1,
-            backpressure,
-            Duration::from_secs(300), // starvation disabled for fairness test
-            CompletionBias {
-                enabled: false,
-                target_active_flows: 0,
-                predictive_admit: false,
-            },
-        );
-
-        // Register flows with weights 10, 5, 1.
-        register_flow(app.clone(), "A".into(), 10.0, 50).await;
-        register_flow(app.clone(), "B".into(), 5.0, 50).await;
-        register_flow(app.clone(), "C".into(), 1.0, 50).await;
-
-        // Send requests from each flow simultaneously.
-        let body = r#"{"model":"test","messages":[{"role":"user","content":"hi"}]}"#.to_string();
-
-        let mut handles = Vec::new();
-
-        // 15 requests per flow. With max_active=1 and 5ms stub,
-        // each cycle takes ~5ms. Budget is 200ms → ~40 cycles.
-        // WFQ should select A ~10x more than C in those cycles.
-        for _ in 0..15 {
-            let a = app.clone();
-            let b = body.clone();
-            handles.push(tokio::spawn(async move {
-                let status = send_request(a, "A".into(), b).await;
-                assert_eq!(status, 200);
-            }));
-        }
-        for _ in 0..15 {
-            let a = app.clone();
-            let b = body.clone();
-            handles.push(tokio::spawn(async move {
-                let status = send_request(a, "B".into(), b).await;
-                assert_eq!(status, 200);
-            }));
-        }
-        for _ in 0..15 {
-            let a = app.clone();
-            let b = body.clone();
-            handles.push(tokio::spawn(async move {
-                let status = send_request(a, "C".into(), b).await;
-                assert_eq!(status, 200);
-            }));
-        }
-
-        // Budget-limited measurement: don't wait for all to complete.
-        // Sample service_done at a fixed deadline.
-        let budget = Duration::from_millis(200);
-        tokio::time::sleep(budget).await;
-
-        // Read service_done for each flow at budget deadline.
-        let sd_a = scheduler.service_done(&FlowId::new("A"));
-        let _sd_b = scheduler.service_done(&FlowId::new("B"));
-        let sd_c = scheduler.service_done(&FlowId::new("C"));
-
-        // KEY DISCRIMINATOR: Under WFQ with weights 10:5:1, flow A should
-        // have accumulated significantly more service_done than flow C
-        // at the same deadline.  A FIFO scheduler would produce roughly
-        // equal service_done for all flows at the same deadline.
-        //
-        // With weight ratio 10:1, A's ratio (sd/10) stays low for
-        // ~10x longer than C's ratio (sd/1), so WFQ selects A
-        // ~10x more often.  We assert A > 3x C to account for variance.
-        assert!(
-            sd_a > sd_c,
-            "flow A should have more service_done than C at budget deadline: A={} C={}",
-            sd_a,
-            sd_c
-        );
-
-        // Stronger: A should have substantially more than C (at least 3x).
-        // This is the WFQ discrimination. A FIFO scheduler would give
-        // sd_a ≈ sd_c (ratio ~1:1).
-        assert!(
-            sd_a >= 3.0 * sd_c,
-            "WFQ should give A ≥ 3x more service than C: A={} C={} ratio={:.1}\n\
-             With weight 10:1, WFQ should favor A heavily.\n\
-             FIFO would produce ratio ≈ 1:1.",
-            sd_a,
-            sd_c,
-            sd_a / sd_c.max(1.0)
-        );
-
-        // Wait for remaining requests to complete.
-        for h in handles {
-            let _ = tokio::time::timeout(Duration::from_secs(5), h).await;
-        }
-
-        // All active flows should be done.
-        assert_eq!(
-            m.active_flows.get(),
-            0.0,
-            "active flows should be 0 after completion"
-        );
-    })
-    .await
-    .expect("test should complete within timeout");
-}
-
-// ---------------------------------------------------------------------------
 // TEST 2: No starvation — interactive flow completes within starvation_timeout
 // ---------------------------------------------------------------------------
 
@@ -398,7 +255,7 @@ async fn test_no_starvation_interactive_completes() {
 
         let (app, m, _scheduler) = build_e2e_proxy_with_config(
             &backend_url,
-            Algorithm::Wfq,
+            Algorithm::Drr,
             2, // 2 slots — background fills both
             backpressure,
             starvation_timeout,
