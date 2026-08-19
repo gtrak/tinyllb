@@ -43,6 +43,7 @@ fn build_proxy_app_with_retry(
         backpressure: tinyllb::config::Backpressure::default(),
         priorities: tinyllb::config::Priorities::default(),
         request_timeout: None,
+        stall_rx: tinyllb::backend::BackendMonitor::empty().stall_receiver(),
         context: None,
         retry_policy,
     };
@@ -71,6 +72,13 @@ async fn collect_body_bytes(resp: Response<Body>) -> Bytes {
     axum::body::to_bytes(resp.into_body(), 1024 * 1024)
         .await
         .unwrap()
+}
+
+/// Collect body bytes from a response that may terminate with a stream
+/// error (abrupt body termination). Returns the bytes received before the
+/// error, if any.
+async fn try_collect_body_bytes(resp: Response<Body>) -> Result<Bytes, axum::Error> {
+    axum::body::to_bytes(resp.into_body(), 1024 * 1024).await
 }
 
 // ---------------------------------------------------------------------------
@@ -324,7 +332,14 @@ async fn finish_reason_length_no_retry() {
     let body_bytes = collect_body_bytes(resp).await;
     let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     assert_eq!(response_json["choices"][0]["finish_reason"], "length");
-    assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    // finish_reason "length" with no content/tool_calls is degenerate
+    // (token-capped mid-thinking): retried up to max_retries (2), then
+    // fail-open forwards the last response.
+    assert_eq!(
+        call_count.load(Ordering::SeqCst),
+        3,
+        "length finish should trigger retries (initial + 2), then fail-open"
+    );
 }
 
 /// Test: finish_reason "tool_calls" with tool_calls present does NOT trigger retry.
@@ -1458,22 +1473,16 @@ async fn streaming_retry_http_failure_fail_open() {
         .unwrap();
 
     assert_eq!(resp.status(), 200);
-    let body_bytes = collect_body_bytes(resp).await;
-
-    let body_str = String::from_utf8_lossy(&body_bytes);
-
-    // Client received the reasoning from call 1 but no terminal/[DONE].
+    // The body terminates with an error (abrupt termination) rather than a
+    // clean close: a stream that ends without an accepted terminal frame
+    // must surface as a transport failure so clients auto-retry.
+    // (Note: frames forwarded before the error do reach a streaming client,
+    // but to_bytes discards partial data on error, so they can't be
+    // asserted here.)
+    let body_result = try_collect_body_bytes(resp).await;
     assert!(
-        body_str.contains("thinking..."),
-        "client should receive reasoning forwarded before retry"
-    );
-    assert!(
-        !body_str.contains("finish_reason"),
-        "no finish_reason frame should appear (stream ended on retry failure)"
-    );
-    assert!(
-        !body_str.contains("[DONE]"),
-        "no [DONE] should appear (stream ended on retry failure)"
+        body_result.is_err(),
+        "body should terminate with an error (no terminal frame accepted)"
     );
 
     // Backend called twice (initial + failed retry).

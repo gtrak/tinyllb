@@ -66,6 +66,7 @@ async fn kv_admission_accept_below_threshold() {
         kv_usage: 0.3,
         kv_free: 0.7,
         preemptions: 0,
+    ..Default::default()
     });
     let monitor = Arc::new(BackendMonitor::from_receiver(rx));
     let _tx = tx; // keep sender alive
@@ -97,6 +98,7 @@ async fn kv_admission_delay_until_drop() {
         kv_usage: 0.85,
         kv_free: 0.15,
         preemptions: 0,
+    ..Default::default()
     });
     let monitor = Arc::new(BackendMonitor::from_receiver(rx));
 
@@ -115,6 +117,7 @@ async fn kv_admission_delay_until_drop() {
         kv_usage: 0.5,
         kv_free: 0.5,
         preemptions: 0,
+    ..Default::default()
     });
 
     let ticket = tokio::time::timeout(Duration::from_secs(5), admit_task)
@@ -131,6 +134,7 @@ async fn kv_admission_reject_above_threshold() {
         kv_usage: 0.96,
         kv_free: 0.04,
         preemptions: 5,
+    ..Default::default()
     });
     let monitor = Arc::new(BackendMonitor::from_receiver(rx));
     let _tx = tx;
@@ -165,6 +169,7 @@ async fn kv_admission_disabled_always_accepts() {
         kv_usage: 0.99,
         kv_free: 0.01,
         preemptions: 100,
+    ..Default::default()
     });
     let monitor = Arc::new(BackendMonitor::from_receiver(rx));
     let _tx = tx;
@@ -205,6 +210,7 @@ async fn kv_admission_decision_counter_increments() {
         kv_usage: 0.3,
         kv_free: 0.7,
         preemptions: 0,
+    ..Default::default()
     });
     let monitor = Arc::new(BackendMonitor::from_receiver(rx));
 
@@ -240,6 +246,7 @@ async fn kv_admission_decision_counter_increments() {
         kv_usage: 0.96,
         kv_free: 0.04,
         preemptions: 0,
+    ..Default::default()
     });
 
     // 1 reject
@@ -251,6 +258,7 @@ async fn kv_admission_decision_counter_increments() {
         kv_usage: 0.0,
         kv_free: 1.0,
         preemptions: 0,
+    ..Default::default()
     });
 
     // 1 more accept
@@ -281,6 +289,7 @@ async fn kv_admission_delay_to_accept_transition() {
         kv_usage: 0.0,
         kv_free: 1.0,
         preemptions: 0,
+    ..Default::default()
     });
     let monitor = Arc::new(BackendMonitor::from_receiver(rx));
 
@@ -316,6 +325,7 @@ async fn kv_admission_delay_to_accept_transition() {
         kv_usage: 0.85,
         kv_free: 0.15,
         preemptions: 0,
+    ..Default::default()
     });
 
     // Start a request that will delay.
@@ -329,6 +339,7 @@ async fn kv_admission_delay_to_accept_transition() {
         kv_usage: 0.3,
         kv_free: 0.7,
         preemptions: 0,
+    ..Default::default()
     });
 
     let ticket = tokio::time::timeout(Duration::from_secs(5), admit_task)
@@ -373,6 +384,7 @@ async fn kv_admission_hybrid_delay_timeout_rejected() {
         kv_usage: 0.85,
         kv_free: 0.15,
         preemptions: 0,
+    ..Default::default()
     });
     let monitor = Arc::new(BackendMonitor::from_receiver(_rx));
     let _tx = tx; // keep sender alive — usage never drops, simulating stuck KV
@@ -427,6 +439,7 @@ async fn kv_admission_delayed_visible_in_queue_depth() {
         kv_usage: 0.85,
         kv_free: 0.15,
         preemptions: 0,
+    ..Default::default()
     });
     let monitor = Arc::new(BackendMonitor::from_receiver(rx));
 
@@ -487,6 +500,7 @@ async fn kv_admission_delayed_visible_in_queue_depth() {
         kv_usage: 0.3,
         kv_free: 0.7,
         preemptions: 0,
+    ..Default::default()
     });
 
     // Wait for the task to complete.

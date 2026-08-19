@@ -241,6 +241,7 @@ fn build_proxy_with_fifo(backend_url: &str) -> (Router, Arc<metrics::Metrics>) {
         backpressure: Backpressure::default(),
         priorities: Priorities::default(),
         request_timeout: None,
+        stall_rx: tinyllb::backend::BackendMonitor::empty().stall_receiver(),
         context: None,
         retry_policy: tinyllb::config::RetryPolicy::default(),
     };
@@ -288,6 +289,7 @@ fn build_proxy_with_drr(backend_url: &str) -> (Router, Arc<metrics::Metrics>, Ar
         backpressure: Backpressure::default(),
         priorities: Priorities::default(),
         request_timeout: None,
+        stall_rx: tinyllb::backend::BackendMonitor::empty().stall_receiver(),
         context: None,
         retry_policy: tinyllb::config::RetryPolicy::default(),
     };
@@ -756,6 +758,7 @@ fn build_proxy_with_drr_and_timeout(
         backpressure: Backpressure::default(),
         priorities: Priorities::default(),
         request_timeout: Some(timeout),
+        stall_rx: tinyllb::backend::BackendMonitor::empty().stall_receiver(),
         context: None,
         retry_policy: tinyllb::config::RetryPolicy::default(),
     };

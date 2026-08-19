@@ -54,6 +54,12 @@ pub struct Metrics {
     pub vllm_kv_cache_usage: prometheus::Gauge,
     /// KV cache free percentage reported by vLLM backend.
     pub vllm_kv_cache_free: prometheus::Gauge,
+    /// 1 while the inference watchdog considers the backend deadlocked.
+    pub llm_backend_stalled: prometheus::Gauge,
+    /// Backend inference stalls detected by the watchdog.
+    pub backend_stall_events_total: prometheus::Counter,
+    /// Stream retries issued after backend stream EOF/abort without a terminal frame.
+    pub stream_eof_retries_total: prometheus::Counter,
     /// KV admission decisions: accept, delay, reject.
     pub kv_admission_decisions_total: CounterVec,
 
@@ -203,6 +209,24 @@ impl Metrics {
             "KV cache free percentage reported by vLLM backend",
         )
         .expect("vllm_kv_cache_free should be creatable");
+
+        let llm_backend_stalled = prometheus::Gauge::new(
+            "llm_backend_stalled",
+            "1 while the inference watchdog considers the backend deadlocked (busy, no token progress)",
+        )
+        .expect("llm_backend_stalled should be creatable");
+
+        let backend_stall_events_total = prometheus::Counter::new(
+            "tinyllb_backend_stall_events_total",
+            "Backend inference stalls detected by the watchdog",
+        )
+        .expect("backend_stall_events_total should be creatable");
+
+        let stream_eof_retries_total = prometheus::Counter::new(
+            "tinyllb_stream_eof_retries_total",
+            "Stream retries issued after backend stream EOF/abort without a terminal frame",
+        )
+        .expect("stream_eof_retries_total should be creatable");
 
         let kv_admission_decisions_total = CounterVec::new(
             Opts::new(
@@ -384,8 +408,17 @@ impl Metrics {
             .register(Box::new(vllm_kv_cache_free.clone()))
             .expect("vllm_kv_cache_free registration should succeed");
         registry
+            .register(Box::new(llm_backend_stalled.clone()))
+            .expect("llm_backend_stalled registration should succeed");
+        registry
+            .register(Box::new(backend_stall_events_total.clone()))
+            .expect("backend_stall_events_total registration should succeed");
+        registry
+            .register(Box::new(stream_eof_retries_total.clone()))
+            .expect("stream_eof_retries_total registration should succeed");
+        registry
             .register(Box::new(kv_admission_decisions_total.clone()))
-        .expect("llm_kv_admission_decisions_total registration should succeed");
+            .expect("llm_kv_admission_decisions_total registration should succeed");
 
         // Register context compression metrics.
         registry
@@ -457,6 +490,9 @@ impl Metrics {
             request_events_total,
             vllm_kv_cache_usage,
             vllm_kv_cache_free,
+            llm_backend_stalled,
+            backend_stall_events_total,
+            stream_eof_retries_total,
             kv_admission_decisions_total,
             context_compression_events_total,
             context_compression_errors_total,

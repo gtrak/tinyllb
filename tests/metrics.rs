@@ -40,6 +40,7 @@ fn build_test_app(backend_url: &str) -> (Router, Arc<tinyllb::metrics::Metrics>)
         backpressure: tinyllb::config::Backpressure::default(),
         priorities: tinyllb::config::Priorities::default(),
         request_timeout: None,
+        stall_rx: tinyllb::backend::BackendMonitor::empty().stall_receiver(),
         context: None,
         retry_policy: tinyllb::config::RetryPolicy::default(),
     };
@@ -391,6 +392,7 @@ async fn test_streaming_tokens_count_completion_not_total() {
         backpressure: tinyllb::config::Backpressure::default(),
         priorities: tinyllb::config::Priorities::default(),
         request_timeout: None,
+        stall_rx: tinyllb::backend::BackendMonitor::empty().stall_receiver(),
         context: None,
         retry_policy: tinyllb::config::RetryPolicy::default(),
     };
@@ -467,6 +469,7 @@ async fn test_active_gauge_during_streaming() {
         backpressure: tinyllb::config::Backpressure::default(),
         priorities: tinyllb::config::Priorities::default(),
         request_timeout: None,
+        stall_rx: tinyllb::backend::BackendMonitor::empty().stall_receiver(),
         context: None,
         retry_policy: tinyllb::config::RetryPolicy::default(),
     };
@@ -552,6 +555,7 @@ async fn test_nonstream_tokens_count_completion_not_total() {
         backpressure: tinyllb::config::Backpressure::default(),
         priorities: tinyllb::config::Priorities::default(),
         request_timeout: None,
+        stall_rx: tinyllb::backend::BackendMonitor::empty().stall_receiver(),
         context: None,
         retry_policy: tinyllb::config::RetryPolicy::default(),
     };
@@ -628,6 +632,7 @@ async fn test_active_gauge_during_nonstreaming() {
         backpressure: tinyllb::config::Backpressure::default(),
         priorities: tinyllb::config::Priorities::default(),
         request_timeout: None,
+        stall_rx: tinyllb::backend::BackendMonitor::empty().stall_receiver(),
         context: None,
         retry_policy: tinyllb::config::RetryPolicy::default(),
     };

@@ -156,6 +156,7 @@ async fn main() {
         backpressure: cfg.backpressure,
         priorities: cfg.priorities.clone(),
         request_timeout: cfg.request_timeout,
+        stall_rx: monitor.stall_receiver(),
         context: context_state,
         retry_policy: cfg.retry_policy.clone(),
     };
@@ -204,6 +205,7 @@ mod tests {
             backpressure: config::Backpressure::default(),
             priorities: config::Priorities::default(),
             request_timeout: None,
+            stall_rx: tinyllb::backend::BackendMonitor::empty().stall_receiver(),
             context: None,
             retry_policy: config::RetryPolicy::default(),
         };

@@ -474,6 +474,7 @@ async fn test_wfq_e2e_weight_ratio() {
         backpressure: tinyllb::config::Backpressure::default(),
         priorities: tinyllb::config::Priorities::default(),
         request_timeout: None,
+        stall_rx: tinyllb::backend::BackendMonitor::empty().stall_receiver(),
         context: None,
         retry_policy: tinyllb::config::RetryPolicy::default(),
     };

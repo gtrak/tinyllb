@@ -29,6 +29,10 @@ pub struct AppState {
     /// Optional request-level timeout. When set, cancels forwarded requests
     /// (both streaming and non-streaming) that exceed this duration.
     pub request_timeout: Option<std::time::Duration>,
+    /// Inference-watchdog signal from the backend monitor (`true` = engine
+    /// deadlocked). Streaming handlers select on this to abort in-flight
+    /// backend streams and retry on fresh connections.
+    pub stall_rx: tokio::sync::watch::Receiver<bool>,
     pub context: Option<Arc<ContextState>>,
     pub retry_policy: RetryPolicy,
 }

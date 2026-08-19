@@ -48,6 +48,14 @@ pub struct Backend {
     pub url: Url,
     #[serde(default, with = "loader::humantime_serde")]
     pub metrics_interval: Duration,
+    /// Inference-stall watchdog window. If the backend reports queued or
+    /// running requests but neither `prompt_tokens_total` nor
+    /// `generation_tokens_total` advances for this long, the engine is
+    /// considered deadlocked and in-flight streams are aborted (dropping
+    /// their backend connections) so they retry on fresh connections.
+    /// 0 disables the watchdog.
+    #[serde(default = "Backend::default_stall_timeout", with = "loader::humantime_serde")]
+    pub stall_timeout: Duration,
 }
 
 impl Default for Backend {
@@ -55,6 +63,7 @@ impl Default for Backend {
         Self {
             url: Url::parse("http://localhost:8000").unwrap(),
             metrics_interval: Self::default_metrics_interval(),
+            stall_timeout: Self::default_stall_timeout(),
         }
     }
 }
@@ -62,6 +71,10 @@ impl Default for Backend {
 impl Backend {
     fn default_metrics_interval() -> Duration {
         Duration::from_secs(1)
+    }
+
+    fn default_stall_timeout() -> Duration {
+        Duration::from_secs(30)
     }
 }
 

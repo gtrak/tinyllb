@@ -601,8 +601,8 @@ pub async fn proxy_handler(
     // admission slot stays held until the stream completes (or the client
     // disconnects), not when the handler returns.
     if is_sse || wants_streaming {
-        // Compute deadline for stream timeout (if configured).
-        let deadline = state.request_timeout.map(|t| std::time::Instant::now() + t);
+        // Per-attempt stream timeout is computed inside spawn_retry_stream
+        // from state.request_timeout.
         // --- Premature-stop retry gate (streaming path) ---
         let is_chat = original_path == "/v1/chat/completions";
         let is_internal_compressor = headers
@@ -620,7 +620,6 @@ pub async fn proxy_handler(
                 forwarded_body,
                 _ticket,
                 lifecycle,
-                deadline,
             );
             let mut resp = Response::new(body);
             *resp.status_mut() = status;
@@ -635,6 +634,9 @@ pub async fn proxy_handler(
         }
 
         // Existing MetricStream path (retry disabled / not applicable) — unchanged
+        let deadline = state
+            .request_timeout
+            .map(|t| std::time::Instant::now() + t);
         let stream = MetricStream::new(
             response,
             state.metrics.clone(),

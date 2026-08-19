@@ -42,6 +42,20 @@ pub const METRIC_KV_FREE: &str = "vllm:gpu_cache_free_perc";
 // Note: the actual vLLM metric is `vllm:num_preemptions_total`, not `vllm:num_preemption`.
 pub const METRIC_NUM_PREEMPTION: &str = "vllm:num_preemptions_total";
 
+// `vllm:generation_tokens_total` — cumulative decode tokens. Frozen value
+// while requests are queued/running is the inference-deadlock signal.
+pub const METRIC_GENERATION_TOKENS: &str = "vllm:generation_tokens_total";
+
+// `vllm:prompt_tokens_total` — cumulative prefill tokens. Also tracked so
+// all-prefill workloads are not misclassified as stalled.
+pub const METRIC_PROMPT_TOKENS: &str = "vllm:prompt_tokens_total";
+
+// `vllm:num_requests_running` — requests currently scheduled on the engine.
+pub const METRIC_REQUESTS_RUNNING: &str = "vllm:num_requests_running";
+
+// `vllm:num_requests_waiting` — requests queued for the engine.
+pub const METRIC_REQUESTS_WAITING: &str = "vllm:num_requests_waiting";
+
 // ---------------------------------------------------------------------------
 // Typed snapshot
 // ---------------------------------------------------------------------------
@@ -55,6 +69,14 @@ pub struct BackendSnapshot {
     pub kv_free: f64,
     /// Cumulative preemptions (best-effort; 0 if unavailable).
     pub preemptions: u64,
+    /// Cumulative decode tokens (0 if unavailable).
+    pub generation_tokens: f64,
+    /// Cumulative prefill tokens (0 if unavailable).
+    pub prompt_tokens: f64,
+    /// Requests currently running on the engine (0 if unavailable).
+    pub requests_running: f64,
+    /// Requests waiting for the engine (0 if unavailable).
+    pub requests_waiting: f64,
 }
 
 impl Default for BackendSnapshot {
@@ -63,7 +85,18 @@ impl Default for BackendSnapshot {
             kv_usage: 0.0,
             kv_free: 1.0,
             preemptions: 0,
+            generation_tokens: 0.0,
+            prompt_tokens: 0.0,
+            requests_running: 0.0,
+            requests_waiting: 0.0,
         }
+    }
+}
+
+impl BackendSnapshot {
+    /// Whether the engine has queued or running work.
+    pub fn is_busy(&self) -> bool {
+        self.requests_running > 0.0 || self.requests_waiting > 0.0
     }
 }
 
@@ -140,6 +173,18 @@ pub fn parse_snapshot(body: &str) -> ParseSnapshotResult {
                 METRIC_NUM_PREEMPTION => {
                     snapshot.preemptions = value as u64;
                 }
+                METRIC_GENERATION_TOKENS => {
+                    snapshot.generation_tokens = value;
+                }
+                METRIC_PROMPT_TOKENS => {
+                    snapshot.prompt_tokens = value;
+                }
+                METRIC_REQUESTS_RUNNING => {
+                    snapshot.requests_running = value;
+                }
+                METRIC_REQUESTS_WAITING => {
+                    snapshot.requests_waiting = value;
+                }
                 _ => {}
             }
         }
@@ -166,11 +211,18 @@ pub fn parse_snapshot(body: &str) -> ParseSnapshotResult {
 /// Uses `tokio::sync::watch` for single-writer / multi-reader semantics.
 /// The sender is consumed by the monitor loop; receivers are cloned for
 /// the scheduler, tests, etc.
+///
+/// Also exposes a stall channel: `stall_receiver()` yields `true` while
+/// the inference watchdog considers the engine deadlocked (busy but no
+/// token progress for `stall_timeout`). Stream handlers select on this
+/// signal to abort in-flight backend streams.
 // @lat: [[backend#Backend KV-Cache Monitor]]
 #[derive(Clone)]
 pub struct BackendMonitor {
     /// Receiver half for reading the latest snapshot.
     receiver: tokio::sync::watch::Receiver<BackendSnapshot>,
+    /// Receiver half for the stall signal (`true` = deadlocked).
+    stall_receiver: tokio::sync::watch::Receiver<bool>,
 }
 
 impl BackendMonitor {
@@ -180,7 +232,11 @@ impl BackendMonitor {
     /// a live backend monitor.  Always returns `Accept` decisions.
     pub fn empty() -> Self {
         let (_, rx) = tokio::sync::watch::channel(BackendSnapshot::default());
-        Self { receiver: rx }
+        let (_, stall_rx) = tokio::sync::watch::channel(false);
+        Self {
+            receiver: rx,
+            stall_receiver: stall_rx,
+        }
     }
 
     /// Create a monitor from an existing watch receiver.
@@ -188,7 +244,20 @@ impl BackendMonitor {
     /// Used by tests that want to inject specific snapshots via the
     /// corresponding sender.
     pub fn from_receiver(receiver: tokio::sync::watch::Receiver<BackendSnapshot>) -> Self {
-        Self { receiver }
+        let (_, stall_rx) = tokio::sync::watch::channel(false);
+        Self {
+            receiver,
+            stall_receiver: stall_rx,
+        }
+    }
+
+    /// Clone the stall signal receiver.
+    ///
+    /// `true` means the engine is considered deadlocked (busy with no
+    /// token progress). Streams select on `changed()` of this receiver
+    /// and check `borrow()` to abort and retry.
+    pub fn stall_receiver(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.stall_receiver.clone()
     }
 
     /// Create a new monitor with an initial default snapshot.
@@ -200,6 +269,7 @@ impl BackendMonitor {
         client: reqwest::Client,
     ) -> (Self, Option<tokio::task::JoinHandle<()>>) {
         let (tx, rx) = tokio::sync::watch::channel(BackendSnapshot::default());
+        let (stall_tx, stall_rx) = tokio::sync::watch::channel(false);
 
         let handle = if config.metrics_interval.is_zero() {
             // Interval of 0 means "disabled" — no background task.
@@ -209,13 +279,18 @@ impl BackendMonitor {
             Some(tokio::spawn(Self::poll_loop(
                 url,
                 config.metrics_interval,
+                config.stall_timeout,
                 tx,
+                stall_tx,
                 client,
                 metrics,
             )))
         };
 
-        let monitor = Self { receiver: rx };
+        let monitor = Self {
+            receiver: rx,
+            stall_receiver: stall_rx,
+        };
 
         (monitor, handle)
     }
@@ -231,12 +306,22 @@ impl BackendMonitor {
     async fn poll_loop(
         url: Url,
         interval: Duration,
+        stall_timeout: Duration,
         tx: tokio::sync::watch::Sender<BackendSnapshot>,
+        stall_tx: tokio::sync::watch::Sender<bool>,
         client: reqwest::Client,
         metrics: Arc<Metrics>,
     ) {
         let mut interval_timer = tokio::time::interval(interval);
         interval_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        // Inference-watchdog state (see vllm-watchdog.sh lineage): the
+        // engine is deadlocked when requests are queued/running but
+        // neither the prefill nor decode token counters advance.
+        let mut last_prompt_tokens: f64 = 0.0;
+        let mut last_generation_tokens: f64 = 0.0;
+        let mut last_progress = std::time::Instant::now();
+        let mut stalled = false;
 
         loop {
             interval_timer.tick().await;
@@ -250,9 +335,39 @@ impl BackendMonitor {
                         // python_gc_* lines) returns defaults — writing those
                         // would overwrite the last good reading with zeros.
                         if result.found_usage {
-                            let _ = tx.send(result.snapshot.clone());
-                            metrics.vllm_kv_cache_usage.set(result.snapshot.kv_usage);
-                            metrics.vllm_kv_cache_free.set(result.snapshot.kv_free);
+                            let snapshot = result.snapshot.clone();
+                            let _ = tx.send(snapshot.clone());
+                            metrics.vllm_kv_cache_usage.set(snapshot.kv_usage);
+                            metrics.vllm_kv_cache_free.set(snapshot.kv_free);
+
+                            // --- Inference stall watchdog ---
+                            if !stall_timeout.is_zero() {
+                                let progressed = snapshot.prompt_tokens != last_prompt_tokens
+                                    || snapshot.generation_tokens != last_generation_tokens;
+                                if progressed {
+                                    last_progress = std::time::Instant::now();
+                                }
+                                last_prompt_tokens = snapshot.prompt_tokens;
+                                last_generation_tokens = snapshot.generation_tokens;
+
+                                let now_stalled = snapshot.is_busy()
+                                    && last_progress.elapsed() >= stall_timeout;
+                                if now_stalled && !stalled {
+                                    tracing::warn!(
+                                        stall_secs = last_progress.elapsed().as_secs(),
+                                        running = snapshot.requests_running,
+                                        waiting = snapshot.requests_waiting,
+                                        "backend inference stall detected — aborting in-flight streams"
+                                    );
+                                    metrics.backend_stall_events_total.inc();
+                                    stalled = true;
+                                } else if !now_stalled && stalled {
+                                    tracing::info!("backend inference stall cleared");
+                                    stalled = false;
+                                }
+                                metrics.llm_backend_stalled.set(if stalled { 1.0 } else { 0.0 });
+                                let _ = stall_tx.send(stalled);
+                            }
                         }
                     }
                     Err(e) => {

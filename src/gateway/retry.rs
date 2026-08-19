@@ -19,9 +19,9 @@ pub fn is_premature_stop(body: &Value) -> bool {
         _ => return false,
     };
 
-    // finish_reason must be exactly the string "stop".
+    // finish_reason must be "stop" or "length" (both degenerate when empty).
     match first.get("finish_reason") {
-        Some(Value::String(s)) if s == "stop" => {}
+        Some(Value::String(s)) if s == "stop" || s == "length" => {}
         _ => return false,
     };
 
@@ -378,7 +378,10 @@ mod tests {
     }
 
     #[test]
-    fn not_premature_with_finish_reason_length() {
+    fn premature_with_finish_reason_length() {
+        // finish_reason "length" with no content/tool_calls is degenerate
+        // (token-capped mid-thinking): treated as premature so the retry
+        // path fires with a bumped temperature.
         let body = serde_json::json!({
             "choices": [{
                 "finish_reason": "length",
@@ -388,7 +391,7 @@ mod tests {
                 }
             }]
         });
-        assert!(!is_premature_stop(&body));
+        assert!(is_premature_stop(&body));
     }
 
     #[test]
