@@ -10,7 +10,6 @@ use url::Url;
 
 use self::proxy::proxy_handler;
 use crate::config::{Backpressure, Priorities, RetryPolicy};
-use crate::context::ContextState;
 use crate::flow::FlowRegistry;
 use crate::metrics::Metrics;
 use crate::scheduler::Scheduler;
@@ -33,7 +32,6 @@ pub struct AppState {
     /// deadlocked). Streaming handlers select on this to abort in-flight
     /// backend streams and retry on fresh connections.
     pub stall_rx: tokio::sync::watch::Receiver<bool>,
-    pub context: Option<Arc<ContextState>>,
     pub retry_policy: RetryPolicy,
 }
 

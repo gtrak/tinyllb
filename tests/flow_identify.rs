@@ -47,7 +47,6 @@ fn build_flow_test_app_with_handles(
         priorities: tinyllb::config::Priorities::default(),
         request_timeout: None,
         stall_rx: tinyllb::backend::BackendMonitor::empty().stall_receiver(),
-        context: None,
         retry_policy: tinyllb::config::RetryPolicy::default(),
     };
 

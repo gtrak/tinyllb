@@ -63,26 +63,6 @@ pub struct Metrics {
     /// KV admission decisions: accept, delay, reject.
     pub kv_admission_decisions_total: CounterVec,
 
-    // -- Context compression family --
-    /// Total compression events (successful summaries produced).
-    pub context_compression_events_total: prometheus::Counter,
-    /// Total compression failures (sidecar errors, store errors).
-    pub context_compression_errors_total: prometheus::Counter,
-    /// Total tokens saved by compression (raw - summary).
-    pub context_compression_tokens_saved_total: prometheus::Counter,
-    /// Latency of sidecar summarization requests (seconds).
-    pub context_compression_sidecar_latency: prometheus::Histogram,
-    /// Turns compressed per compression event.
-    pub context_compression_turns_per_event: prometheus::Histogram,
-    /// Estimated forwarded tokens for the flow. Labeled by flow_id.
-    pub context_estimated_tokens: GaugeVec,
-    /// Estimated raw (uncompressed) tokens for the flow. Labeled by flow_id.
-    pub context_raw_estimated_tokens: GaugeVec,
-    /// Number of compressed segments for the flow. Labeled by flow_id.
-    pub context_compressed_segments: GaugeVec,
-    /// Pending compression jobs in the channel.
-    pub context_compression_queue_depth: prometheus::Gauge,
-
     // -- Priority heuristic family (plan 004) --
     /// Per-flow numeric priority value (100/50/10). Labeled by `flow_id`.
     pub flow_priority_class: GaugeVec,
@@ -237,77 +217,6 @@ impl Metrics {
         )
         .expect("llm_kv_admission_decisions_total should be creatable");
 
-        // -- Context compression family --
-        let context_compression_events_total = prometheus::Counter::new(
-            "tinyllb_context_compression_events_total",
-            "Total compression events (successful summaries produced)",
-        )
-        .expect("context_compression_events_total should be creatable");
-
-        let context_compression_errors_total = prometheus::Counter::new(
-            "tinyllb_context_compression_errors_total",
-            "Total compression failures (sidecar errors, store errors)",
-        )
-        .expect("context_compression_errors_total should be creatable");
-
-        let context_compression_tokens_saved_total = prometheus::Counter::new(
-            "tinyllb_context_compression_tokens_saved_total",
-            "Total tokens saved by compression (raw minus summary)",
-        )
-        .expect("context_compression_tokens_saved_total should be creatable");
-
-        let context_compression_sidecar_latency = prometheus::Histogram::with_opts(
-            HistogramOpts::new(
-                "tinyllb_context_compression_sidecar_latency_seconds",
-                "Latency of sidecar summarization requests (seconds)",
-            )
-            .buckets(vec![0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0]),
-        )
-        .expect("context_compression_sidecar_latency should be creatable");
-
-        let context_compression_turns_per_event = prometheus::Histogram::with_opts(
-            HistogramOpts::new(
-                "tinyllb_context_compression_turns_per_event",
-                "Turns compressed per compression event",
-            )
-            .buckets(vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0]),
-        )
-        .expect("context_compression_turns_per_event should be creatable");
-
-        let context_estimated_tokens = GaugeVec::new(
-            Opts::new(
-                "tinyllb_context_estimated_tokens",
-                "Estimated forwarded tokens for the flow (post-compression)",
-            ),
-            &["flow_id"],
-        )
-        .expect("context_estimated_tokens should be creatable");
-
-        let context_raw_estimated_tokens = GaugeVec::new(
-            Opts::new(
-                "tinyllb_context_raw_estimated_tokens",
-                "Estimated raw (uncompressed) tokens for the flow",
-            ),
-            &["flow_id"],
-        )
-        .expect("context_raw_estimated_tokens should be creatable");
-
-        let context_compressed_segments = GaugeVec::new(
-            Opts::new(
-                "tinyllb_context_compressed_segments",
-                "Number of compressed segments for the flow",
-            ),
-            &["flow_id"],
-        )
-        .expect("context_compressed_segments should be creatable");
-
-        let context_compression_queue_depth = prometheus::Gauge::new(
-            "tinyllb_context_compression_queue_depth",
-            "Pending compression jobs in the channel",
-        )
-        .expect("context_compression_queue_depth should be creatable");
-
-
         // -- Priority heuristic family (plan 004) --
         let flow_priority_class = GaugeVec::new(
             Opts::new(
@@ -420,35 +329,6 @@ impl Metrics {
             .register(Box::new(kv_admission_decisions_total.clone()))
             .expect("llm_kv_admission_decisions_total registration should succeed");
 
-        // Register context compression metrics.
-        registry
-            .register(Box::new(context_compression_events_total.clone()))
-            .expect("context_compression_events_total registration should succeed");
-        registry
-            .register(Box::new(context_compression_errors_total.clone()))
-            .expect("context_compression_errors_total registration should succeed");
-        registry
-            .register(Box::new(context_compression_tokens_saved_total.clone()))
-            .expect("context_compression_tokens_saved_total registration should succeed");
-        registry
-            .register(Box::new(context_compression_sidecar_latency.clone()))
-            .expect("context_compression_sidecar_latency registration should succeed");
-        registry
-            .register(Box::new(context_compression_turns_per_event.clone()))
-            .expect("context_compression_turns_per_event registration should succeed");
-        registry
-            .register(Box::new(context_estimated_tokens.clone()))
-            .expect("context_estimated_tokens registration should succeed");
-        registry
-            .register(Box::new(context_raw_estimated_tokens.clone()))
-            .expect("context_raw_estimated_tokens registration should succeed");
-        registry
-            .register(Box::new(context_compressed_segments.clone()))
-            .expect("context_compressed_segments registration should succeed");
-        registry
-            .register(Box::new(context_compression_queue_depth.clone()))
-            .expect("context_compression_queue_depth registration should succeed");
-
         // Register priority heuristic metrics.
         registry
             .register(Box::new(flow_priority_class.clone()))
@@ -494,15 +374,6 @@ impl Metrics {
             backend_stall_events_total,
             stream_eof_retries_total,
             kv_admission_decisions_total,
-            context_compression_events_total,
-            context_compression_errors_total,
-            context_compression_tokens_saved_total,
-            context_compression_sidecar_latency,
-            context_compression_turns_per_event,
-            context_estimated_tokens,
-            context_raw_estimated_tokens,
-            context_compressed_segments,
-            context_compression_queue_depth,
             flow_priority_class,
             flow_priority_source_total,
             flow_inter_request_seconds,
@@ -522,57 +393,6 @@ pub fn create_metrics() -> Arc<Metrics> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_context_metrics_registered() {
-        let metrics = Metrics::new();
-
-        // GaugeVecs only appear in gather after a gauge instance is created.
-        // Instantiate one gauge per GaugeVec to make them show up.
-        metrics.context_estimated_tokens.with_label_values(&["test"]).set(0.0);
-        metrics.context_raw_estimated_tokens.with_label_values(&["test"]).set(0.0);
-        metrics.context_compressed_segments.with_label_values(&["test"]).set(0.0);
-
-        let gathers = metrics.registry.gather();
-        let names: Vec<&str> = gathers.iter().map(|m| m.name()).collect();
-
-        assert!(
-            names.contains(&"tinyllb_context_compression_events_total"),
-            "context_compression_events_total should be registered"
-        );
-        assert!(
-            names.contains(&"tinyllb_context_compression_errors_total"),
-            "context_compression_errors_total should be registered"
-        );
-        assert!(
-            names.contains(&"tinyllb_context_compression_tokens_saved_total"),
-            "context_compression_tokens_saved_total should be registered"
-        );
-        assert!(
-            names.contains(&"tinyllb_context_compression_sidecar_latency_seconds"),
-            "context_compression_sidecar_latency should be registered"
-        );
-        assert!(
-            names.contains(&"tinyllb_context_compression_turns_per_event"),
-            "context_compression_turns_per_event should be registered"
-        );
-        assert!(
-            names.contains(&"tinyllb_context_estimated_tokens"),
-            "context_estimated_tokens should be registered"
-        );
-        assert!(
-            names.contains(&"tinyllb_context_raw_estimated_tokens"),
-            "context_raw_estimated_tokens should be registered"
-        );
-        assert!(
-            names.contains(&"tinyllb_context_compressed_segments"),
-            "context_compressed_segments should be registered"
-        );
-        assert!(
-            names.contains(&"tinyllb_context_compression_queue_depth"),
-            "context_compression_queue_depth should be registered"
-        );
-    }
 
     #[test]
     fn test_priority_metrics_registered() {

@@ -90,7 +90,6 @@ fn build_proxy_app(
         backpressure: tinyllb::config::Backpressure::default(),
         priorities: tinyllb::config::Priorities::default(),
         request_timeout: None,
-        context: None,
         retry_policy: tinyllb::config::RetryPolicy::default(),
     };
 

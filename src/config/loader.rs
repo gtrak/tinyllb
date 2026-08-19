@@ -83,18 +83,6 @@ pub fn load() -> anyhow::Result<Config> {
         .set_default("kv_policy.enabled", false)?
         .set_default("kv_policy.reject_threshold", 0.95f64)?
         .set_default("kv_policy.delay_threshold", 0.80f64)?
-        .set_default("context_policy.enabled", false)?
-        .set_default("context_policy.compress_threshold", 100_000u64)?
-        .set_default("context_policy.head_keep_turns", 3u64)?
-        .set_default("context_policy.live_keep_turns", 6u64)?
-        .set_default("context_policy.compress_chunk_turns", 8u64)?
-        .set_default("context_policy.summary_max_tokens", 2048u64)?
-        .set_default(
-            "context_policy.store_path",
-            "~/.local/share/tinyllb/transcripts.db",
-        )?
-        .set_default("context_policy.sidecar_request_timeout", "60s")?
-        .set_default("context_policy.compression_retries", 3u64)?
         .set_default("retry_policy.enabled", false)?
         .set_default("retry_policy.max_retries", 2u64)?
         .set_default("retry_policy.temperature_step", 0.3f64)?
@@ -113,43 +101,10 @@ pub fn load() -> anyhow::Result<Config> {
         .add_source(config::Environment::with_prefix("TINYLLB").separator("__"));
 
     let settings = builder.build()?;
-    let mut cfg: Config = settings.try_deserialize()?;
+    let cfg: Config = settings.try_deserialize()?;
 
-    expand_paths(&mut cfg);
     validate(&cfg)?;
     Ok(cfg)
-}
-
-/// Expands a leading `~` in a path to the user's home directory.
-///
-/// Handles both `~` alone and `~/rest`.  If `$HOME` is unset, the path is
-/// returned unchanged.
-fn expand_tilde(path: &str) -> String {
-    if !path.starts_with('~') {
-        return path.to_string();
-    }
-    let home = match std::env::var("HOME") {
-        Ok(h) => h,
-        Err(_) => return path.to_string(),
-    };
-    if path == "~" {
-        home
-    } else if let Some(rest) = path.strip_prefix("~/") {
-        format!("{home}/{rest}")
-    } else {
-        path.to_string()
-    }
-}
-
-/// Expands `~` in configurable filesystem paths to the home directory.
-fn expand_paths(cfg: &mut Config) {
-    cfg.context_policy.store_path = expand_tilde(&cfg.context_policy.store_path);
-    if let Some(ref mut p) = cfg.context_policy.tokenizer_path {
-        *p = expand_tilde(p);
-    }
-    if let Some(ref mut p) = cfg.context_policy.prompt_template_path {
-        *p = expand_tilde(p);
-    }
 }
 
 fn validate(cfg: &Config) -> anyhow::Result<()> {
@@ -217,43 +172,6 @@ fn validate(cfg: &Config) -> anyhow::Result<()> {
             ));
         }
     }
-
-    // Validate context-compression policy.
-    let cp = &cfg.context_policy;
-    if cp.enabled {
-        if cp.compress_threshold == 0 {
-            return Err(anyhow::anyhow!(
-                "context_policy.compress_threshold must be > 0"
-            ));
-        }
-        if cp.head_keep_turns == 0 {
-            return Err(anyhow::anyhow!("context_policy.head_keep_turns must be > 0"));
-        }
-        if cp.live_keep_turns == 0 {
-            return Err(anyhow::anyhow!(
-                "context_policy.live_keep_turns must be > 0"
-            ));
-        }
-        if cp.compress_chunk_turns == 0 {
-            return Err(anyhow::anyhow!(
-                "context_policy.compress_chunk_turns must be > 0"
-            ));
-        }
-        if cp.summary_max_tokens == 0 {
-            return Err(anyhow::anyhow!(
-                "context_policy.summary_max_tokens must be > 0"
-            ));
-        }
-        if cp.store_path.is_empty() {
-            return Err(anyhow::anyhow!("context_policy.store_path must be non-empty"));
-        }
-        if cp.compression_retries == 0 {
-            return Err(anyhow::anyhow!(
-                "context_policy.compression_retries must be > 0"
-            ));
-        }
-    }
-
 
     // Validate retry policy constraints.
     let rp = &cfg.retry_policy;

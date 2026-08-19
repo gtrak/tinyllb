@@ -81,7 +81,6 @@ fn build_live_proxy(
         priorities: Priorities::default(),
         request_timeout: None,
         stall_rx: tinyllb::backend::BackendMonitor::empty().stall_receiver(),
-        context: None,
         retry_policy: tinyllb::config::RetryPolicy::default(),
     };
 

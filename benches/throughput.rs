@@ -91,7 +91,6 @@ fn build_proxy_app(backend_url: &str, max_active_flows: u32) -> (Router, Arc<met
         backpressure: Backpressure::default(),
         priorities: Priorities::default(),
         request_timeout: None,
-        context: None,
         retry_policy: tinyllb::config::RetryPolicy::default(),
     };
 

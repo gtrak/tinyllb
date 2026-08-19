@@ -118,35 +118,6 @@ async fn main() {
         cfg.scheduler.kv_bias.clone(),
     );
 
-    // Initialize context-compression state when enabled.
-    let context_state: Option<Arc<tinyllb::context::ContextState>> = if cfg.context_policy.enabled {
-        match async {
-            let (tx, rx) = tokio::sync::mpsc::channel::<tinyllb::context::CompressionJob>(64);
-            let state = Arc::new(tinyllb::context::ContextState::new(cfg.context_policy.clone(), tx, metrics.clone()).await?);
-            let n = state.find_flows_needing_compression().await?;
-            if n > 0 { tracing::info!(n, "enqueued compression jobs for over-threshold flows at startup"); }
-            // Spawn the compression worker (consumes jobs from the channel).
-            // Sidecar requests go directly to the vLLM backend (not through the
-            // proxy) to avoid self-referential HTTP.
-            let worker = tinyllb::context::compressor::CompressionWorker::new(
-                rx,
-                Arc::clone(&state),
-                cfg.backend.url.clone(),
-                client.clone(),
-            );
-            tokio::spawn(async move { worker.run().await });
-            anyhow::Ok(Some(state))
-        }.await {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!(error = %e, "failed to initialize context state, continuing without compression");
-                None
-            }
-        }
-    } else {
-        None
-    };
-
     let state = gateway::AppState {
         client,
         backend_url: Arc::new(cfg.backend.url),
@@ -157,7 +128,6 @@ async fn main() {
         priorities: cfg.priorities.clone(),
         request_timeout: cfg.request_timeout,
         stall_rx: monitor.stall_receiver(),
-        context: context_state,
         retry_policy: cfg.retry_policy.clone(),
     };
 
@@ -206,7 +176,6 @@ mod tests {
             priorities: config::Priorities::default(),
             request_timeout: None,
             stall_rx: tinyllb::backend::BackendMonitor::empty().stall_receiver(),
-            context: None,
             retry_policy: config::RetryPolicy::default(),
         };
         let app = create_router(state);

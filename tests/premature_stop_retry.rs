@@ -44,7 +44,6 @@ fn build_proxy_app_with_retry(
         priorities: tinyllb::config::Priorities::default(),
         request_timeout: None,
         stall_rx: tinyllb::backend::BackendMonitor::empty().stall_receiver(),
-        context: None,
         retry_policy,
     };
 

@@ -185,7 +185,6 @@ fn build_proxy_app(backend_url: &str) -> Router {
         priorities: tinyllb::config::Priorities::default(),
         request_timeout: None,
         stall_rx: tinyllb::backend::BackendMonitor::empty().stall_receiver(),
-        context: None,
         retry_policy: tinyllb::config::RetryPolicy::default(),
     };
 
@@ -616,7 +615,6 @@ fn build_proxy_app_with_max(
         priorities: tinyllb::config::Priorities::default(),
         request_timeout: None,
         stall_rx: tinyllb::backend::BackendMonitor::empty().stall_receiver(),
-        context: None,
         retry_policy: tinyllb::config::RetryPolicy::default(),
     };
 
@@ -765,7 +763,6 @@ async fn test_client_disconnect_releases_permit() {
         priorities: tinyllb::config::Priorities::default(),
         request_timeout: None,
         stall_rx: tinyllb::backend::BackendMonitor::empty().stall_receiver(),
-        context: None,
         retry_policy: tinyllb::config::RetryPolicy::default(),
     };
 
