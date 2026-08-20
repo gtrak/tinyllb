@@ -342,6 +342,13 @@ impl BackendMonitor {
 
                             // --- Inference stall watchdog ---
                             if !stall_timeout.is_zero() {
+                                // Reset last_progress when the backend is idle — no stall is
+                                // possible without running requests, and a new request starting
+                                // after an idle gap should not inherit the gap as a "stall".
+                                if !snapshot.is_busy() {
+                                    last_progress = std::time::Instant::now();
+                                }
+
                                 let progressed = snapshot.prompt_tokens != last_prompt_tokens
                                     || snapshot.generation_tokens != last_generation_tokens;
                                 if progressed {
