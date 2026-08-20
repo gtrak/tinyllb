@@ -3,7 +3,7 @@
 //! Among eligible waiting flows, the one with the highest `priority` value is
 //! preferred.  Ties are broken by the base algorithm's rule (RR order for DRR).
 //!
-//! This module provides the core priority selection logic used by each
+//! This module provides the core priority selection logic used by the DRR
 //! scheduler's `try_select` to integrate priority without duplicating code.
 
 use std::time::Instant;

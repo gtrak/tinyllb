@@ -8,6 +8,7 @@ use serde_json::Value;
 /// Returns `true` iff the response is a recognizable chat completion with
 /// `finish_reason == "stop"`, no content, and no tool calls — i.e. a
 /// degenerate turn that kills the agentic thread.
+// @lat: [[gateway#Premature-Stop Retry]]
 pub fn is_premature_stop(body: &Value) -> bool {
     let choices = match body.get("choices") {
         Some(Value::Array(arr)) if !arr.is_empty() => arr,

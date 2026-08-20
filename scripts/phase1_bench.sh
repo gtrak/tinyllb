@@ -115,7 +115,7 @@ each containing \`concurrency\` simultaneous clients. Waves complete
 sequentially (all clients in wave N finish before wave N+1 begins).
 Two scenarios: **direct** (clients → stub) and **proxy** (clients → proxy → stub).
 Tokens/sec computed as \`total_tokens / wall_time\`.
-The proxy uses \`max_active_flows=4\` with FIFO scheduling and blocking backpressure.
+The proxy uses \`max_active_flows=4\` with DRR scheduling and blocking backpressure.
 Warmup iterations (first 3 per benchmark function) are excluded from averages.
 
 ## Run Details

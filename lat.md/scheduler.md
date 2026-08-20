@@ -1,93 +1,89 @@
 # Scheduler Facade and Policy Selection
 
-The scheduler facade presents a single admission-control surface that hides algorithm-specific dispatch, enforcing a KV-cache gate before every admit attempt and aggregating queue metrics uniformly.
+The scheduler facade is the single admission-control entry point: it wraps the DRR flow scheduler with a shared KV-cache gate, a backend stall gate, and a turn-boundary priority heuristic.
 
 ## Purpose
 
-The scheduler facade guarantees that every admission attempt passes through a shared KV-cache gate before consulting the selected scheduling policy, and that all queue metrics uniformly account for requests delayed by that gate.
+The facade presents the admission contract and aggregated queue metrics while keeping cross-cutting admission concerns out of the DRR scheduler.
 
-- Provides a unified entry point regardless of which scheduling algorithm is configured.
-- Enforces a KV-cache admission gate before every admit attempt.
-- Ensures queue depth and snapshot metrics always include KV-delayed requests.
-- Exposes shared policy state — completion bias, starvation timeout, flow progress — to all algorithm variants.
-- Supports algorithm-specific accounting through a uniform query interface.
-- Runs a per-flow turn-boundary state machine on every admission that classifies flows as interactive (a turn-boundary idle followed by resumption) or agentic (continuous tool-call activity) and adjusts priority automatically.
+- Provides a unified admission entry point that returns a queue ticket or a backpressure rejection carrying a retry-after.
+- Runs the per-flow turn-boundary state machine (cadence registry) on every admission, classifying flows as interactive (turn-boundary idle) or agentic (continuous tool-call activity) and adjusting priority automatically.
+- Enforces a shared KV-cache admission gate (`KvPolicy`) before every admit to the DRR scheduler.
+- Rejects admissions with a fixed 429 + 5-second Retry-After while the backend stall signal is set.
+- Ensures queue depth and snapshot metrics always include requests delayed by the KV gate.
+- Re-exports `DrrScheduler`, `KvPolicy`, `KvBiasHandle`, `QueueTicket`, `make_ticket`, `FlowProgressTracker`, `AccountingReport`, and the backpressure helpers.
 
 ## Non-goals
 
-The facade deliberately does not implement scheduling logic or define policy parameters.
+The facade deliberately does not implement scheduling logic or define scheduling policy.
 
-- Does not implement any scheduling algorithm; dispatch is delegated to an algorithm-specific backend.
-- Does not decide admission policy; delegates to the configured scheduler and the KV gate.
-- Does not manage request lifecycle beyond admission and accounting report.
-- Does not define backpressure policy; delegates retry-after computation to the underlying scheduler.
+- Does not implement DRR selection, credit accounting, or backpressure modes; delegates to the wrapped `DrrScheduler`.
+- Does not decide KV admission policy; delegates to the shared `KvPolicy` gate.
+- Does not handle backend stalls beyond rejecting new admissions with a fixed retry-after.
+- Does not manage request lifecycle beyond admission and accounting reports.
 - Does not persist state; all metrics and accounting are ephemeral to the current instance.
 
 ## Interface
 
-The facade exposes public contract surfaces: admission, queue observation, flow accounting, shared state access, construction, re-exported types, and a lifecycle submodule.
+The facade exposes admission, queue observation, flow accounting, shared state access, reaping, construction, and re-exported types.
 
-**Admission.** A request to schedule a work unit for a flow. Accepts a flow identity and a work quantity; returns either a queue ticket confirming admission or a backpressure rejection carrying a retry-after duration. No admission succeeds without passing the KV-cache gate.
-Before the KV-cache gate, the facade records an arrival for the flow along with the `is_turn_boundary` signal and runs the turn-boundary state machine, which may adjust the flow's priority. Flows with explicit priority overrides (header or admin) are skipped by the state machine. See [[flow#Flow Registry and State]].
+**Admission.** `admit` (defaults `is_turn_boundary` to true) and `admit_with_turn_boundary` accept a flow identity and a work quantity; they return a queue ticket confirming admission or a backpressure rejection carrying a retry-after duration. Before the KV-cache gate, the facade records the arrival with the `is_turn_boundary` flag in the cadence registry and runs the turn-boundary state machine, which may adjust the flow's priority. Flows with an explicit priority override (header or admin) are skipped by the state machine. See [[flow#Flow Registry and State]]. After the KV gate, if the backend stall signal is set, the admission is rejected with a fixed 5-second retry-after; otherwise admission proceeds to the DRR scheduler.
 
-**Queue observation.** Two read-only surfaces for inspecting queue state. The depth query returns the total number of queued requests, including those delayed by the KV gate. The snapshot query returns counts of active flows, waiting requests, and total flow count.
+**Queue observation.** Two read-only surfaces for inspecting queue state. The depth query returns the DRR queue depth plus the number of requests delayed by the KV gate. The snapshot query returns the active-flow count, the waiting count (DRR-waiting plus KV-delayed), and the list of waiting flows.
 
-**Flow accounting.** Algorithm-specific per-flow queries. A service-total query returns cumulative service for a flow — meaningful only for work-tracking algorithms. A credit query returns the current credit balance — meaningful only for credit-based algorithms. An accounting report accepts a completed request's outcome and updates the flow's internal accounting, or silently no-ops for algorithms without accounting.
+**Flow accounting.** A credit query returns the flow's DRR credit balance. An accounting report passes a completed request's outcome to the DRR scheduler, which adjusts the flow's credit based on actual delivered tokens.
 
-**Shared state access.** Shared ownership of the flow progress tracker, available to all callers regardless of configured algorithm. The returned tracker reference grants shared access equivalent to the facade's own internal reference.
+**Shared state access.** The flow progress tracker reference is available to all callers; the returned reference grants shared access equivalent to the facade's own internal reference.
 
-**Construction.** Two construction paths exist. The full constructor accepts all policy parameters and produces an instance without failure. The defaults constructor accepts a reduced parameter set and fills remaining values with fixed defaults, including an empty backend monitor and a KV-cache configuration derived from type-level defaults.
+**Reaping.** Evicts idle flow-registry and cadence entries older than a given TTL; called periodically by the background reaper task to prevent unbounded registry growth.
 
-**Publicly re-exported types.** The module re-exports algorithm schedulers, policy types, admission artifacts, and helper functions. Callers may import these directly for use outside the facade, including instantiating algorithm backends that bypass the facade's KV gate and shared policy layer.
+**Construction.** Two construction paths exist. The full constructor accepts all policy parameters (backpressure mode, queue depth limit, wait time, starvation timeout, completion bias, KV policy config, backend monitor, priority policy, priorities, and KV bias) and produces an instance without failure. The defaults constructor fills remaining values with fixed defaults: a 300-second starvation timeout, type-level default completion bias, an empty backend monitor, a disabled KV policy config, and type-level default priority policy, priorities, and KV bias.
 
-**Public submodule.** The lifecycle submodule is publicly accessible, exposing request lifecycle types as a supplementary contract surface beyond the re-exported types.
+**Publicly re-exported types.** The module re-exports the DRR scheduler, KV gate and bias types, the queue ticket and its factory, the flow progress tracker, the accounting report, and the backpressure helpers. Callers may import these directly for use outside the facade; direct use bypasses the facade's KV gate, stall gate, and cadence heuristic. The `lifecycle` submodule is also publicly accessible.
 
 ## Invariants
 
-These statements hold regardless of which scheduling algorithm is configured or how the facade is reconstructed.
+These statements hold regardless of configuration or how the facade is reconstructed.
 
-**KV gate ordering.** The KV-cache admission gate always executes before the flow-scheduler consults its own policy. A KV-policy rejection prevents the flow-scheduler from seeing the request.
+**KV gate ordering.** The KV-cache admission gate always executes before the DRR scheduler on every admission attempt. A KV-policy rejection prevents the DRR scheduler from seeing the request.
 
-**Queue metric aggregation.** The reported queue depth always equals the sum of the flow-scheduler's queue depth and the number of requests currently delayed by the KV gate.
+**Stall gate ordering.** While the backend stall signal is set, new admissions are rejected with a 429 carrying a fixed 5-second retry-after; the KV gate and the DRR scheduler are not consulted.
 
-**Snapshot completeness.** The waiting count in any queue snapshot always includes both the flow-scheduler's waiting requests and the KV-delayed requests.
+**Queue metric aggregation.** The reported queue depth always equals the DRR scheduler's queue depth plus the number of requests currently delayed by the KV gate.
 
-**Algorithm-exhaustive dispatch.** Every public operation that delegates to the underlying scheduler covers all configured algorithm variants; no variant is left unhandled.
+**Snapshot completeness.** The waiting count in any queue snapshot always includes both the DRR scheduler's waiting requests and the KV-delayed requests.
 
-**Neutral accounting for non-applicable algorithms.** Querying service total on a non-work-tracking algorithm always yields zero. Querying credit on a non-credit algorithm always yields zero. Reporting accounting to a non-accounting algorithm has no observable effect.
-**Cadence heuristic ordering.** The turn-boundary state machine executes before the KV-cache gate on every admission. It records an arrival and the `is_turn_boundary` flag, then transitions the flow's state: a turn-boundary idle gap at or above `idle_gap_threshold` promotes to Interactive (priority 100); continuous non-turn-boundary arrivals increment a counter that demotes through AgenticSuspected (priority 50) to AgenticConfirmed (priority 10). Flows with an explicit priority override (header or admin pin) are never modified by the state machine. When the heuristic is disabled (`priority_policy.enabled = false`), no priority changes occur from the state machine.
+**Cadence heuristic ordering.** The turn-boundary state machine executes before the KV-cache gate on every admission. It records the arrival and the `is_turn_boundary` flag, then transitions the flow's state: a turn-boundary idle gap at or above `idle_gap_threshold` promotes to Interactive (interactive priority class); continuous non-turn-boundary arrivals increment a counter that demotes through AgenticSuspected (agent class) to AgenticConfirmed (background class). Flows with an explicit priority override (header or admin pin) are never modified by the state machine. When the heuristic is disabled (`priority_policy.enabled = false`), no priority changes occur from the state machine.
 
 ## Constraints
 
 These are limitations imposed by the design, not implementation accidents.
 
-**Single algorithm per instance.** An instance dispatches to exactly one scheduling algorithm, selected at construction time. The algorithm cannot change during the instance's lifetime.
+**Stall rejection is fixed.** The stall gate rejects with a fixed 5-second retry-after rather than a value computed from queue state.
 
-**Fixed defaults for backward-compatible construction.** The defaults constructor applies fixed values: starvation timeout at 300 seconds, completion bias at its type-level default, an empty backend monitor, and a KV-cache configuration derived from type-level defaults.
+**Fixed defaults for backward-compatible construction.** The defaults constructor applies fixed values: starvation timeout at 300 seconds, type-level default completion bias, an empty backend monitor, a disabled KV policy config, and type-level default priority policy, priorities, and KV bias.
 
 **Backpressure rejection carries retry information.** Every backpressure rejection includes a retry-after duration; the facade never rejects silently.
 
-**Configuration-driven admission.** Admission policy — including maximum active flows, queue depth limits, and wait timeouts — is entirely determined at construction. No runtime reconfiguration is exposed.
+**Configuration-driven admission.** Admission policy — including maximum active flows, queue depth limits, wait timeouts, and priority policy — is entirely determined at construction. No runtime reconfiguration is exposed.
 
-**Public algorithm types bypass the facade.** Re-exported algorithm scheduler types enable direct instantiation outside the facade. Callers using these types bypass the facade's KV gate and shared policy layer entirely.
-**Priority policy construction.** The full constructor accepts a `PriorityPolicy` and `Priorities` value; the defaults constructor uses type-level defaults (`PriorityPolicy::default()`, `Priorities::default()`). The priority policy cannot be changed at runtime.
+**Re-exported types bypass the facade.** Re-exported types enable direct use outside the facade (for example, constructing the DRR scheduler directly or building tickets with `make_ticket`); such use bypasses the facade's KV gate, stall gate, and cadence heuristic.
 
 ## Rationale
 
-The facade exists to make algorithm selection an operational concern rather than an architectural one.
+The facade keeps cross-cutting admission concerns — KV-cache pressure, backend stalls, and interactive-vs-agentic classification — at the boundary instead of inside the DRR scheduler.
 
-- Single facade: callers depend on admission and queue metrics, not on which algorithm handles dispatch. A facade isolates callers from algorithm churn.
 - KV gate before scheduling: KV-cache capacity is a hard resource limit. Checking it first avoids wasting scheduler state on requests that cannot be served regardless of policy.
-- Aggregated queue metrics: operators need a total picture of backlogged work. Splitting between scheduler-queued and KV-delayed would require callers to reconcile two sources.
-- Neutral accounting for irrelevant algorithms: exposing service and credit queries uniformly avoids caller-side branching on algorithm type. Algorithms that do not track accounting return neutral values instead of errors.
+- Stall gate: when the backend is stalled, an immediate 429 + Retry-After lets clients back off instead of being admitted and then aborted by the stall watchdog.
+- Cadence before the gate: every arrival updates the flow's classification state whether or not admission proceeds, so rejections at the KV gate do not stop the heuristic from learning.
+- Aggregated queue metrics: operators need a total picture of backlogged work. Splitting between DRR-queued and KV-delayed would require callers to reconcile two sources.
 - Default constructor for convenience: most deployments do not need custom starvation or KV policy. A defaults path reduces boilerplate for common configurations.
 
 ## Related
 
 See also these related concepts and source files.
-- [[scheduler#FIFO Queueing Discipline]] — FIFO scheduling algorithm
-- [[scheduler#Weighted Fair Queueing Discipline]] — Weighted-fair-queue scheduling algorithm
-- [[scheduler#Deficit Round Robin Discipline]] — Deficit-round-robin scheduling algorithm
+- [[scheduler#Deficit Round Robin Discipline]] — wrapped DRR scheduler
+- [[scheduler#Queue Ticket]] — RAII admission handle returned by admit
 - [[admission#KV-Cache-Aware Admission Gate]] — KV-cache admission gate policy
 - [[admission#Backpressure and Admission Rejection]] — Backpressure and retry-after computation
 - [[admission#Per-Flow Token Progress Tracking]] — Flow progress tracking
@@ -96,180 +92,10 @@ See also these related concepts and source files.
 - [[src/scheduler/backpressure.rs]] — Backpressure rejection and retry-after helpers
 - [[src/scheduler/kv_admission.rs]] — KV-cache admission gate
 - [[src/scheduler/flow_progress.rs]] — Flow progress tracker
-- [[src/scheduler/fifo.rs]] — FIFO scheduler implementation
-- [[src/scheduler/wfq.rs]] — WFQ scheduler implementation
 - [[src/scheduler/drr.rs]] — DRR scheduler implementation
 - [[src/scheduler/lifecycle.rs]] — Lifecycle types and accounting
 - [[src/flow/cadence.rs]] — turn-boundary state machine implementation
 - [[src/config/mod.rs#PriorityPolicy]] — priority policy configuration
-
-# FIFO Queueing Discipline
-
-The FIFO scheduler provides a concurrency-gated admission layer that bounds simultaneous active flows, manages request admission under a chosen backpressure policy, and guarantees that every admission slot is released on all exit paths.
-
-## Purpose
-
-The FIFO scheduler bounds concurrent active flows, tracks every admitted request for queue-depth and wait-time observability, and guarantees that each admission slot releases on all exit paths.
-
-- Concurrent active flows never exceed a configured maximum.
-- Every admitted request is tracked for queue depth and wait-time observability.
-- Admission slots are released on all exit paths, including client disconnect and abort.
-- A completion-bias gate may be evaluated before permit grants, depending on configuration.
-- No fairness guarantee beyond the maximum concurrency bound.
-
-## Non-goals
-
-The FIFO scheduler is a single-dimensional concurrency limiter, not a multi-criteria scheduler. It does not address load distribution, KV-cache pressure, per-flow priority, or starvation avoidance.
-
-- Prioritization or weighted allocation of admission slots ([[scheduler_policies#Priority-Aware Flow Selection]]).
-- Cache-aware admission decisions ([[admission#KV-Cache-Aware Admission Gate]]).
-- Multi-queue or weighted-fair scheduling ([[scheduler#Weighted Fair Queueing Discipline]], [[scheduler#Deficit Round Robin Discipline]]).
-- Starvation detection or mitigation ([[scheduler_policies#Starvation Protection]]).
-
-## Interface
-
-The scheduler exposes admission control, queue observation, and slot-holder contracts. Each surface defines preconditions on inputs, postconditions on outputs, and the failure modes a caller must handle.
-
-**Admission.** Accepts a flow identity and an estimated work unit; produces an admission slot or a rejection. The work unit is stored for interface compatibility but is not used by FIFO for admission decisions. The caller must hold an admission slot for the duration of a request; disposal of the slot releases the concurrency permit. Depth-based rejection occurs only in FailFast mode, when queue depth exceeds the configured limit. Hybrid mode performs only timeout-based rejection when the maximum-wait expires. Blocking mode never rejects. Rejections carry a `Retry-After` hint based on queue depth measured at the moment of rejection.
-
-**Queue Observation.** Reports the aggregate depth of waiting flows across all registered flows. Provides raw depth data to [[flow#Flow Registry and State]] for construction of per-flow queue-position snapshots.
-
-**Slot Holder.** The admission slot carries the flow identity and work-unit estimate for observability. Disposing the slot releases the concurrency permit, decrements the active-flows metric, decrements the per-flow active counter, and signals completion-bias waiters ([[scheduler_policies#Completion Bias Gate]]). A slot may be disarmed so that disposal becomes a no-op; disarming automatically releases the permit.
-
-**Ticket Factory.** `make_ticket` constructs a `QueueTicket` from a flow identity, work-unit estimate, and a drop handler closure. The closure defines the actions performed when the ticket is dropped. Used by all scheduler variants ([[scheduler#FIFO Queueing Discipline]], [[scheduler#Weighted Fair Queueing Discipline]], [[scheduler#Deficit Round Robin Discipline]]) for creating admission slots.
-
-**Construction.** Requires a maximum active-flows bound, a backpressure policy ([[admission#Backpressure and Admission Rejection]]), a queue-depth limit, and a wait-time limit. Scheduling policies ([[scheduler_policies#Request Lifecycle and Credit Restoration]]) may be supplied via the advanced constructor; the default constructor creates a disabled completion-bias gate. The configured maximum is fixed for the lifetime of the scheduler instance.
-
-## Invariants
-
-The scheduler maintains consistency between its internal concurrency bound, its observable queue metrics, and the lifecycle of admission slots.
-
-**Concurrency Bound.** The number of simultaneously active flows never exceeds the configured maximum. Each admission acquires exactly one permit; each slot disposal releases exactly one.
-
-**Queue Depth Consistency.** The reported queue depth equals the number of in-flight admission attempts (waiting for a permit, not yet admitted). Depth is incremented at entry to the admission path and decremented on admission, rejection, or cancellation.
-
-**Metrics Alignment.** The `llm_active_flows` gauge equals the number of held admission slots. The `llm_queue_depth` gauge per flow equals that flow's depth contribution within the aggregate counter. Wait-time metrics are measured from the moment a request enters the waiting queue until it is admitted or rejected.
-
-**FIFO Positioning.** Queue positions reflect creation order within each flow; positions are 1-indexed.
-
-**Completion-Bias Enforcement.** A completion-bias gate ([[scheduler_policies#Completion Bias Gate]]) is checked before every permit grant when enabled. The default constructor creates a disabled gate; callers must supply an enabled gate via the advanced constructor.
-
-## Constraints
-
-The scheduler operates within the boundaries of its concurrency model and backpressure configuration.
-
-**Backpressure Policy.** Exactly one backpressure mode (Blocking, FailFast, or Hybrid) is active per scheduler instance. Blocking mode may block indefinitely at both the completion-bias gate and the permit-wait. FailFast mode rejects immediately on queue-depth overflow; subsequent requests within depth limits proceed without timeout. Hybrid mode applies two sequential timeouts, each bounded by the configured maximum-wait: one for the completion-bias gate evaluation, one for the permit acquisition. Total worst-case wait can reach twice the configured timeout. Hybrid mode does not perform depth-based rejection.
-
-**Concurrency Bound.** The maximum active flows value is immutable after construction; it cannot be increased or decreased without creating a new scheduler instance.
-
-**Slot Release.** Disarming a slot automatically releases the concurrency permit; the caller does not retain permit-release responsibility after disarm. Double-release of a permit is prevented by the slot's internal guard.
-
-**Queue Depth Independence.** Queue depth and semaphore capacity are measured independently; a rejection may occur even when permits are available, because depth exceeds its configured limit.
-
-## Rationale
-
-The FIFO scheduler separates concurrency control from admission decisions, enabling callers to choose backpressure behavior without coupling it to the slot-release mechanism.
-
-- Concurrency gate: LLM inference is flow-intensive; bounding concurrent flows prevents resource saturation and ensures predictable queue behavior. A fixed concurrency cap provides a simple admission boundary that all scheduling algorithms share ([[scheduler#Scheduler Facade and Policy Selection]]).
-- RAII slot release: admission slots must be released on all exit paths (success, error, panic, client disconnect). RAII guarantees the release happens regardless of how the request ends, eliminating leak paths from error handling.
-- Automatic permit release on disarm: disarm is used when the receiver is gone (timeout, abort) and the ticket will never be explicitly disposed. Automatic release ensures the permit cannot leak in this path.
-- Optional completion-bias gate ([[scheduler_policies#Completion Bias Gate]]): favors admitting requests from flows that have recently completed work, reducing head-of-line blocking under contention. It is disabled by default as the scheduler can operate correctly without it.
-- Three backpressure modes ([[admission#Backpressure and Admission Rejection]]): different callers need different pressure strategies — Blocking for resilience, FailFast for depth-bounded rapid rejection, and Hybrid for bounded waiting with timeout.
-
-## Related
-
-See also these related concepts and source files.
-- [[scheduler#Scheduler Facade and Policy Selection]] — Scheduler facade that selects among scheduling algorithms
-- [[admission#Backpressure and Admission Rejection]] — Backpressure mode configuration and semantics
-- [[scheduler_policies#Completion Bias Gate]] — Completion-bias gate mechanism
-- [[flow#Flow Registry and State]] — Flow tracking and snapshot construction
-- [[admission#Per-Flow Token Progress Tracking]] — Per-flow progress counters
-- [[flow#Flow Identifier Contract]] — Flow identity model
-- [[metrics#Metric Family Contracts]] — Metric family registration
-- [[src/scheduler/fifo.rs]] — Source implementation
-- [[src/scheduler/mod.rs]] — Module re-export
-
-# Weighted Fair Queueing Discipline
-
-The WFQ scheduler guarantees fair admission across competing flows by bounding concurrency, enforcing deterministic selection order, and coupling each admitted request to a lifecycle-managed ticket that returns its permit on completion.
-
-## Purpose
-
-The WFQ scheduler selects waiting flows by starvation bypass, priority, WFQ fairness ratio, and enqueue-time tiebreaker. Each admission returns a drop-managed ticket. Per-flow service accounting tracks fairness.
-
-- Bound the number of concurrently active flows to a configured maximum.
-- Select which waiting flow to admit next using starvation bypass, then priority, then WFQ fairness ratio, then enqueue-time tiebreaker.
-- Return a ticket per admission that automatically releases its permit when dropped, regardless of success or cancellation.
-- Expose three distinct backpressure behaviors — blocking, fail-fast, and hybrid — so consumers choose their preferred rejection semantics.
-- Report cumulative per-flow service accounting for fairness ratio computation.
-
-## Non-goals
-
-The WFQ scheduler is an admission controller, not a work executor. It makes no guarantees about how work is performed, how many requests a flow submits, or how the backend processes admitted work.
-
-- Does not execute work units or orchestrate inference.
-- Does not validate or interpret work-unit estimates beyond accepting them as provided.
-- Does not expose shutdown or drain; the scheduler lives for the lifetime of the process.
-- Does not schedule within a flow (intra-flow ordering is outside this boundary).
-- Does not rate-limit or throttle admitted flows.
-
-## Interface
-
-The scheduler exposes a ticket-based admission contract and read-only observability queries. All configuration is fixed at construction time.
-
-**Admission.** `admit(flow_id, work_unit)` admits a request on behalf of the identified flow. On success returns a ticket representing a consumed permit; on rejection returns an error carrying a suggested retry duration. Backpressure mode determines rejection behavior: blocking waits indefinitely for a permit, fail-fast rejects immediately when queue depth exceeds a configured threshold, hybrid rejects after a bounded wait timeout expires. Work-unit estimate is recorded for the flow's fairness accounting and credited upon ticket drop. The flow is created automatically if it does not already exist in the [[flow#Flow Registry and State]]. Admission may be deferred by a completion bias gate ([[scheduler_policies#Completion Bias Gate]]): in blocking mode the gate blocks before the request enters the waiting queue; in hybrid mode the gate check is bounded by the wait timeout and proceeds without gate clearance on timeout. Blocking mode returns a fixed retry-after duration on error, independent of queue state. Fail-fast and hybrid modes compute retry-after from current queue depth.
-
-**Observability.** `queue_depth` returns the sum of per-flow depth counters across all waiting flows. `queue_snapshot` returns active count, waiting count, and an ordered list of waiting flow identifiers. `service_done(flow_id)` returns the cumulative work-unit credit for a flow; returns zero for unknown flows.
-
-## Invariants
-
-These properties hold regardless of implementation and must survive any rewrite.
-
-**Permit accounting.** The sum of active flows and available permits always equals the configured maximum active flows. Every admitted request consumes exactly one permit; every ticket drop returns exactly one permit. When no permits remain, no further selection or admission occurs.
-
-**Selection ordering.** A flow waiting longer than the starvation threshold is selected before any non-starved flow, regardless of priority or WFQ ratio. Among eligible non-starved flows, the flow with the highest priority is selected first; WFQ fairness ratio (cumulative service divided by weight) breaks priority ties. When priority and WFQ ratio are equal, the flow that entered the queue first is selected. Flows with zero or negative weight are excluded from selection.
-
-**Service accounting.** Each flow's cumulative service credit is monotonically non-decreasing. Service credit is scoped to the flow: one counter per flow, keyed by its identifier. The counter advances by the work-unit estimate recorded at admission, credited when the ticket is dropped.
-
-**Depth consistency.** Queue depth increments by one when a flow enters the waiting queue and decrements by one when the flow is either admitted or cancelled. Depth is released at most once per queued request, regardless of whether the request is admitted, cancelled, or times out.
-
-## Constraints
-
-These are hard boundaries imposed by design, not implementation artifacts.
-
-**Capacity.** Concurrency is bounded by `max_active_flows`; the scheduler never admits more active flows than this value. Queue depth can grow unbounded in blocking mode. Fail-fast mode imposes a queue depth threshold for immediate rejection. Hybrid mode rejects via bounded wait timeout; it does not check depth before queuing.
-
-**Admission lifecycle.** A ticket must be held for the lifetime of the admitted request; dropping the ticket without consuming it is permitted and correctly releases the permit and depth. The scheduler cannot distinguish between a request that completed and one that was cancelled; both paths return a permit identically.
-
-**Configuration immutability.** Backpressure mode, maximum active flows, and queue depth threshold are fixed at construction and cannot be changed at runtime. Starvation timeout defaults to a fixed value and is not configurable via the primary public constructor.
-
-**Work-unit assumptions.** Work-unit estimates are assumed positive and finite; the scheduler does not validate these values.
-
-**No external control over selection.** The scheduler provides no API to pause, drain, or shut down selection. Selection proceeds continuously for the lifetime of the scheduler.
-
-## Rationale
-
-The scheduler's design follows from three goals: fairness across flows, bounded concurrency, and operational flexibility under overload.
-
-- WFQ ratios over pure priority: pure priority scheduling starves low-priority flows indefinitely. WFQ ratios (service divided by weight) ensure every flow eventually receives credit proportional to its weight, while still allowing priority to bias selection. The starvation threshold provides a hard floor against indefinite waiting.
-- Ticket-based permits: coupling admission to a drop-managed ticket eliminates manual permit tracking from callers. Regardless of how a request ends — completion, cancellation, or error — the permit returns automatically. This prevents silent permit leaks that would otherwise starve the system.
-- Three backpressure modes: different consumers have different tolerance for queue pressure. Blocking mode suits callers that can wait. Fail-fast mode suits health checks and rapid feedback loops. Hybrid mode offers bounded waits with computed retry intervals.
-- Flow-scoped service accounting: fairness requires per-flow state. Independent service counters keyed by flow identifier allow the scheduler to track how much each flow has consumed without coordination overhead between flows.
-- FIFO as the final tiebreaker: when WFQ ratios converge, enqueue time provides a stable, observable ordering. Without it, equal-ratio flows could starve each other through oscillation.
-
-## Related
-
-See also these related concepts and source files.
-- [[flow#Flow Registry and State]] — Flow registry, flow identifiers, and per-flow state
-- [[metrics#Metrics Registry]] — Counters and gauges reported by the scheduler
-- [[admission#Backpressure and Admission Rejection]] — Backpressure mode definitions and retry-after computation
-- [[scheduler#FIFO Queueing Discipline]] — Queue ticket and depth guard mechanisms
-- [[scheduler_policies#Priority-Aware Flow Selection]] — Priority-based selection algorithm
-- [[scheduler_policies#Starvation Protection]] — Starvation detection and force-admit logic
-- [[scheduler_policies#Completion Bias Gate]] — Completion bias gate for admission gating
-- [[src/scheduler/wfq.rs]] — WFQ scheduler implementation
-- [[src/scheduler/backpressure.rs]] — Backpressure rejection types
-- [[src/scheduler/fifo.rs]] — Queue ticket and depth guard mechanisms
 
 # Deficit Round Robin Discipline
 
@@ -299,7 +125,7 @@ This concept does not address request routing, model inference, or GPU resource 
 
 The scheduler exposes three categories of contracts: admission, observation, and accounting.
 
-**Admission.** A caller presents a flow identity and a work-unit estimate; the scheduler either grants an admission ticket or rejects with a signal containing a retry duration. See [[scheduler#FIFO Queueing Discipline]] for ticket semantics and [[admission#Backpressure and Admission Rejection]] for rejection modes. Three backpressure modes govern admission behavior: blocking (waits indefinitely for a permit), fail-fast (rejects immediately when queue depth exceeds a configured threshold), and hybrid (waits before rejecting; total wall-clock wait can reach approximately two times the configured duration due to sequential gate and channel waits). Admission includes a completion-bias gate check that can delay admission indefinitely in blocking mode. In hybrid mode, the gate check and the subsequent channel wait each consume up to the configured duration, yielding a worst-case total wait of roughly double the configured value. See [[scheduler_policies#Completion Bias Gate]]. Fail-fast mode can reject before any admission state is established; such rejections produce no depth or permit accounting side effects. Admission always ensures the requesting flow is registered; a new flow is materialized if not already present. See [[flow#Flow Registry and State]].
+**Admission.** A caller presents a flow identity and a work-unit estimate; the scheduler either grants an admission ticket or rejects with a signal containing a retry duration. See [[scheduler#Queue Ticket]] for ticket semantics and [[admission#Backpressure and Admission Rejection]] for rejection modes. Three backpressure modes govern admission behavior: blocking (waits indefinitely for a permit), fail-fast (rejects immediately when queue depth exceeds a configured threshold), and hybrid (waits before rejecting; total wall-clock wait can reach approximately two times the configured duration due to sequential gate and channel waits). Admission includes a completion-bias gate check that can delay admission indefinitely in blocking mode. In hybrid mode, the gate check and the subsequent channel wait each consume up to the configured duration, yielding a worst-case total wait of roughly double the configured value. See [[scheduler_policies#Completion Bias Gate]]. Fail-fast mode can reject before any admission state is established; such rejections produce no depth or permit accounting side effects. Admission always ensures the requesting flow is registered; a new flow is materialized if not already present. See [[flow#Flow Registry and State]].
 
 **Observation.** Queue depth reports the total number of pending requests across all flows, derived from the flow registry's aggregate depth counters rather than maintained independently. See [[flow#Flow Registry and State]]. Queue snapshot reports active-flow count, waiting-flow count, and the ordered list of flows awaiting scheduling. Per-flow credit reports only the permanent credit balance, excluding any per-round eligibility accumulator; metric gauges that expose credit may briefly include the eligibility accumulator during the scheduling round's accumulation phase, causing a transient divergence from the permanent balance.
 
@@ -343,14 +169,43 @@ Deficit round-robin provides proportional fairness without per-timestep scheduli
 See also these related concepts and source files.
 - [[admission#Backpressure and Admission Rejection]] — BackpressureMode, BackpressureRejected, fail-fast retry computation
 - [[scheduler_policies#Completion Bias Gate]] — Completion bias gate admission dependency
-- [[scheduler#FIFO Queueing Discipline]] — QueueTicket, ticket creation and disarm
+- [[scheduler#Queue Ticket]] — QueueTicket, ticket creation and disarm
 - [[scheduler_policies#Priority-Aware Flow Selection]] — Priority-based selection among eligible candidates
 - [[scheduler_policies#Starvation Protection]] — Starvation detection and force-selection
 - [[flow#Flow Registry and State]] — FlowId, Flow, per-flow state management
 - [[metrics#Metric Family Contracts]] — Metrics gauges and counters reported by the scheduler
 - [[src/scheduler/drr.rs]] — DRR scheduler implementation
 - [[src/scheduler/backpressure.rs]] — Backpressure types
-- [[src/scheduler/fifo.rs]] — Queue ticket implementation
+- [[src/scheduler/ticket.rs]] — Queue ticket implementation
 - [[src/scheduler/completion_bias.rs]] — Completion bias gate
 - [[src/scheduler/starvation.rs]] — Starvation detection
 - [[src/scheduler/priority.rs]] — Priority selection
+
+# Queue Ticket
+
+The queue ticket is the RAII admission handle returned by `Scheduler::admit`; its drop handler releases the admission permit and updates flow accounting on every exit path.
+
+## Purpose
+
+The ticket couples every admission to a drop-managed handle so the concurrency permit cannot leak regardless of how the request ends.
+
+- Releases the admission permit on all exit paths: success, error, panic (Drop runs on unwind), and client disconnect (the future handler drops).
+- `disarm()` takes the drop handler, making a later drop a no-op. It is used when a ticket's oneshot delivery fails, so the handle cannot double-release.
+- `make_ticket` constructs a `QueueTicket` from a flow id, a work-unit estimate, and a drop-handler closure; the closure releases the permit and reports completion when the ticket is dropped.
+
+## Invariants
+
+These properties hold regardless of implementation.
+
+- The admission permit is released exactly once per ticket. `disarm()` makes disposal a no-op, and the caller that disarmed is responsible for releasing the permit exactly once itself — in DRR, the admission loop releases it on failed oneshot delivery, preventing a double release.
+- Dropping an armed ticket runs the drop handler, which in DRR decrements the `llm_active_flows` gauge and the flow's per-flow active counter, releases one permit, and signals completion-bias waiters.
+
+## Related
+
+See also these related concepts and source files.
+- [[src/scheduler/ticket.rs]] — Ticket infrastructure module
+- [[src/scheduler/ticket.rs#QueueTicket]] — RAII ticket type
+- [[src/scheduler/ticket.rs#make_ticket]] — Ticket factory
+- [[scheduler#Deficit Round Robin Discipline]] — Scheduler that builds tickets and owns the permit pool
+- [[scheduler_policies#Completion Bias Gate]] — Waiters signaled on armed ticket drop
+- [[metrics#Metric Family Contracts]] — `llm_active_flows` gauge updated by the ticket

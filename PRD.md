@@ -4,13 +4,15 @@
 
 ### Product Name
 
-**tinyllb** (working name)
+**tinyllb**
 
 ### Summary
 
 An OpenAI API-compatible inference scheduling proxy designed for local LLM deployments. It sits between agentic applications and a vLLM backend, providing intelligent admission control, queue management, fairness policies, and workload shaping.
 
 The proxy treats each agent, conversation, or workflow as a schedulable "flow" analogous to a network connection. It prevents GPU resource fragmentation caused by excessive concurrent generations and prioritizes completion of valuable long-running tasks.
+
+The shipped implementation also provides: a backend stall watchdog, transport and premature-stop retry, turn-boundary priority reclassification, KV-cache-aware selection bias, KV-cache-aware admission, and idle-flow eviction.
 
 ### Problem Statement
 
@@ -60,6 +62,7 @@ Success criteria:
 * No agent waits indefinitely.
 * Configurable fairness policies.
 * Existing generations are protected from excessive new arrivals.
+* Stalled backends are detected (stall watchdog) and degenerate/failed streams are retried (transport and premature-stop retry).
 
 ---
 
@@ -215,10 +218,11 @@ The proxy must:
 Example:
 
 ```
-curl localhost:8000/v1/chat/completions
+curl localhost:8080/v1/chat/completions
 ```
 
-returns same format as vLLM.
+returns same format as vLLM. (The proxy binds `0.0.0.0:8080` by default;
+`localhost:8000` is the vLLM backend side of the same call.)
 
 ---
 
@@ -284,7 +288,7 @@ Reject or delay requests exceeding capacity.
 
 ## KV-cache-aware admission
 
-Optional future integration:
+Delivered (implemented).
 
 Input:
 
@@ -301,48 +305,17 @@ delay
 reject
 ```
 
+Implemented via the `kv_policy` config section
+(`kv_policy.enabled`, `reject_threshold`, `delay_threshold`) and
+`src/scheduler/kv_admission.rs`; disabled by default.
+
 ---
 
 # 6.4 Scheduling Algorithms
 
-## MVP: FIFO with Flow Limits
+## DRR (implemented)
 
-Behavior:
-
-```
-flow A
-  request1
-  request2
-
-flow B
-  request1
-```
-
-Only limited flows execute simultaneously.
-
----
-
-## V1: Weighted Fair Queueing
-
-Each flow receives weight:
-
-Example:
-
-```
-interactive: 10
-coding: 5
-background: 1
-```
-
-Scheduling:
-
-```
-token allocation ∝ weight
-```
-
----
-
-## V2: Deficit Round Robin
+Deficit Round Robin is the scheduler in the tree.
 
 Maintain:
 
@@ -361,6 +334,9 @@ Advantages:
 * simple
 * predictable
 * handles variable workloads
+
+Note: the earlier MVP (FIFO with flow limits) and V1 (Weighted Fair
+Queueing) prototypes were both built and later removed; only DRR remains.
 
 ---
 
@@ -385,6 +361,22 @@ Rules:
 
 * higher priority gets admission preference
 * starvation protection prevents indefinite blocking
+
+### Dynamic reclassification (implemented)
+
+Priority is not only a static per-flow value. The live system runs a
+turn-boundary state machine per flow (`priority_policy`):
+
+* a turn-boundary idle gap (≥ `priority_policy.idle_gap_threshold` before a
+  user turn) marks the flow **interactive** (regardless of prior state).
+* continuous arrivals past `agentic_suspected_threshold` demote it to
+  **agent** priority.
+* continuous arrivals past `agentic_confirmed_threshold` demote it to
+  **background** priority.
+
+The state machine reclassifies flows as their request cadence changes,
+so a human-on-the-loop session and an unattended agentic loop are scored
+differently even within the same flow ID.
 
 ---
 
@@ -485,21 +477,63 @@ Example:
 ```yaml
 backend:
   url: http://localhost:8000
+  metrics_interval: 1s
+  stall_timeout: 30s          # 0 disables the stall watchdog
 
 scheduler:
-  algorithm: drr
-
   max_active_flows: 4
-
   starvation_timeout: 300s
+  completion_bias:
+    enabled: true
+    target_active_flows: 0    # 0 = use max_active_flows
+    predictive_admit: false
+  kv_bias:
+    enabled: true
+    bias_full_at: 0.9
+    pressure_below: 0.5
 
 flows:
   default_weight: 1
+  default_priority: 50
+  flow_idle_ttl: 600s
 
 priorities:
   interactive: 100
   agent: 50
   background: 10
+
+backpressure:
+  mode: blocking              # blocking | fail_fast | hybrid
+  max_queue_depth: 100
+  max_wait: 10s
+  retry_after_base: 1s
+
+metrics:
+  endpoint: /metrics
+
+server:
+  bind: "0.0.0.0:8080"
+  tps_window_secs: 10
+
+kv_policy:
+  enabled: false
+  reject_threshold: 0.95
+  delay_threshold: 0.80
+
+priority_policy:
+  enabled: true
+  idle_gap_threshold: 30s
+  agentic_suspected_threshold: 5
+  agentic_confirmed_threshold: 12
+
+retry_policy:
+  enabled: false
+  max_retries: 2
+  temperature_step: 0.3
+  max_temperature: 1.5
+  default_temperature: 0.0
+
+# request_timeout: 300s       # optional per-request timeout
 ```
 
 ---
@@ -546,6 +580,18 @@ vllm_errors_total
 ```
 
 ---
+
+### Reliability and admission (added after initial release)
+
+```
+llm_backend_stalled                 # 0/1 gauge: stall watchdog state
+tinyllb_backend_stall_events_total  # stalls detected by the watchdog
+llm_kv_admission_decisions_total    # KV-cache-aware admission decisions
+llm_flow_cadence_state              # per-flow turn-boundary priority state
+tinyllb_premature_stop_detected_total
+tinyllb_premature_stop_retries_total
+tinyllb_premature_stop_exhausted_total
+```
 
 # 9. API Extensions
 
@@ -664,16 +710,19 @@ Disadvantages:
 
 # 12. MVP Scope
 
-Estimated effort:
+Estimated effort. Phases 1–3 below are historical: all three are complete
+(delivered), and the feature list reflects the scope as planned, not the
+final shape of the system (e.g. the Phase 1 FIFO queue prototype was later
+replaced by the DRR scheduler).
 
-## Phase 1: Basic Queue Proxy
+## Phase 1: Basic Queue Proxy (completed)
 
 Features:
 
 * OpenAI API forwarding
 * streaming
 * max concurrency
-* FIFO queue
+* FIFO queue (prototype; replaced by DRR)
 * metrics
 
 Estimate:
@@ -682,7 +731,7 @@ Estimate:
 
 ---
 
-## Phase 2: Agent Scheduling
+## Phase 2: Agent Scheduling (completed)
 
 Features:
 
@@ -697,7 +746,7 @@ Estimate:
 
 ---
 
-## Phase 3: vLLM Integration
+## Phase 3: vLLM Integration (completed)
 
 Features:
 

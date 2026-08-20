@@ -1,7 +1,7 @@
 # Example docker-compose: proxy + vLLM (single-GPU)
 #
 # The proxy forwards OpenAI-compatible requests to vLLM while applying
-# flow-aware scheduling (DRR/WFQ), backpressure, and KV-cache-aware
+# flow-aware scheduling (DRR), backpressure, and KV-cache-aware
 # admission control.
 #
 # Usage:

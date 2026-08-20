@@ -1,4 +1,4 @@
-# Proxy configuration — PRD §7
+# Proxy configuration
 #
 # This file is the single source of truth for the tinyllb.
 # Environment variables (TINYLLB__*) override values here.
@@ -7,23 +7,54 @@
 
 backend:
   url: http://localhost:8000
+  metrics_interval: 1s        # how often to poll vLLM /metrics (feeds KV policy + stall watchdog)
+  stall_timeout: 30s          # inference-stall watchdog window; 0 disables
 
 scheduler:
-  algorithm: drr
   max_active_flows: 4
   starvation_timeout: 300s
+  completion_bias:
+    enabled: true             # defer new-flow admission while active flows exceed target
+    target_active_flows: 0    # 0 = use max_active_flows
+    predictive_admit: false   # pre-admit when an active flow has delivered >=90% of estimated tokens
+  kv_bias:
+    enabled: true             # KV-cache-aware selection bias among eligible waiting flows
+    bias_full_at: 0.9         # KV fraction at which the bias fully dominates selection
+    pressure_below: 0.5       # KV fraction below which the bias is off (pure DRR fairness)
 
 flows:
-  default_weight: 1
+  default_weight: 1           # default DRR weight per flow
+  default_priority: 50        # default priority (higher = more urgent)
+  flow_idle_ttl: 600s         # evict flows idle for this long
 
 priorities:
   interactive: 100
   agent: 50
   background: 10
 
+backpressure:
+  mode: blocking              # blocking | fail_fast | hybrid
+  max_queue_depth: 100        # max queued requests before backpressure
+  max_wait: 10s               # max time a request waits in queue (hybrid)
+  retry_after_base: 1s        # base Retry-After for backpressure rejections
+
+metrics:
+  endpoint: /metrics          # path serving Prometheus metrics
+
 server:
   bind: "0.0.0.0:8080"
-  tps_window_secs: 10
+  tps_window_secs: 10         # rolling window for the llm_tokens_per_second gauge
+
+kv_policy:
+  enabled: false              # KV-cache-aware admission (delay/reject near capacity)
+  reject_threshold: 0.95      # reject when KV utilization > this
+  delay_threshold: 0.80       # delay admission when KV utilization > this
+
+priority_policy:
+  enabled: true               # turn-boundary priority reclassification
+  idle_gap_threshold: 30s     # idle gap at a user turn that counts as a turn boundary
+  agentic_suspected_threshold: 5   # continuous arrivals -> suspect agentic (agent priority)
+  agentic_confirmed_threshold: 12  # continuous arrivals -> confirm agentic (background priority)
 
 retry_policy:
   enabled: false                # set true to activate premature-stop retry
@@ -31,3 +62,5 @@ retry_policy:
   temperature_step: 0.3         # temperature added per retry attempt
   max_temperature: 1.5          # cap on bumped temperature
   default_temperature: 0.0      # base temperature when the request omits one
+
+# request_timeout: 300s       # optional per-request timeout; unset uses the client default (300s)

@@ -156,6 +156,7 @@ fn extract_max_tokens(body: &Bytes) -> f64 {
 /// This signal tells the cadence state machine whether the *previous* gap
 /// was human think time (idle, at a turn boundary) or tool execution time
 /// (intra-turn). See `docs/plans/006-turn-boundary-priority/PLAN.md`.
+// @lat: [[gateway#Turn-Boundary Detection]]
 fn is_turn_boundary_request(body: &bytes::Bytes) -> bool {
     if body.is_empty() {
         return true;
@@ -487,12 +488,7 @@ pub async fn proxy_handler(
         // from state.request_timeout.
         // --- Premature-stop retry gate (streaming path) ---
         let is_chat = original_path == "/v1/chat/completions";
-        let is_internal_compressor = headers
-            .get("x-llm-internal")
-            .and_then(|v| v.to_str().ok())
-            .map(|v| v == "compressor")
-            .unwrap_or(false);
-        if state.retry_policy.enabled && state.retry_policy.max_retries > 0 && is_chat && !is_internal_compressor {
+        if state.retry_policy.enabled && state.retry_policy.max_retries > 0 && is_chat {
             let body = crate::gateway::stream::spawn_retry_stream(
                 state.clone(),
                 response,
@@ -566,16 +562,11 @@ pub async fn proxy_handler(
     };
 
     // --- Premature-stop retry loop (non-streaming path) ---
-    // Gate: only /v1/chat/completions, not internal compressor, policy enabled.
+    // Gate: only /v1/chat/completions, policy enabled.
     let is_chat = original_path == "/v1/chat/completions";
-    let is_internal_compressor = headers
-        .get("x-llm-internal")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v == "compressor")
-        .unwrap_or(false);
     let policy = &state.retry_policy;
     let mut retry_attempts: u32 = 0;
-    if policy.enabled && policy.max_retries > 0 && is_chat && !is_internal_compressor {
+    if policy.enabled && policy.max_retries > 0 && is_chat {
         // Pre-parse the forwarded request body once for bump_temperature reuse.
         let forwarded_value: Option<serde_json::Value> =
             serde_json::from_slice(&forwarded_body).ok();

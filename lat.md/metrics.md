@@ -36,7 +36,7 @@ The public contract consists of a metrics value with exposed collectors, multipl
 
 - Each exposed collector is a live metric whose name and label dimensions are fixed for the lifetime of the value.
 - The metrics value exposes its own registry as a public surface; external consumers read directly from it.
-- The collector set includes queue, throughput, backend, backpressure, scheduling, starvation, lifecycle, and KV-cache families.
+- The collector set includes queue, throughput, backend, backpressure, scheduling, starvation, lifecycle, KV-cache, priority-heuristic, premature-stop retry, and backend-stall families.
 
 **Construction paths.**
 
@@ -54,7 +54,7 @@ The public contract consists of a metrics value with exposed collectors, multipl
 - **Starvation family**: per-flow starvation-wait observation (labeled by flow identity) and total forced-admission count.
 - **Lifecycle family**: request-event counter (labeled by event type: request_started, token_received, request_completed, request_cancelled).
 - **KV-cache family**: cache usage percentage, free percentage, and admission-decision count (labeled by decision: accept, delay, reject).
-- **Context compression family**: compression event and error counters, tokens-saved counter, sidecar latency histogram (buckets 0.5–60s), turns-per-event histogram (buckets 1–32), per-flow estimated/raw-estimated/compressed-segment gauges (labeled by flow identity), and compression queue depth gauge. See [[context#Context Compression]].
+- **Backend stall family**: `llm_backend_stalled` gauge (1 while the inference watchdog considers the backend deadlocked) and `tinyllb_backend_stall_events_total` counter of watchdog-detected stalls; stall semantics documented in [[backend#Inference Stall Watchdog]].
 - **Premature-stop retry family**: premature stop detection counter, retry requests issued counter, and degenerate-turn-forwarded counter. In the streaming path, the exhausted counter is also incremented when a retry HTTP failure forces fail-open.
 
 **Exposition endpoint.**
@@ -236,8 +236,10 @@ Metrics families provide a structured, cross-task view of system health and perf
 - Queue family tracks per-flow wait depth, latency, and active concurrency.
 - Throughput family tracks cumulative token output and approximate instantaneous rate.
 - All collectors share one registry, making every metric family available to every task without additional wiring.
-- Additional metric families beyond the three primary groups reside in the same registry (backpressure, scheduling, starvation protection, request lifecycle, KV cache).
+- Additional metric families beyond the three primary groups reside in the same registry (backpressure, scheduling, starvation protection, request lifecycle, KV cache, priority heuristic, premature-stop retry, and backend stall).
 - Priority heuristic family tracks per-flow priority class, cadence state-machine state, priority source events, and inter-request gap distribution for turn-boundary classification diagnostics.
+- Premature-stop retry family tracks premature-stop detections, retry attempts issued, and degenerate turns forwarded after retries are exhausted.
+- Backend stall family tracks the watchdog's deadlocked-engine gauge and the count of detected stall events; see [[backend#Inference Stall Watchdog]].
 
 ## Non-goals
 
@@ -284,6 +286,12 @@ The interface provides construction surfaces, a scrape endpoint, and metric fami
 
 - `llm_tokens_generated_total` — Monotonically increasing counter of tokens produced by the backend.
 - `llm_tokens_per_second` — Gauge approximating instantaneous token throughput, derived from the cumulative counter at regular intervals.
+
+**Backend stall family.**
+
+- `llm_backend_stalled` — Gauge set to 1 while the inference watchdog considers the backend deadlocked (engine busy with no token progress), 0 otherwise.
+- `tinyllb_backend_stall_events_total` — Monotonically increasing counter of backend inference stalls detected by the watchdog; each newly detected stall increments it once. See [[backend#Inference Stall Watchdog]] for stall semantics.
+
 **Priority heuristic family.**
 
 - `llm_flow_priority_class` — Per-flow gauge of the current numeric priority value (100/50/10). Updated on every admission after the turn-boundary state machine runs. Labeled by `flow_id`; ephemeral flows aggregate to `"ephemeral"`.
@@ -337,7 +345,7 @@ Organizing metrics into families clarifies the observation surface and constrain
 
 Cross-concept links and source locations for metric families and their consumers.
 
-- [[scheduler#FIFO Queueing Discipline]] — Admits requests into the queue; source of queue depth and wait-time observations.
+- [[scheduler#Deficit Round Robin Discipline]] — Admits requests into the queue; source of queue depth and wait-time observations.
 - [[admission#Backpressure and Admission Rejection]] — Backpressure rejection metrics housed in the same metrics struct.
 - [[admission#KV-Cache-Aware Admission Gate]] — KV cache metrics housed in the same metrics struct.
 - [[src/metrics/mod.rs#Metrics]] — Central metrics struct carrying all families.

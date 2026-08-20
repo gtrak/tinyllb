@@ -114,7 +114,7 @@ The composition maintains structural and behavioral guarantees that hold regardl
 - The router always contains exactly four sub-routers: health, metrics, gateway, and admin.
 - The health endpoint is always reachable and always responds successfully, independent of all other application state.
 - All non-health sub-routers share the same application state instance.
-- The token-rate background task runs for the lifetime of the process; the backend monitor task runs only when KV policy is enabled.
+- The token-rate background task and the backend monitor polling task both run for the lifetime of the process; the monitor poller is spawned unconditionally so backend gauges are populated regardless of whether the KV admission policy is enabled.
 - Configuration is loaded before any service construction or network binding occurs.
 
 ## Constraints
@@ -225,3 +225,27 @@ Cross-references to related concepts and source locations for token rate observa
 - [[src/config/mod.rs#Server]] — Window configuration field
 - [[src/gateway/proxy.rs#proxy_handler]] — Counter increment site (non-streaming)
 - [[src/gateway/stream.rs#MetricStream]] — Counter increment site (streaming)
+
+# Idle-Flow Reaper
+
+A background reaper periodically evicts idle flows and cadence entries to bound registry growth as session identifiers accumulate.
+
+## Purpose
+
+The reaper caps unbounded growth of the flow and cadence registries without an explicit unregistration API.
+
+- `src/main.rs:135-149` spawns a 60-second interval task (skip-missed-tick behavior) that calls `Scheduler::reap_idle(ttl)` on each tick.
+- `Scheduler::reap_idle` calls `FlowRegistry::reap_idle(ttl)`, which removes every flow whose `depth` is 0, `active` is 0, and `last_seen` is older than `now − ttl`; it returns the number of flows removed.
+- It also calls `CadenceRegistry::reap_idle(ttl)` to evict cadence entries idle for the same duration, and logs `flows_removed` and `cadence_removed` at `tracing::debug` when either is non-zero.
+- The `flows.flow_idle_ttl` configuration value (default 600 seconds) sets the idle cutoff.
+- Evicted flows are not a special state: a later request re-creates the flow with defaults on lookup.
+
+## Related
+
+Cross-references to related concepts and source locations for the idle-flow reaper.
+
+- [[src/main.rs]] — Reaper task spawn site
+- [[src/scheduler/mod.rs#Scheduler#reap_idle]] — Scheduler-level eviction entry point
+- [[src/flow/mod.rs#FlowRegistry]] — Flow registry eviction
+- [[config#Configuration Contract]] — `flows.flow_idle_ttl` configuration
+- [[flow#Flow Registry and State]] — Registry state that the reaper bounds

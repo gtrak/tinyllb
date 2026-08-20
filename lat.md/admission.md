@@ -9,7 +9,7 @@ This concept defines the contract for rejecting requests when the scheduler queu
 - Provides a single error signal that represents queue-full rejection
 - Suggests a retry-after duration proportional to how saturated the queue is
 - Maps each backpressure mode variant to a stable label for observability
-- Establishes a lower bound on retry-after so clients never receive zero-wait suggestions
+- Establishes a lower bound on retry-after equal to the configured base duration
 
 ## Non-goals
 
@@ -53,17 +53,15 @@ These properties hold regardless of implementation details and must survive comp
 - The computed retry-after duration is never less than the provided base duration
 - The computation never produces an undefined value for any valid input, including zero capacity
 - Every backpressure mode variant has a corresponding label; the mapping is exhaustive
-- A backpressure rejection always carries a positive retry-after duration
 - The retry-after duration grows monotonically with queue depth, holding capacity constant
 
 ## Constraints
 
 These are the operational boundaries within which the concept functions.
 
-- Retry-after scaling applies only to fail-fast mode; blocking and hybrid modes do not use the computed value
+- Retry-after scaling is used for fail-fast queue-depth rejections, hybrid max-wait timeout rejections, and hybrid/fail-fast KV delay-timeout rejections; blocking mode never rejects and does not use the computed value
 - Queue depth and capacity are non-negative integers; negative inputs are ill-formed
 - Zero-capacity configurations produce a higher multiplier (3× base) than a fully loaded queue (2× base)
-- The retry-after base duration must be strictly positive (greater than zero) to guarantee non-zero retry-after durations
 - The concept assumes the queue depth does not typically exceed capacity; over-capacity depth produces a ratio greater than one and scales without upper bound but is not an error condition
 
 ## Rationale
@@ -72,7 +70,6 @@ These decisions exist to ensure predictable client behavior under load and to ma
 
 - Affine scaling of retry-after with queue pressure prevents thundering-herd retries when the queue is saturated while preserving a guaranteed minimum wait
 - Guaranteeing a minimum retry-after equal to the base duration prevents clients from retrying instantaneously under any conditions
-- Requiring a strictly positive base duration ensures the "never zero-wait" guarantee holds regardless of queue state
 - Zero-capacity configurations produce a higher multiplier than full-queue pressure to avoid undefined arithmetic without requiring callers to validate capacity beforehand
 - Exhaustive mode-to-label mapping is compile-time enforced so metrics remain consistent when modes evolve
 - A single rejection error type ensures all queue-full failures are distinguishable from processing errors
@@ -103,7 +100,7 @@ The KV-admission policy governs whether incoming requests are admitted, delayed,
 
 This concept does not address scheduling fairness, ordering, or resource allocation beyond the admission gate.
 
-- Does not decide which admitted request runs next — that is the domain of [[scheduler#FIFO Queueing Discipline]]
+- Does not decide which admitted request runs next — that is the domain of [[scheduler#Deficit Round Robin Discipline]]
 - Does not manage KV-cache eviction or memory allocation — that is the domain of the backend runtime
 - Does not provide per-request or per-tenant admission control — decisions are based on aggregate cache pressure
 - Does not implement rate limiting independent of KV-cache state
@@ -175,7 +172,7 @@ Related concepts and source locations for KV-cache admission.
 - [[backend#Backend KV-Cache Monitor]] — provides KV-cache usage snapshots consumed by admission decisions
 - [[metrics#Metrics Registry]] — receives admission decision records
 - [[admission#Backpressure and Admission Rejection]] — defines rejection semantics and `Retry-After` computation
-- [[scheduler#FIFO Queueing Discipline]] — consumes the delayed-count for queue-depth queries
+- [[scheduler#Scheduler Facade and Policy Selection]] — consumes the delayed-count for queue-depth queries
 - [[src/scheduler/kv_admission.rs]] — implementation
 - [[src/scheduler/backpressure.rs]] — rejection types and retry-after computation
 - [[src/config/mod.rs]] — policy configuration and backpressure config
@@ -238,6 +235,11 @@ The tracker exposes operations to register flows, update progress, remove flows,
 - **Postconditions:** Returns whether at least one tracked flow satisfies the near-completion condition
 - **Behavior:** Returns false if the tracker contains no entries or no entry satisfies the threshold
 
+**Query delivered tokens.** A flow identifier determines the delivered tokens currently tracked for that flow.
+
+- **Preconditions:** A flow identifier
+- **Postconditions:** Returns the flow's delivered-token aggregate, or zero if the flow has no entry
+
 **Initialize.** An empty tracker with no tracked flows is created.
 
 - **Preconditions:** None
@@ -290,5 +292,5 @@ Aggregate tracking replaces per-request bookkeeping and enables efficient thresh
 Related concepts and source locations for per-flow token progress tracking.
 - [[scheduler_policies#Completion Bias Gate]] — consumes near-completion signals from this tracker
 - Flow identity and grouping used as the key for progress tracking
-- [[admission#KV-Cache-Aware Admission Gate]] — request admission that registers and unregisters flows
+- [[scheduler_policies#Request Lifecycle and Credit Restoration]] — the lifecycle guard that registers requests with the progress tracker at construction and unregisters at termination
 - [[src/scheduler/flow_progress.rs]] — implementation of flow progress tracking

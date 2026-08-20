@@ -1,3 +1,5 @@
+> Status: Historical plan snippet. The SchedulerImpl::Fifo/Wfq/Drr multi-algorithm dispatch shown below was collapsed to a single DrrScheduler (commit a3d9eee); the algorithm span field is now hardcoded "drr". Read the code snippets as the planned design, not current code.
+
 # 04 — Scheduler Admit Signature
 
 **Parent:** `PLAN.md`  

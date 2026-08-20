@@ -14,9 +14,9 @@ The monitor parses raw Prometheus metrics into typed resource observations and p
 
 ## Non-goals
 
-The monitor is a passive observer; it does not influence scheduling or resource allocation.
+The monitor itself makes no admission or scheduling decisions; its only influence on scheduling is the stall signal, which downstream layers consume to reject new admissions and abort in-flight streams (see [[backend#Inference Stall Watchdog]]).
 
-- Does not make admission or scheduling decisions.
+- Does not make admission or scheduling decisions directly; it only publishes observations and a stall signal.
 - Does not aggregate metrics across multiple backends.
 - Does not validate metric accuracy beyond syntactic parsing.
 - Does not expose historical metric series or trends.
@@ -24,13 +24,14 @@ The monitor is a passive observer; it does not influence scheduling or resource 
 
 ## Interface
 
-The monitor exposes four contractual surfaces: parsing with presence tracking, observation publication, conditional blocking, and construction.
+The monitor exposes five contractual surfaces: parsing with presence tracking, observation publication, conditional blocking, stall-signal publication, and construction.
 
-- **Parsing**: Accepts raw Prometheus text bodies and returns a typed observation containing KV cache utilization, KV cache availability, cumulative preemption count, and boolean flags indicating whether utilization and availability were present. Unknown lines are silently ignored.
+- **Parsing**: Accepts raw Prometheus text bodies and returns a typed observation containing KV cache utilization, KV cache availability, cumulative preemption count, cumulative prompt-token and generation-token counters, engine running-request and waiting-request counts, and boolean flags indicating whether utilization and availability were present. Unknown lines are silently ignored.
 - **Observation publication**: Publishes the latest parsed observation on a watch channel. The snapshot accessor always returns the latest value, including after channel closure where the last published value is retained. Multiple readers observe concurrently without coordination.
 - **Conditional blocking**: Callers suspend until an observation satisfies a caller-supplied predicate. Terminates when the predicate is satisfied or the channel is closed; the caller cannot distinguish which caused termination.
+- **Stall signal**: `stall_receiver()` returns a `tokio::sync::watch::Receiver<bool>` that reads `true` while the inference watchdog considers the engine deadlocked; see [[backend#Inference Stall Watchdog]].
 - **Construction**: Three constructors exist. The empty constructor yields a static default observation with no background task. The receiver constructor wraps an existing watch receiver. The standard constructor returns the monitor alongside an optional background task handle; a missing handle indicates monitoring is disabled.
-- **Metrics reporting**: Each successful poll writes utilization and availability into external Prometheus gauges for downstream consumption.
+- **Metrics reporting**: Each poll that finds the KV-usage metric in the scrape writes utilization and availability into external Prometheus gauges and runs the stall watchdog. A successful scrape that lacks the usage metric publishes nothing and writes no gauges.
 
 ## Invariants
 
@@ -38,7 +39,7 @@ Published observations maintain mathematical consistency under defined condition
 
 - When utilization is present but availability is absent and utilization is less than 1.0, availability is derived as `1.0 − utilization`.
 - When utilization equals 1.0 and availability is absent, the default availability value is retained; the observation may simultaneously show utilization = 1.0 and availability = 1.0.
-- The default observation always represents zero resource pressure: utilization = 0, availability = 1.0, preemptions = 0.
+- The default observation always represents zero resource pressure: utilization = 0, availability = 1.0, preemptions = 0, and all token counters and request counts = 0.
 - Monitoring errors never produce new observations; the last known observation is preserved.
 - Both utilization name variants (v0 and v1) map to the same semantic field; the last-parsed value prevails.
 
@@ -98,17 +99,22 @@ The parser focuses on typed observation, not lifecycle management or schema evol
 
 The concept exposes four contract surfaces: metric-name constants, typed snapshots, parse results, and a concurrent monitor handle.
 
-- **Metric name constants**: Four string constants declare the metric identifiers that the parser recognizes. Callers may depend on these for instrumentation or configuration alignment.
+- **Metric name constants**: Eight string constants declare the metric identifiers that the parser recognizes. Callers may depend on these for instrumentation or configuration alignment.
 
 - **Usage gauge (v0)** — the v0 engine KV cache usage fraction.
 - **Usage gauge (v1)** — the v1 engine KV cache usage fraction.
 - **Free gauge** — the primary free-fraction gauge.
 - **Preemption counter** — the cumulative preemption counter.
+- **Generation tokens counter** — cumulative decode tokens; a frozen value while requests are running is the inference-deadlock signal.
+- **Prompt tokens counter** — cumulative prefill tokens; tracked so all-prefill workloads are not misclassified as stalled.
+- **Requests running gauge** — requests currently scheduled on the engine.
+- **Requests waiting gauge** — requests queued for the engine.
 
 - **Typed snapshot**: The snapshot is a value type representing backend state at a single point in time. It is cloneable for independent concurrent access.
 
-- Carries three quantities: KV usage fraction, KV free fraction, and cumulative preemptions.
-- The default snapshot represents a zero-load baseline: usage is zero, free is one, preemptions is zero.
+- Carries seven quantities: KV usage fraction, KV free fraction, cumulative preemptions, cumulative prompt tokens, cumulative generation tokens, running request count, and waiting request count.
+- The default snapshot represents a zero-load baseline: usage is zero, free is one, and all other quantities are zero.
+- `is_busy()` reports whether the engine has queued or running work: true when either the running or waiting request count is positive.
 
 - **Parse result contract**: Every parse operation yields a snapshot with boolean flags for the usage and free gauges. The result is cloneable and defaults to the zero-load baseline.
 
@@ -137,7 +143,7 @@ The parser guarantees deterministic derivation and precedence rules across all p
 - **Dual usage names unify**: Both v0 and v1 usage metric names write to the same usage quantity in the snapshot. No distinction is preserved about which engine variant supplied the value.
 - **Last occurrence wins**: When multiple lines match the same metric constant, the last parsed value overwrites the field. Earlier occurrences are discarded without indication.
 - **Preemption truncation**: Preemption values are truncated toward zero. Fractional preemption values from the backend produce integer counts in the snapshot.
-- **Disabled monitor baseline**: A disabled monitor — constructed via the disabled constructor or a zero-interval polling constructor — always returns the default snapshot: zero usage, one free, zero preemptions.
+- **Disabled monitor baseline**: A disabled monitor — constructed via the disabled constructor or a zero-interval polling constructor — always returns the default snapshot: zero usage, one free, and zero token counters and request counts.
 - **Default preemptions is zero**: When the preemption metric is absent from the input, the preemptions field remains at zero. This is indistinguishable from a backend reporting zero preemptions.
 
 ## Constraints
@@ -166,3 +172,30 @@ Concepts and source files related to parsing and monitoring of vLLM backend metr
 - Source: `[[src/backend/mod.rs#BackendMonitor]]`
 - Concept: `[[admission#KV-Cache-Aware Admission Gate]]` — KV-cache policy consuming parsed observations
 - Concept: `[[backend#Backend KV-Cache Monitor]]` — monitor construction and lifecycle contracts
+
+# Inference Stall Watchdog
+
+The watchdog inside the monitor polling loop detects backend inference stalls and signals the scheduler and streaming layer to reject new work and abort in-flight streams.
+
+## Purpose
+
+The watchdog turns "engine busy but making no token progress" into an actionable signal for the admission and streaming layers.
+
+- `stall_receiver()` (src/backend/mod.rs:259-261) returns a `tokio::sync::watch::Receiver<bool>` that reads `true` while the watchdog considers the engine deadlocked; the scheduler and streaming tasks select on this signal.
+- The watchdog runs inside the polling loop (src/backend/mod.rs:326-389) and is evaluated only on polls whose scrape contains the KV-usage metric.
+- A stall is declared when the engine reports running or waiting requests (`is_busy()`, src/backend/mod.rs:98-100) and neither the prompt-token nor generation-token counters advance for `backend.stall_timeout` (default 30 seconds; a zero timeout disables the watchdog).
+- On a newly detected stall the watchdog sets the stall signal to `true`, logs a warning, and increments `tinyllb_backend_stall_events_total`; on recovery it sets the signal back to `false` and logs the clearance. `llm_backend_stalled` is set to 1 while stalled and 0 otherwise (see [[metrics#Metric Family Contracts]]).
+- While the engine is idle (no running or waiting requests), the watchdog resets its progress timer so an idle gap is never inherited as a stall by later work.
+- While the stall signal is `true`, the scheduler rejects new admissions with 429 and a 5-second `Retry-After` (src/scheduler/mod.rs:242-247).
+- Streaming tasks observe the signal and abort the in-flight backend stream when it trips, so the client retries on fresh connections (src/gateway/stream.rs).
+
+## Related
+
+Cross-references to related concepts and source locations for the inference stall watchdog.
+
+- [[src/backend/mod.rs]] — Watchdog implementation inside the monitor polling loop
+- [[src/backend/mod.rs#BackendMonitor#stall_receiver]] — Stall signal accessor
+- [[config#Configuration Contract]] — `backend.stall_timeout` configuration
+- [[metrics#Metric Family Contracts]] — Stall gauge and event counter
+- [[scheduler#Scheduler Facade and Policy Selection]] — Admission gate consuming the stall signal
+- [[gateway#Premature-Stop Retry]] — Retry behavior for aborted streams

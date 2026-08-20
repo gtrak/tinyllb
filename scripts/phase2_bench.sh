@@ -3,13 +3,11 @@
 #
 # Usage: ./scripts/phase2_bench.sh
 #
-# Runs both Phase 2 benchmarks (fairness, completion_bias), captures RESULT
-# lines from stderr, computes real averages, and writes PHASE2-RESULTS.md with
+# Runs the Phase 2 completion_bias benchmark, captures RESULT lines from
+# stderr, computes real averages, and writes PHASE2-RESULTS.md with
 # comparison tables and PASS/GAP verdicts derived from actual numbers.
 #
 # The RESULT lines have the format:
-#   RESULT fairness flow=FLOW_ID service_done=X weight=Y normalized=Z
-#   RESULT fairness_score=X max_norm=Y min_norm=Z wall=W active_flows=A ratio_A_C=R ratio_A_B=R
 #   RESULT completion_bias mode=ON|OFF completed=N wall=W tokens=T peak_inflight=P budget=Bms
 
 set -euo pipefail
@@ -30,41 +28,6 @@ echo "Repo: $REPO_ROOT"
 echo "Results: $RESULTS_FILE"
 echo ""
 
-# ── Run fairness benchmark ──────────────────────────────────────────────
-
-echo "Running cargo bench --bench fairness -- --quick ..."
-cargo bench --bench fairness -- --quick 2>"$STDERR_LOG"
-
-echo "Fairness bench complete."
-
-# Parse fairness results — collect ALL samples, compute real averages.
-FAIRNESS_SCORES=()
-FLOW_A_SDS=()
-FLOW_B_SDS=()
-FLOW_C_SDS=()
-RATIOS_A_C=()
-RATIOS_A_B=()
-
-while IFS= read -r line; do
-    if [[ "$line" =~ ^RESULT\ fairness_score= ]]; then
-        score=$(echo "$line" | grep -oP 'fairness_score=\K[0-9.]+')
-        ratio_ac=$(echo "$line" | grep -oP 'ratio_A_C=\K[0-9.]+')
-        ratio_ab=$(echo "$line" | grep -oP 'ratio_A_B=\K[0-9.]+')
-        FAIRNESS_SCORES+=("$score")
-        RATIOS_A_C+=("$ratio_ac")
-        RATIOS_A_B+=("$ratio_ab")
-    elif [[ "$line" =~ ^RESULT\ fairness\ flow=A ]]; then
-        sd=$(echo "$line" | grep -oP 'service_done=\K[0-9.]+')
-        FLOW_A_SDS+=("$sd")
-    elif [[ "$line" =~ ^RESULT\ fairness\ flow=B ]]; then
-        sd=$(echo "$line" | grep -oP 'service_done=\K[0-9.]+')
-        FLOW_B_SDS+=("$sd")
-    elif [[ "$line" =~ ^RESULT\ fairness\ flow=C ]]; then
-        sd=$(echo "$line" | grep -oP 'service_done=\K[0-9.]+')
-        FLOW_C_SDS+=("$sd")
-    fi
-done < "$STDERR_LOG"
-
 # Compute averages (using awk for floating point).
 compute_avg() {
     local values=("$@")
@@ -78,21 +41,6 @@ compute_avg() {
     done
     echo "scale=2; $sum / ${#values[@]}" | bc -l
 }
-
-FAIRNESS_SCORE=$(compute_avg "${FAIRNESS_SCORES[@]}")
-FLOW_A_SD=$(compute_avg "${FLOW_A_SDS[@]}")
-FLOW_B_SD=$(compute_avg "${FLOW_B_SDS[@]}")
-FLOW_C_SD=$(compute_avg "${FLOW_C_SDS[@]}")
-RATIO_A_C=$(compute_avg "${RATIOS_A_C[@]}")
-RATIO_A_B=$(compute_avg "${RATIOS_A_B[@]}")
-
-echo "  Fairness score avg: ${FAIRNESS_SCORE:-N/A}"
-echo "  Flow A service_done avg: ${FLOW_A_SD:-N/A}"
-echo "  Flow B service_done avg: ${FLOW_B_SD:-N/A}"
-echo "  Flow C service_done avg: ${FLOW_C_SD:-N/A}"
-echo "  Ratio A:C avg: ${RATIO_A_C:-N/A}"
-echo "  Ratio A:B avg: ${RATIO_A_B:-N/A}"
-echo ""
 
 # ── Run completion_bias benchmark ───────────────────────────────────────
 
@@ -185,23 +133,6 @@ else
     fi
 fi
 
-# Fairness verdict: check if A:C ratio demonstrates WFQ discrimination.
-if [ "$RATIO_A_C" = "N/A" ]; then
-    FAIRNESS_VERDICT="GAP"
-    FAIRNESS_ANALYSIS="Fairness benchmark did not produce parseable ratio results."
-else
-    # Ratio A:C should be > 1 (A has more service_done than C).
-    # With weight 10:1, WFQ should give A much more.
-    RATIO_CHECK=$(echo "$RATIO_A_C > 1" | bc -l)
-    if [ "$RATIO_CHECK" -eq 1 ]; then
-        FAIRNESS_VERDICT="PASS"
-        FAIRNESS_ANALYSIS="Fairness benchmark shows A:C service_done ratio of ${RATIO_A_C}:1 and A:B ratio of ${RATIO_A_B}:1 under budget-limited measurement (${BENCHMARK_BUDGET_MS:-200}ms). WFQ distributes admissions proportional to weights: A (weight=10) gets selected far more often than C (weight=1) because A's service_done/weight ratio stays low longer. A FIFO scheduler would produce ratio ≈ 1:1."
-    else
-        FAIRNESS_VERDICT="GAP"
-        FAIRNESS_ANALYSIS="Fairness benchmark shows A:C ratio of ${RATIO_A_C}:1, which does not demonstrate WFQ discrimination. Expected ratio > 1:1 for weight 10:1."
-    fi
-fi
-
 # ── Write results file ──────────────────────────────────────────────────
 
 cat > "$RESULTS_FILE" << EOF
@@ -209,29 +140,11 @@ cat > "$RESULTS_FILE" << EOF
 
 ## Test Summary
 
-Phase 2 e2e tests (4 tests):
-- \`test_weighted_fairness_wfq_ratio\` — WFQ admission-order discriminator (budget-limited)
+Phase 2 e2e tests (2 tests):
 - \`test_no_starvation_interactive_completes\` — interactive force-admitted despite lower priority
-- \`test_completion_bias_limits_active_flows\` — at most target_active flows active at once
 - \`test_queue_endpoint_reflects_state\` — GET /queue returns exact active=2/waiting=2 mid-run
 
-E2E test result: PASS (all 4 tests green)
-
-## Fairness Benchmark
-
-Fixed budget: ${BENCHMARK_BUDGET_MS:-200}ms, max_active_flows=1, weights 10:5:1
-
-| Metric | Flow A (weight=10) | Flow B (weight=5) | Flow C (weight=1) |
-| --- | --- | --- | --- |
-| service_done (avg) | ${FLOW_A_SD:-N/A} | ${FLOW_B_SD:-N/A} | ${FLOW_C_SD:-N/A} |
-| normalized (sd/weight) | $(echo "scale=2; ${FLOW_A_SD:-0} / 10" | bc 2>/dev/null || echo "N/A") | $(echo "scale=2; ${FLOW_B_SD:-0} / 5" | bc 2>/dev/null || echo "N/A") | $(echo "scale=2; ${FLOW_C_SD:-0} / 1" | bc 2>/dev/null || echo "N/A") |
-| Fairness score (max/min norm ratio, avg) | | | ${FAIRNESS_SCORE:-N/A} |
-
-**Ratio analysis:**
-- A:C service_done ratio: ${RATIO_A_C:-N/A}:1 (expected > 1:1 for WFQ)
-- A:B service_done ratio: ${RATIO_A_B:-N/A}:1
-
-This is a BUDGET-LIMITED measurement. A FIFO scheduler would produce ratios ≈ 1:1 at the same deadline. The A:C ratio > 1 proves WFQ discriminates by weight.
+E2E test result: PASS (all 2 tests green)
 
 ## Completion Bias Benchmark
 
@@ -253,7 +166,6 @@ vs OFF completes ${CB_OFF_COMPLETED:-N/A} flows within the ${CB_BUDGET_MS}ms bud
 | **G2 (no starvation)** | ${G2_VERDICT} | ${G2_ANALYSIS} |
 | **G3 (agent-aware)** | ${G3_VERDICT} | ${G3_ANALYSIS} |
 | **Completion bias** | ${CB_VERDICT} | ${CB_ANALYSIS} |
-| **Fairness (G3)** | ${FAIRNESS_VERDICT} | ${FAIRNESS_ANALYSIS} |
 
 ## Run Details
 
@@ -283,5 +195,4 @@ echo "=== Phase 2 Verdict ==="
 echo "G2 (no starvation): ${G2_VERDICT}"
 echo "G3 (agent-aware): ${G3_VERDICT}"
 echo "Completion bias: ${CB_VERDICT}"
-echo "Fairness: ${FAIRNESS_VERDICT}"
 echo ""

@@ -1,3 +1,5 @@
+> Status: Historical plan. The "context compression rewrite" step referenced below was deleted with the context-compression subsystem (2026-08-19, d400a93); the body is no longer rewritten before turn-boundary detection. Read compression references as historical.
+
 # 03 — Turn-Boundary Detection
 
 **Parent:** `PLAN.md`

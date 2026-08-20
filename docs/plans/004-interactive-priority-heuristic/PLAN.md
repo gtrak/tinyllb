@@ -5,6 +5,7 @@
 > API, `CadenceRegistry`, metrics, and scheduler integration from this plan
 > are preserved; only the classification logic and config schema changed.
 > See `docs/plans/006-turn-boundary-priority/PLAN.md`.
+> Note: the FIFO/WFQ schedulers referenced in the plan body were later deleted (2026-08-19/20); only DRR survives.
 
 ## Why
 

@@ -1,14 +1,14 @@
 //! Shared queue-ticket infrastructure.
 //!
-//! `QueueTicket` is the RAII handle returned by `Scheduler::admit` for every
-//! scheduling algorithm.  It owns a drop handler that releases the admission
-//! slot, decrements `llm_active_flows`, and notifies completion-bias waiters,
-//! guaranteeing slot release on all exit paths: success, error, panic (Drop
-//! runs on unwind), and client disconnect (future handler drops).
+//! `QueueTicket` is the RAII handle returned by `Scheduler::admit`.  It owns
+//! a drop handler that releases the admission slot, decrements
+//! `llm_active_flows`, and notifies completion-bias waiters, guaranteeing
+//! slot release on all exit paths: success, error, panic (Drop runs on
+//! unwind), and client disconnect (future handler drops).
 //!
 //! DRR (and the gateway stream) use [`make_ticket`] to build tickets with
-//! per-algorithm drop handlers and [`QueueTicket::disarm`] to neutralize a
-//! ticket whose oneshot delivery failed.
+//! drop handlers and [`QueueTicket::disarm`] to neutralize a ticket whose
+//! oneshot delivery failed.
 
 use crate::flow::FlowId;
 
@@ -20,6 +20,7 @@ use crate::flow::FlowId;
 ///
 /// This guarantees slot release on **all** exit paths: success, error,
 /// panic (Drop runs on unwind), and client disconnect (future handler drops).
+// @lat: [[scheduler#Queue Ticket]]
 pub struct QueueTicket {
     /// The flow ID associated with this ticket.
     pub flow_id: FlowId,

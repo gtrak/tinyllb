@@ -1,3 +1,5 @@
+> Status: Archived 2026-08-04 as implemented. The context-compression subsystem was subsequently deleted on 2026-08-19 (commit d400a93). This document is retained as a historical design record; the feature no longer exists in the codebase.
+
 # 002 — Context Compression
 
 The vLLM deployment (Qwen3.6-27B, 180K context, 2× RTX 5060 Ti) was hitting

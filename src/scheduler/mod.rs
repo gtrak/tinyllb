@@ -322,6 +322,7 @@ impl Scheduler {
     /// prevent unbounded growth of the flow and cadence registries from
     /// accumulating session IDs. Returns the number of flows removed from
     /// the flow registry (cadence entries are reaped with the same `ttl`).
+    // @lat: [[app#Idle-Flow Reaper]]
     pub fn reap_idle(&self, ttl: Duration) -> usize {
         let removed = self.registry.reap_idle(ttl);
         let cadence_removed = self.cadence.reap_idle(ttl);

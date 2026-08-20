@@ -18,14 +18,14 @@ The application state is not responsible for request processing logic, backend d
 
 ## Interface
 
-The gateway module exposes the application state struct, a router factory, a client factory, and three public sub-modules defining error types, proxy logic, and streaming support.
+The gateway module exposes the application state struct, a router factory, client factories, and four public sub-modules defining error types, proxy logic, premature-stop retry, and streaming support.
 
 **State object.** The state object provides read-only access to shared resources and cloned-by-value configuration.
 
-- Provides read access to the HTTP client, backend URL, metrics, scheduler, flow registry, backpressure configuration, priority class values, an optional per-request timeout, and an optional context-compression state (`Option<Arc<ContextState>>`).
-- The context-compression state is `None` when context compression is disabled or failed to initialize, so the proxy serves without compression. See [[context#Context Compression]].
+- Provides read access to the HTTP client, backend URL, metrics, scheduler, flow registry, backpressure configuration, priority class values, an optional per-request timeout, the inference-watchdog stall signal (`stall_rx`, a `tokio::sync::watch::Receiver<bool>`), and the premature-stop retry policy (`retry_policy`, a `RetryPolicy { enabled, max_retries, temperature_step, max_temperature, default_temperature }`).
+- The stall signal is polled by streaming tasks each read iteration to abort in-flight streams when the watchdog declares the engine stalled; the scheduler rejects new admissions with `429` while the stall is asserted.
 - Is publicly cloneable, so that each clone provides equivalent read access to the same logical resources.
-- Has no public constructor; callers construct it incrementally, which permits partial initialization before injection.
+- Is constructed either incrementally by callers, which permits partial initialization before injection, or via the public `AppState::test_default` constructor, which supplies defaults for backpressure, priorities, request timeout, stall signal, and retry policy for test fixtures.
 
 **Router factory.** The router factory builds a ready-to-serve router for the three OpenAI-compatible endpoints.
 
@@ -33,16 +33,18 @@ The gateway module exposes the application state struct, a router factory, a cli
 - Binds all three endpoints to a single proxy delegation point.
 - Returns a router typed for `AppState` shared state; the caller must supply the state after construction before serving.
 
-**Client factory.** The client factory produces a default HTTP client with fixed global configuration.
+**Client factory.** The client factory produces a default HTTP client with fixed global configuration, plus a second factory for backend metrics polling.
 
 - Produces an HTTP client with a fixed global timeout and platform-default TLS configuration.
 - Accepts no parameters; all configuration is baked into the factory.
 - Panics if the client builder fails for any reason; this is an unrecoverable startup error.
+- `build_monitor_client` produces a second client dedicated to polling the backend `/metrics` endpoint: 3s request timeout, 10s pool idle timeout, 10s TCP keepalive, so a hung scrape fails fast instead of holding a stale monitor snapshot.
 
-**Sub-modules.** The gateway exposes three sub-modules for error types, proxy logic, and streaming.
+**Sub-modules.** The gateway exposes four sub-modules for error types, proxy logic, premature-stop retry, and streaming.
 
 - The `error` sub-module defines gateway-specific error types used by proxy handlers.
 - The `proxy` sub-module contains the unified request proxying logic shared across all routes.
+- The `retry` sub-module contains premature-stop detection, request temperature bumping, and SSE frame classification/parsing used by the retry paths ([[gateway#Premature-Stop Retry]]).
 - The `stream` sub-module defines streaming support for SSE-based response forwarding.
 
 ## Invariants
@@ -54,10 +56,10 @@ The following properties hold for any conformant implementation.
 - The state object is always cloneable so that concurrent handler invocations each carry their own instance.
 - Cloning the state is shallow — references to heavyweight resources are not duplicated.
 
-**Timeout semantics.** The per-request timeout applies uniformly to all response modes.
+**Timeout semantics.** The per-request timeout bounds each backend attempt, not the total lifetime of a request.
 
 - The per-request timeout is optional; when absent, no timeout is enforced at the proxy layer beyond whatever bound the HTTP client itself enforces.
-- The per-request timeout, when present, applies uniformly to both streaming and non-streaming responses.
+- The per-request timeout, when present, applies to both streaming and non-streaming responses; in the premature-stop retry path the deadline is per-attempt (recomputed for each attempt), so the total stream duration may exceed the configured timeout when retries occur ([[gateway#Premature-Stop Retry]]).
 
 **Endpoint delegation.** All OpenAI-compatible routes use a single handler to avoid contract divergence.
 
@@ -94,6 +96,8 @@ Concepts and source artifacts associated with gateway application state.
 - [[src/gateway/mod.rs#AppState]] — exported state struct definition
 - [[src/gateway/mod.rs#create_router]] — router factory function
 - [[src/gateway/mod.rs#build_client]] — HTTP client factory function
+- [[src/gateway/mod.rs#AppState#test_default]] — public test-default state constructor
+- [[src/gateway/mod.rs#build_monitor_client]] — backend metrics-polling client factory
 
 # Reverse Proxy Request Handling
 
@@ -113,13 +117,13 @@ The gateway proxy forwards requests to a vLLM backend with controlled header fil
 
 ## Non-goals
 
-The gateway proxy does not participate in authentication, authorization, content transformation, or backend discovery.
+The gateway proxy does not participate in authentication, authorization, backend discovery, or general-purpose content transformation; the only transformations are the premature-stop retry machinery ([[gateway#Premature-Stop Retry]]).
 
 - The proxy does not inspect, validate, or modify authentication headers; any auth is enforced by the backend.
 - The proxy does not load balance, perform health checks, or fail over across backends.
-- The proxy does not cache responses or retry failed backend requests.
-- The proxy does not validate vLLM API schema semantics; it forwards request bodies verbatim to the backend.
-- The proxy does not mutate response bodies; it only strips response headers and injects the request ID.
+- The proxy does not cache responses, but it DOES retry premature-stop (degenerate empty-finish) requests up to `retry_policy.max_retries` times with a temperature bump, for both the streaming and non-streaming paths ([[gateway#Premature-Stop Retry]]).
+- The proxy does not validate vLLM API schema semantics; it forwards request bodies verbatim to the backend EXCEPT (a) streaming requests get `stream_options.include_usage: true` injected (with `Content-Length` dropped) so the proxy can detect premature stop, and (b) retries rewrite `temperature` to `min(base + attempt * step, max)`.
+- The proxy does not mutate response bodies in the normal path; it only strips response headers and injects the request ID. In the streaming retry path, a synthetic SSE comment frame (`: tinyllb: premature-stop retry attempt=N ...`) is inserted before each retry, and non-accepted trailing frames from a discarded attempt are dropped ([[gateway#Premature-Stop Retry]]).
 
 ## Interface
 
@@ -156,6 +160,8 @@ The gateway exposes three HTTP routes that share a uniform proxying contract. Ca
 **Flow Identity.**
 
 - A flow identity is resolved from request headers, with body content inspected as a fallback ([[flow#Flow Identification]]).
+- The proxy also detects the turn boundary from the last message's role ([[gateway#Turn-Boundary Detection]]) and passes the resulting `is_turn_boundary` flag to `Scheduler::admit_with_turn_boundary`.
+- `X-LLM-Priority` header overrides are applied via `flow_registry.apply_priority_override`, incrementing `flow_priority_source_total` with `header`/`auto` labels.
 
 **Error Responses Produced by the Proxy.**
 
@@ -167,13 +173,13 @@ The gateway exposes three HTTP routes that share a uniform proxying contract. Ca
 
 **Response Contracts.**
 
-- Successful backend responses are returned verbatim with hop-by-hop headers stripped and an `X-Request-ID` header injected.
+- Successful backend responses are returned verbatim with hop-by-hop headers stripped and an `X-Request-ID` header injected; non-streaming responses additionally carry an `X-Tinyllb-Premature-Stop-Retries` header reporting how many premature-stop retries occurred ([[gateway#Premature-Stop Retry]]).
 - Streaming responses omit `Content-Length` so the body can be delivered incrementally.
 - Backend error responses (4xx, 5xx) are returned verbatim with filtered headers; the proxy does not alter status codes or error bodies.
 
 **Observability Spans.**
 
-- Each proxied request emits a structured tracing span with the fields: `flow_id`, `request_id`, `method`, `path`, `stream`. Backend forwarding produces a nested span recording `status`, `duration_ms`, and `tokens`.
+- Each proxied request emits a structured tracing span with the fields: `flow_id`, `request_id`, `method`, `path`, `stream`. Backend forwarding produces a nested span recording `status`, `duration_ms`, and `tokens`; `tokens` is recorded only on the non-streaming path (streaming token accounting is recorded by [[gateway#Streaming Passthrough and Token Accounting]]).
 
 **Configuration.**
 
@@ -223,12 +229,12 @@ Operational boundaries limit what the proxy can do and how callers must behave.
 
 - Request bodies of 32 MiB or larger are rejected before forwarding.
 - The HTTP client enforces a 300-second upper bound independently of any configured request timeout.
-- Streaming responses are bounded by a single deadline equal to the configured request timeout. Non-streaming responses apply the timeout duration independently to each forwarding phase, so the effective bound may exceed the configured value.
+- Streaming responses are bounded by a per-attempt deadline equal to the configured request timeout in the retry path (recomputed for each attempt), so the total stream duration may exceed the configured value when retries occur. Non-streaming responses apply the timeout duration independently to each forwarding phase, so the effective bound may exceed the configured value.
 
 **Scheduling.**
 
 - Requests without an explicit `max_tokens` field default to 1024 tokens for work-unit calculation.
-- The proxy never retries a failed backend request; clients must implement their own retry logic.
+- The proxy retries premature-stop (degenerate empty-finish) requests internally ([[gateway#Premature-Stop Retry]]); transport failures (connection drops, abrupt termination) are surfaced to the client as an errored body so the client auto-retries with its own backoff.
 
 **Error Passthrough.**
 
@@ -267,7 +273,7 @@ Gateway streaming wraps backend HTTP responses as client-facing byte streams, op
 Gateway streaming wraps backend HTTP responses as client-facing byte streams, optionally instrumenting token accounting and lifecycle tracking. In-flight requests are counted and queue slots held throughout the stream.
 
 - Active request count always reflects the number of live streaming responses.
-- Backend bytes reach clients without transformation, truncation, or reordering.
+- In the normal passthrough and instrumented paths, backend bytes reach clients without transformation, truncation, or reordering; the retry path buffers frames (`SseFrameParser`), inserts a synthetic comment frame before each retry, and drops non-accepted trailing frames from discarded attempts ([[gateway#Premature-Stop Retry]]).
 - Token generation is accounted from the payload with best-effort parsing semantics.
 - Queue admission slots are released only when a stream terminates by any path.
 - Stream deadlines, when configured, cause the stream to produce an error when exceeded.
@@ -276,15 +282,14 @@ Gateway streaming wraps backend HTTP responses as client-facing byte streams, op
 
 Gateway streaming does not guarantee anything about payload correctness, JSON validity, or token-count precision; those are backend concerns.
 
-- No buffering, transformation, or payload inspection beyond token key scanning.
+- In the normal passthrough and instrumented paths, there is no buffering, transformation, or payload inspection beyond token key scanning; the retry path instead buffers and inspects every frame (`SseFrameParser` + `classify_frame`) to detect terminal frames and premature stop ([[gateway#Premature-Stop Retry]]).
 - No recovery of lost metrics on process crash or guard abandonment.
 - No deduplication of token counts when multiple usage objects appear.
 - No HTTP-level error semantics; backend errors surface as opaque I/O errors.
-- No reconnection, retry, or request reshaping logic.
 
 ## Interface
 
-The gateway stream exposes three construction-time contracts and one stream contract that consumers rely on.
+The gateway stream exposes four construction-time contracts and one stream contract that consumers rely on.
 
 **Active-request guard.** The active-request guard tracks the count of live streaming requests.
 
@@ -306,12 +311,21 @@ The gateway stream exposes three construction-time contracts and one stream cont
 - Reports delivered token counts to the lifecycle guard on each positive token parse and releases the queue slot on any termination path.
 - Stream errors when the deadline is exceeded; repeated polls after the deadline elapse produce repeated errors (termination is consumer-driven).
 
+**Retry stream.** `spawn_retry_stream` is the retry-aware streaming construction that wraps the instrumented path with premature-stop retry ([[gateway#Premature-Stop Retry]]).
+
+- Accepts the application state, the initial backend response, the backend URL, method and headers, the forwarded request body, the queue admission slot, and a lifecycle guard; returns the client-facing body backed by an mpsc(64) channel.
+- A spawned task owns the admission slot, lifecycle guard, and active-request guard for the whole retry loop, framing the backend stream with `SseFrameParser` and classifying frames with `classify_frame` to detect terminal frames and premature stop.
+- When an attempt terminates degenerate, a synthetic SSE comment frame is injected before the retry, the request is re-issued with a bumped temperature, and frames of the discarded attempt are not forwarded after the terminal frame.
+- The stream aborts on inference-watchdog stall (polled via `stall_rx` each read iteration) and enforces a per-attempt deadline recomputed from the configured request timeout.
+- If the stream ends without an accepted terminal frame (EOF, stall, or timeout), the body is terminated with an error so hyper aborts the response and clients auto-retry.
+- Token accounting applies only to the accepted attempt; tokens from discarded attempts are never counted.
+
 ## Invariants
 
 The following statements hold regardless of implementation details. They define what must remain true across any rewrite.
 
 - The active-request counter is incremented exactly once per guard construction and decremented exactly once per guard destruction; intermediate value equals the number of live guards.
-- Byte payloads are forwarded verbatim; neither passthrough nor instrumented streams truncate, reorder, transform, or merge bytes.
+- Byte payloads are forwarded verbatim in the passthrough and instrumented streams, which truncate, reorder, transform, and merge no bytes; the retry stream is the deliberate exception — it buffers frames (`SseFrameParser`), inserts a synthetic comment frame before each retry, and drops non-accepted trailing frames from discarded attempts ([[gateway#Premature-Stop Retry]]).
 - Token metric updates are strictly best-effort: parse failures or ambiguous payloads never produce errors or alter stream delivery.
 - Queue admission slots are bound from stream construction to stream drop; they are released on normal completion, client disconnect, and timeout error.
 - A completion signal is emitted to the lifecycle guard each time the stream yields `None` (exhaustion); it is not emitted on error or timeout paths.
@@ -346,7 +360,6 @@ Concepts and source artifacts associated with streaming passthrough and token ac
 - [[gateway#Gateway Application State]] — Deadline configuration and timeout semantics.
 - [[gateway#Reverse Proxy Request Handling]] — upstream proxy that triggers streaming mode.
 - [[src/gateway/stream.rs#RequestActiveGuard]] — Active-request guard implementation.
-- [[src/gateway/stream.rs#PassthroughStream]] — Passthrough stream implementation.
 - [[src/gateway/stream.rs#MetricStream]] — Instrumented stream implementation.
 
 # Proxy Error Model
@@ -372,7 +385,7 @@ The gateway exposes a uniform contract: every proxy failure becomes an HTTP resp
 
 **Error taxonomy.**
 
-- **Backend error.** The backend returned an HTTP response indicating failure (4xx or 5xx). The gateway echoes the original status, headers, and body without modification.
+- **Backend error.** The backend returned an HTTP response indicating failure (4xx or 5xx). The gateway's handling of backend errors is the normal response passthrough, not the error taxonomy: the original status code and body propagate unchanged, but response headers are filtered (hop-by-hop, `Host`, and any header named in `Connection` are stripped via `filter_response_headers`) and `X-Request-ID` is injected. The `ProxyError::BackendError` variant is not constructed at runtime by the proxy path; backend errors never flow through the error taxonomy.
 - **Network failure.** Communication with the backend failed. Maps to 502 Bad Gateway. Response body is plain text `"Bad Gateway"`.
 - **Internal error.** A non-transport, non-backend failure within the proxy path. Maps to 500 Internal Server Error. The diagnostic message string appears both in structured error-level logs and verbatim in the HTTP response body.
 - **Payload too large.** The request body exceeded the configured size limit. Maps to 413 Payload Too Large. Response body is plain text `"Request body too large"`.
@@ -399,10 +412,11 @@ The error taxonomy maintains a stable, exhaustive mapping between failure condit
 - Every possible proxy error variant maps to exactly one HTTP status code; no condition lacks a response.
 - The mapping from error to response is total and unambiguous — the same error variant always produces the same status code.
 
-**Backend fidelity.** Backend errors pass through the gateway without modification.
+**Backend fidelity.** Backend error status and body pass through the gateway without modification.
 
-- Backend errors are a faithful pass-through: the original status code, headers, and body propagate unchanged through the gateway. Header completeness depends on the caller supplying a complete header map.
-- The gateway does not inspect, modify, or augment backend error payloads.
+- Backend error responses are a faithful pass-through: the original status code and body propagate unchanged through the gateway.
+- Response headers are not passed through verbatim: hop-by-hop headers, `Host`, and any header named in `Connection` are stripped via `filter_response_headers`, and `X-Request-ID` is injected.
+- The gateway does not inspect, modify, or augment backend error status codes or bodies; only header filtering and request-ID injection apply.
 
 **Header correctness.** Backpressure rejections carry required headers on every invocation.
 
@@ -449,7 +463,7 @@ The error taxonomy separates observable failure modes into distinct status codes
 
 **Why exhaustive mapping.** An exhaustive error-to-response mapping eliminates gaps where an unexpected condition silently drops the response or produces an unhandled panic.
 
-**Why backend fidelity.** The gateway is transparent for backend-originated errors; modifying status, headers, or body would obscure the backend's intent and break client-side error handlers.
+**Why backend fidelity.** The gateway is transparent for backend-originated error status and body; modifying either would obscure the backend's intent and break client-side error handlers. The only applied modifications are hop-by-hop header filtering and request-ID injection, which preserve HTTP correctness without changing backend semantics.
 
 **Why `Retry-After` for backpressure.** A structured retry signal lets clients throttle themselves during congestion rather than hammering the gateway. Integer seconds comply with RFC 7231 and keep header parsing simple.
 
@@ -467,3 +481,88 @@ Concepts and source artifacts associated with the proxy error model.
 - [[gateway#Reverse Proxy Request Handling]] — upstream proxy handler that produces error conditions.
 - [[gateway#Gateway Application State]] — application state that configures error-related settings.
 - [[src/gateway/error.rs#ProxyError]] — error type and response construction.
+
+# Premature-Stop Retry
+
+The gateway retries requests whose response terminates prematurely with an empty body (degenerate `finish_reason ∈ {stop, length}` with no content and no tool_calls), bumping temperature each attempt.
+
+## Purpose
+
+Premature-stop retry recovers degenerate backend completions that would otherwise kill the caller's agentic thread: the client sees a single request, while the gateway may internally issue multiple backend attempts.
+
+- **Detection.** `is_premature_stop` returns true only when the first choice's `finish_reason` is `stop` or `length` AND the message has no content (absent, null, or empty string) AND no tool calls (absent, null, or empty array).
+- **Temperature bump.** Each retry rewrites the request's `temperature` to `min(base + attempt * step, max)`, falling back to `default_temperature` when the request carries no usable numeric temperature, and clamping at `max_temperature`.
+- **Retry policy gating.** Retries occur only when `retry_policy.enabled` is true and `max_retries > 0` ([[gateway#Gateway Application State]]); the retry paths additionally apply only to `/v1/chat/completions` requests whose forwarded body parses as JSON.
+- **Observability.** Non-streaming responses carry an `X-Tinyllb-Premature-Stop-Retries` header reporting the retry count; the streaming path emits a synthetic SSE comment frame (`: tinyllb: premature-stop retry attempt=N ...`) before each retry; `tinyllb_premature_stop_detected_total`, `tinyllb_premature_stop_retries_total`, and `tinyllb_premature_stop_exhausted_total` track detections, retries, and exhausted retry budgets ([[metrics#Metric Family Contracts]]).
+
+## Interface
+
+The retry machinery exists on both response modes and shares the request-reissue helper `send_retry_request`.
+
+**Shared reissue.** Retries re-issue the request directly to the backend via `send_retry_request`, which clones the original request headers, strips `Content-Length` (the bumped-temperature body changes length, so the client recomputes it), and applies the per-attempt timeout.
+
+**Non-streaming path.** The handler inspects the collected response body with `is_premature_stop` and loops while the body is degenerate and attempts remain.
+
+- Each retry increments `tinyllb_premature_stop_detected_total` and `tinyllb_premature_stop_retries_total`.
+- The path fails open on retry send failure, a non-2xx retry response, a body-read error, or a re-serialization error: the last successfully received body is kept and returned to the client.
+- The final response carries the `X-Tinyllb-Premature-Stop-Retries` header with the number of retries performed.
+- If the retry budget is exhausted and the final body is still degenerate, `tinyllb_premature_stop_exhausted_total` is incremented.
+
+**Streaming path.** `spawn_retry_stream` ([[gateway#Streaming Passthrough and Token Accounting]]) is the retry-aware streaming construction.
+
+- A spawned task frames the backend stream with `SseFrameParser` and classifies each frame with `classify_frame` to detect terminal frames and premature stop, forwarding frames to the client body over an mpsc(64) channel.
+- A synthetic SSE comment frame (`: tinyllb: premature-stop retry attempt=N ...`) is injected into the client stream before each retry; frames of a discarded attempt are not forwarded past its terminal frame.
+- The task polls the stall signal (`stall_rx`) each read iteration and aborts the stream when the watchdog declares the engine stalled.
+- A per-attempt deadline is recomputed from the configured request timeout for each attempt, so total stream duration may exceed the configured timeout.
+- On EOF, stall, or timeout without an accepted terminal frame, the body is terminated with an error so hyper aborts the response and clients auto-retry (a clean close would look like a completed truncated response).
+- Token accounting applies only to the accepted attempt; tokens from discarded attempts are silently discarded.
+
+## Invariants
+
+Retry behavior is bounded by the policy and never distorts a response that already produced real output.
+
+- Retries occur only on degenerate premature stop — never on a response that produced real content or tool calls.
+- Temperature is monotonically non-decreasing across attempts and bounded above by `max_temperature`.
+- The accepted attempt's tokens are the only ones accounted; discarded-attempt tokens never reach metrics or the lifecycle guard.
+- Abrupt termination (EOF, stall, or timeout without a terminal frame) surfaces as an errored body, never as a swallowed EOF.
+- Retry send failures fail open: the client always receives a body, either the retry result or the last successful body.
+
+## Related
+
+Source files and cross-concept links for the premature-stop retry subsystem.
+
+- [[src/gateway/retry.rs]] — premature-stop detection, temperature bumping, and SSE frame parsing.
+- [[src/gateway/retry.rs#is_premature_stop]] — degenerate-completion detector.
+- [[src/gateway/retry.rs#bump_temperature]] — per-attempt temperature rewrite.
+- [[src/gateway/retry.rs#classify_frame]] — SSE frame classification.
+- [[src/gateway/retry.rs#SseFrameParser]] — incremental SSE event frame parser.
+- [[src/gateway/stream.rs#spawn_retry_stream]] — retry-aware streaming construction.
+- [[src/gateway/stream.rs#send_retry_request]] — shared retry request reissue helper.
+- [[config#Configuration Contract]] — retry policy configuration surface.
+- [[metrics#Metric Family Contracts]] — premature-stop counters.
+
+# Turn-Boundary Detection
+
+The proxy inspects the last message's role in the request body to classify a request as a turn boundary or an intra-turn continuation, feeding the scheduler's cadence state machine.
+
+## Purpose
+
+Turn-boundary classification tells the scheduler whether an admitted request begins a new conversational turn or continues an in-flight one, which drives the cadence-based priority heuristic.
+
+## Rule
+
+`is_turn_boundary_request` classifies the request from the role of the last message in the body:
+
+- Returns `true` when the last message has `role: "user"` or `"system"` — or any non-tool, non-assistant role — a new turn begins.
+- Returns `false` when the last role is `"tool"` or `"assistant"` — an intra-turn continuation.
+- Returns `true` optimistically for non-chat requests, empty bodies, and malformed JSON: when the boundary cannot be determined, it is assumed.
+
+The resulting flag is passed to `Scheduler::admit_with_turn_boundary`, which records the arrival and the flag in the cadence registry ([[flow#Cadence-Based Priority Heuristic]]).
+
+## Related
+
+Source files and cross-concept links for turn-boundary detection.
+
+- [[src/gateway/proxy.rs#is_turn_boundary_request]] — last-message-role classifier.
+- [[flow#Cadence-Based Priority Heuristic]] — cadence registry consuming boundary arrivals.
+- [[scheduler#Scheduler Facade and Policy Selection]] — admission entry point carrying the boundary flag.

@@ -1,3 +1,5 @@
+> Status: Build record. The FIFO (issue 05) and WFQ (issue 10) schedulers were implemented from this plan and later deleted on 2026-08-19/20 (commits c9c4164, 303bb24). Only DRR (issue 11) survives; the scheduler facade was collapsed to DRR-only (a3d9eee). Read as history.
+
 # Plan 001 — tinyllb
 
 Implementation plan for the **Agent-Aware LLM Inference Scheduling Proxy**

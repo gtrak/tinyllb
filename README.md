@@ -3,8 +3,8 @@
 tc/qdisc for LLM inference workloads.
 
 An OpenAI-compatible scheduling proxy that sits between your agent/client and
-vLLM to enforce flow-aware scheduling (DRR, WFQ, FIFO), backpressure, and
-KV-cache-aware admission control. Designed for local-first GPU deployments.
+vLLM to enforce flow-aware scheduling (DRR), backpressure, and
+KV-cache-aware admission. Designed for local-first GPU deployments.
 
 ## Architecture
 
@@ -16,6 +16,40 @@ The proxy intercepts `/v1/*` requests, classifies them into flows, and applies
 scheduling + backpressure before forwarding to the backend. The proxy does not
 care about tensor parallelism or multi-GPU details — it forwards to a single
 backend URL.
+
+## Features
+
+- **DRR flow scheduling** — Deficit Round-Robin over flows with per-flow
+  weights, priorities, and starvation protection (force-admit after
+  `scheduler.starvation_timeout`).
+- **Completion bias** — while the number of active flows exceeds
+  `scheduler.completion_bias.target_active_flows`, admission is deferred for
+  *new* flows so in-flight work finishes first. `predictive_admit` optionally
+  lets a near-done flow (≥90% of estimated tokens delivered) yield early.
+- **KV selection bias** — under KV-cache pressure, the eligible waiting flow
+  with the largest resident KV footprint wins the next permit, so it finishes
+  and frees blocks instead of being paged in/out. Bias only: it never rejects
+  or delays a request.
+- **KV-cache-aware admission** (`kv_policy`) — opt-in delay/reject of
+  admissions based on live vLLM KV utilization
+  (`kv_policy.reject_threshold` / `kv_policy.delay_threshold`).
+- **Stall watchdog** — if the backend reports busy work but token counters
+  stop advancing for `backend.stall_timeout`, in-flight streams are aborted
+  (retry on fresh connections) and new admissions are rejected until the stall
+  clears. `0` disables the watchdog.
+- **Transport retry** — a stream that ends without a terminal frame is
+  treated as a transport failure: the body is aborted so the client's normal
+  retry logic re-sends the request.
+- **Premature-stop retry** — degenerate `finish_reason: "stop"` chat
+  responses (no content, no tool calls) are re-sent with bumped temperature;
+  see [Premature-Stop Retry](#premature-stop-retry).
+- **Turn-boundary priority** — a per-flow cadence state machine
+  reclassifies flows: a user-turn idle gap (≥ `priority_policy.idle_gap_threshold`)
+  marks the flow interactive; continuous arrivals past
+  `agentic_suspected_threshold` / `agentic_confirmed_threshold` demote it to
+  agent / background priority.
+- **Idle-flow eviction** — flows idle longer than `flows.flow_idle_ttl` are
+  reaped from the flow/cadence registries.
 
 ## Quickstart
 
@@ -70,7 +104,7 @@ settings. You can also override via environment variables:
 # docker-compose override example
 environment:
   - TINYLLB__BACKEND__URL=http://vllm:8000
-  - TINYLLB__SCHEDULER__ALGORITHM=wfq
+  - TINYLLB__SCHEDULER__COMPLETION_BIAS__ENABLED=false
   - TINYLLB__SCHEDULER__MAX_ACTIVE_FLOWS=8
 ```
 
@@ -104,30 +138,34 @@ overridden via environment variables (see below).
 | --- | --- | --- |
 | `backend.url` | `http://localhost:8000` | Backend vLLM URL |
 | `backend.metrics_interval` | `1s` | Interval for polling vLLM `/metrics` |
-| `scheduler.algorithm` | `drr` | Scheduling algorithm: `fifo`, `wfq`, `drr` |
+| `backend.stall_timeout` | `30s` | Inference-stall watchdog window; `0` disables |
 | `scheduler.max_active_flows` | `4` | Max concurrent flows admitted |
 | `scheduler.starvation_timeout` | `300s` | Force-admit a flow after this idle time |
-| `flows.default_weight` | `1` | Default WFQ weight per flow |
+| `scheduler.completion_bias.enabled` | `true` | Defer new-flow admission while active flows exceed target |
+| `scheduler.completion_bias.target_active_flows` | `0` | Active-flow target for completion bias (`0` = `max_active_flows`) |
+| `scheduler.completion_bias.predictive_admit` | `false` | Pre-admit when an active flow has delivered ≥90% of estimated tokens |
+| `scheduler.kv_bias.enabled` | `true` | KV-cache-aware selection bias among eligible waiting flows |
+| `scheduler.kv_bias.bias_full_at` | `0.9` | KV fraction at which the bias fully dominates selection |
+| `scheduler.kv_bias.pressure_below` | `0.5` | KV fraction below which the bias is off (pure DRR fairness) |
+| `flows.default_weight` | `1` | Default DRR weight per flow |
 | `flows.default_priority` | `50` | Default priority (higher = more urgent) |
+| `flows.flow_idle_ttl` | `600s` | Evict a flow after this much idle time |
 | `priorities.interactive` | `100` | Priority class for interactive sessions |
 | `priorities.agent` | `50` | Priority class for agent sessions |
 | `priorities.background` | `10` | Priority class for background jobs |
 | `backpressure.mode` | `blocking` | `blocking`, `fail_fast`, or `hybrid` |
 | `backpressure.max_queue_depth` | `100` | Max queued requests before backpressure |
 | `backpressure.max_wait` | `10s` | Max time a request waits in queue |
+| `backpressure.retry_after_base` | `1s` | Base `Retry-After` for backpressure rejections |
 | `server.bind` | `0.0.0.0:8080` | Listen address for the proxy |
+| `metrics.endpoint` | `/metrics` | Path serving Prometheus metrics |
 | `kv_policy.enabled` | `false` | Enable KV-cache-aware admission |
 | `kv_policy.reject_threshold` | `0.95` | Reject when KV utilization > threshold |
 | `kv_policy.delay_threshold` | `0.80` | Delay admission when KV utilization > threshold |
-| `context_policy.enabled` | `false` | Enable per-flow context compression |
-| `context_policy.compress_threshold` | `100000` | Est. tokens to trigger compression |
-| `context_policy.head_keep_turns` | `3` | Turns kept verbatim at start (prefix cache anchor) |
-| `context_policy.live_keep_turns` | `6` | Turns kept verbatim at end (recent context) |
-| `context_policy.compress_chunk_turns` | `8` | Turns folded into each compressed summary |
-| `context_policy.summary_max_tokens` | `2048` | Max tokens for sidecar summarization request |
-| `context_policy.store_path` | `~/.local/share/tinyllb/transcripts.db` | SQLite transcript store path |
-| `context_policy.tokenizer_path` | *(none)* | Path to tokenizer.json for accurate token counts |
-| `context_policy.compression_retries` | `3` | Sidecar retry attempts on failure |
+| `priority_policy.enabled` | `true` | Turn-boundary priority reclassification |
+| `priority_policy.idle_gap_threshold` | `30s` | Idle gap at a user turn that counts as a turn boundary |
+| `priority_policy.agentic_suspected_threshold` | `5` | Continuous arrivals to suspect agentic (agent priority) |
+| `priority_policy.agentic_confirmed_threshold` | `12` | Continuous arrivals to confirm agentic (background priority) |
 | `retry_policy.enabled` | `false` | Enable premature-stop retry for chat completions |
 | `retry_policy.max_retries` | `2` | Retry attempts after the initial (total = max_retries + 1) |
 | `retry_policy.temperature_step` | `0.3` | Temperature added per retry attempt |
@@ -144,12 +182,8 @@ overridden via environment variables (see below).
 | `/v1/models` | GET | List models (proxied to vLLM) |
 | `/v1/chat/completions` | POST | Chat completions (proxied) |
 | `/v1/completions` | POST | Completions (proxied) |
-| `/flows` | GET | Active flow list |
+| `/flows` | POST | Register (or update) a flow's weight/priority |
 | `/queue` | GET | Current queue state |
-| `/admin/context` | GET | List all flows with token counts |
-| `/admin/context/{flow_id}` | GET | Segment breakdown for a flow |
-| `/admin/context/{flow_id}/compress` | POST | Force-trigger compression |
-| `/admin/context/{flow_id}` | DELETE | Clear transcript for a flow |
 
 ## Environment Variables
 
@@ -158,7 +192,7 @@ overridden via environment variables (see below).
 | `CONFIG_PATH` | Path to config file (default: `config.yaml`) |
 | `PORT` | Override bind port (e.g. `PORT=9090` binds to `0.0.0.0:9090`) |
 | `TINYLLB__BACKEND__URL` | Override `backend.url` |
-| `TINYLLB__SCHEDULER__ALGORITHM` | Override scheduler algorithm |
+| `TINYLLB__BACKEND__STALL_TIMEOUT` | Override stall watchdog window |
 | `TINYLLB__SCHEDULER__MAX_ACTIVE_FLOWS` | Override max active flows |
 | `TINYLLB__SCHEDULER__STARVATION_TIMEOUT` | Override starvation timeout |
 | `TINYLLB__FLOWS__DEFAULT_WEIGHT` | Override default flow weight |
@@ -172,44 +206,14 @@ overridden via environment variables (see below).
 | `TINYLLB__KV_POLICY__ENABLED` | Override KV policy enable flag |
 | `TINYLLB__KV_POLICY__REJECT_THRESHOLD` | Override KV reject threshold |
 | `TINYLLB__KV_POLICY__DELAY_THRESHOLD` | Override KV delay threshold |
+| `TINYLLB__PRIORITY_POLICY__ENABLED` | Override turn-boundary priority reclassification |
+| `TINYLLB__RETRY_POLICY__ENABLED` | Override premature-stop retry enable flag |
 | `TINYLLB__REQUEST_TIMEOUT` | Override request timeout |
 
 The `TINYLLB__` prefix replaces config sections: `TINYLLB__SECTION__KEY`
 maps to `section.key` in YAML.
 
-## Context Compression
-
-The proxy can compress conversation context by summarizing older turns via a
-background sidecar request to vLLM. This extends effective context windows for
-agentic loops and caps per-flow KV footprint.
-
-**How it works:** Each flow's conversation is modeled as `[Head + Compressed₁..ₙ + Live]`.
-Head (system prompt + earliest turns) and Compressed segments are immutable and
-prefix-cache-friendly. Live (recent turns) grows per request. When total
-estimated tokens exceed `compress_threshold`, the oldest chunk of Live turns is
-summarized by a background sidecar request and stored as a new Compressed segment.
-
-**Disabled by default.** Enable via `context_policy.enabled: true` in config.
-
-**Fail-open:** if the compression subsystem errors, the proxy forwards the
-original request unchanged.
-
-**Admin API:**
-```bash
-curl http://localhost:8080/admin/context | jq           # list all flows
-curl http://localhost:8080/admin/context/{flow_id} | jq  # segment breakdown
-curl -X POST http://localhost:8080/admin/context/{flow_id}/compress  # force compress
-curl -X DELETE http://localhost:8080/admin/context/{flow_id}         # clear transcript
-```
-
-**Prometheus metrics** (prefixed `tinyllb_context_`):
-`compression_events_total`, `compression_tokens_saved_total`,
-`compression_sidecar_latency_seconds`, `estimated_tokens{flow_id}`,
-`compression_queue_depth`.
-
-See `docs/plans/002-context-compression/PLAN.md` for the full design.
-
-# Premature-Stop Retry
+## Premature-Stop Retry
 
 The proxy can retry `/v1/chat/completions` requests that produce degenerate
 stops — responses with `finish_reason: "stop"`, empty `content`, and no
@@ -219,8 +223,7 @@ empty assistant message and cannot continue.
 **How it works:** On detection of a premature stop, the proxy re-sends the
 exact forwarded body with `temperature` bumped by `temperature_step` per
 attempt (capped at `max_temperature`), up to `max_retries` times. The retry
-bypasses the scheduler (admission slot held), skips internal-compressor
-requests and non-chat paths.
+bypasses the scheduler (admission slot held) and skips non-chat paths.
 
 - **Streaming:** The client sees a seamless concatenation — failed reasoning
 appears as extra "thinking" but the thread survives with a single terminal
@@ -244,8 +247,8 @@ Measured throughput and fairness benchmarks are documented in:
   Admission control vs direct uncontrolled path. At N=32, proxy achieves
   3.48× higher tokens/sec than direct.
 - [Phase 2 Results](docs/plans/001-tinyllb/PHASE2-RESULTS.md) —
-  WFQ fairness, no-starvation guarantees, completion bias, and queue
-  endpoint correctness.
+  historical Phase 2 results (fairness / no-starvation / queue-endpoint
+  correctness under DRR).
 
 ## License
 

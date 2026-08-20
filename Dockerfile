@@ -7,9 +7,8 @@ RUN apt-get update && \
 
 WORKDIR /src
 
-# Cache layer: copy manifest + benches so cargo dependency resolution is cached.
+# Cache layer: copy the manifests so cargo dependency resolution is cached.
 COPY Cargo.toml Cargo.lock ./
-COPY benches ./benches
 RUN mkdir src && echo "fn main() {}" > src/main.rs && \
     cargo build --release && \
     rm -rf src

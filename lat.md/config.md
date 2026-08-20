@@ -30,7 +30,7 @@ The configuration surface presents contractual guarantees about what values are 
 **Configuration components**
 
 - **Backend specification** requires an absolute URL with scheme and a metrics poll interval; defaults are `http://localhost:8000` and `1s`.
-- **Scheduling algorithm** accepts three modes — `fifo`, `wfq`, `drr` — with `drr` as the default.
+- **Scheduling discipline** is fixed to deficit round robin (DRR); the discipline is not configurable — the configuration surface exposes no scheduling-algorithm choice.
 - **Scheduler limits** declare `max_active_flows` (default `4`) and `starvation_timeout` (default `300s`).
 - **Completion bias** controls admission gating for new flows: `enabled` (default `true`), `target_active_flows` (default `0`, meaning "use `max_active_flows`"), and `predictive_admit` (default `false`).
 - **KV-cache-aware selection bias** controls scheduler selection reordering under pressure: `enabled` (default `true`), `bias_full_at` (default `0.9`, pressure at which footprint fully dominates selection), and `pressure_below` (default `0.5`, pressure below which the bias is inactive and selection is purely fair). Never rejects. See [[scheduler_policies#KV-Cache-Aware Selection Bias]].
@@ -40,7 +40,6 @@ The configuration surface presents contractual guarantees about what values are 
 - **Metrics** declares the metrics endpoint path (default `/metrics`).
 - **Server** declares the listener bind address (default `0.0.0.0:8080`).
 - **KV-cache policy** declares `enabled` (default `false`), `reject_threshold` (default `0.95`), and `delay_threshold` (default `0.80`).
-- **Context policy** declares compression settings: `enabled` (default `false`), `compress_threshold` (default `100000`), `head_keep_turns` (default `3`), `live_keep_turns` (default `6`), `compress_chunk_turns` (default `8`), `summary_max_tokens` (default `2048`), `store_path`, `tokenizer_path`, `sidecar_request_timeout` (default `60s`), `compression_retries` (default `3`), and `prompt_template_path`. See [[context#Context Compression]].
 - **Retry policy** declares premature-stop retry settings: `enabled` (default `false`), `max_retries` (default `2`), `temperature_step` (default `0.3`), `max_temperature` (default `1.5`), and `default_temperature` (default `0.0`). When enabled, degenerate `/v1/chat/completions` responses are retried with bumped temperature.
 - **Priority policy** declares turn-boundary state-machine heuristic settings: `enabled` (default `true`), `idle_gap_threshold` (default `30s`), `agentic_suspected_threshold` (default `5`), and `agentic_confirmed_threshold` (default `12`). When enabled, the scheduler classifies flows by turn-boundary idles versus continuous activity and adjusts priority automatically. See [[scheduler#Scheduler Facade and Policy Selection]].
 
@@ -78,7 +77,6 @@ These limitations are inherent to the configuration model.
 - When backpressure mode is `hybrid`, `max_wait` must be positive; zero is rejected.
 - When backpressure mode is `blocking`, no positive-threshold constraints apply; zero values for queue depth and wait time are valid.
 - When `kv_policy.enabled` is `true`, thresholds must satisfy: `reject_threshold` in `(0, 1]`, `delay_threshold` in `[0, 1]`, and `delay_threshold` strictly less than `reject_threshold`. When `enabled` is `false`, these thresholds are not validated.
-- When `context_policy.enabled` is `true`, `compress_threshold`, `head_keep_turns`, `live_keep_turns`, `compress_chunk_turns`, `summary_max_tokens`, and `compression_retries` must all be positive, and `store_path` must be non-empty. When `enabled` is `false`, these fields are not validated. A leading `~` in `store_path`, `tokenizer_path`, and `prompt_template_path` is expanded to the user's home directory.
 - When `retry_policy.enabled` is `true`, `max_retries` must be > 0, `temperature_step` must be > 0.0, `max_temperature` must be >= `default_temperature`, and `max_temperature` must be <= 2.0. When `enabled` is `false`, these fields are not validated.
 - `agentic_confirmed_threshold` must be strictly greater than `agentic_suspected_threshold`, and `agentic_suspected_threshold` must be at least 1. These constraints are validated regardless of the `enabled` flag.
 
@@ -117,17 +115,14 @@ This section lists related concepts and source references for the configuration 
 - [[admission#Backpressure and Admission Rejection]] — backpressure strategies selected by mode and threshold configuration
 - [[admission#KV-Cache-Aware Admission Gate]] — admission control thresholds and toggles within the policy configuration
 - [[src/config/mod.rs#Config]] — top-level configuration type and component definitions
-- [[src/config/mod.rs#Algorithm]] — scheduling algorithm enumeration
 - [[src/config/mod.rs#BackpressureMode]] — backpressure mode enumeration
 - [[src/config/mod.rs#CompletionBias]] — completion bias sub-configuration
 - [[src/config/mod.rs#Priorities]] — priority class values
 - [[src/config/mod.rs#Metrics]] — metrics endpoint configuration
 - [[src/config/mod.rs#Server]] — server bind address configuration
 - [[src/config/mod.rs#KvPolicyConfig]] — KV-cache admission policy configuration
-- [[src/config/mod.rs#ContextPolicy]] — context compression policy configuration
 - [[src/config/mod.rs#RetryPolicy]] — premature-stop retry policy configuration
 - [[src/config/mod.rs#PriorityPolicy]] — priority heuristic policy configuration
-- [[context#Context Compression]] — domain semantics of context policy fields
 - [[src/config/loader.rs]] — layered resolution and validation
 
 # Configuration Loading and Validation
@@ -256,7 +251,7 @@ The load operation uses unstructured errors rather than a structured error type 
 ## Related
 
 This section lists related concepts and source references for configuration loading.
-- [[config#Configuration Contract]] — configuration surfaces and their domain semantics (CompletionBias, request_timeout, Algorithm, etc.).
+- [[config#Configuration Contract]] — configuration surfaces and their domain semantics (CompletionBias, request_timeout, etc.).
 - the domain structure of the configuration sections the loader populates.
 - [[src/config/loader.rs#load]] — load entry point, sourcing, and validation.
 - `humantime_serde` and `humantime_serde_option` modules in loader.rs provide duration text serialization.

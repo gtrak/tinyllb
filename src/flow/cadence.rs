@@ -93,6 +93,7 @@ impl Default for Cadence {
 }
 
 /// Registry of per-flow cadence state.
+// @lat: [[flow#Cadence-Based Priority Heuristic]]
 pub struct CadenceRegistry {
     inner: DashMap<FlowId, Cadence>,
     policy: Arc<PriorityPolicy>,

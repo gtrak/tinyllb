@@ -1,3 +1,5 @@
+> Status: Historical benchmark record. The WFQ ratio test (test_weighted_fairness_wfq_ratio) and test_completion_bias_limits_active_flows no longer exist in tests/phase2_e2e.rs after the FIFO/WFQ deletion. WFQ fairness verdicts are not reproducible against the current DRR-only code.
+
 # Phase 2 Benchmark Results
 
 ## Test Summary

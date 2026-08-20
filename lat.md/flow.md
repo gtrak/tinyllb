@@ -92,7 +92,7 @@ The registry is not a queue and does not define ordering, validate values, or co
 - Does not define ordering among waiting flows; ordering is supplied externally.
 - Does not validate weight or priority ranges.
 - Does not enforce scheduling policy or coordinate depth and credit counter updates.
-- Flows cannot be removed; the registry is a monotonic collection.
+- Provides no explicit unregistration API; removal happens only through the idle reaper, which evicts flows with zero depth, zero active requests, and a stale last-seen timestamp (see [[app#Idle-Flow Reaper]]).
 - Active-count mechanism tracks in-flight presence but provides no underflow protection.
 
 ## Interface
@@ -106,6 +106,8 @@ The registry exposes contractual surfaces covering construction, registration, l
 - **Aggregate queries** — reports registered flow count, emptiness, and sum of all per-flow depth counters.
 - **Queue snapshots** — produces a snapshot with global counts and ordered `QueueFlowEntry` items, filtering to registered flows with positive depth.
 - **Per-flow attributes** — weight, priority, and priority source (readable/writable methods); depth, credit, enqueued timestamp, active count (direct public field access). Priority source indicates whether priority was set by the heuristic (0), an explicit header (1), or the admin API (2).
+- **Priority overrides** — `apply_priority_override` pins a flow's priority to a class value from the `X-LLM-Priority` header (source 1) or, on `auto`, clears the pin (source 0) and resets priority to the configured `agent` class.
+- **Idle eviction support** — a `last_seen` timestamp (unix seconds) is refreshed on lookup and registration; the active count is tracked via `inc_active`/`dec_active`/`is_active` accessors; together these feed the idle reaper (see [[app#Idle-Flow Reaper]]).
 - **Flow identity** — opaque type with string construction, equality, display, ephemeral classification, and metric label derivation.
 
 ## Invariants
@@ -113,7 +115,7 @@ The registry exposes contractual surfaces covering construction, registration, l
 All statements about the registry remain true regardless of implementation details.
 
 - Each flow identity maps to at most one registered entry; creation paths never produce duplicates.
-- Once created, a flow remains registered for the registry's lifetime; identities cannot be unregistered.
+- A flow remains registered until the idle reaper evicts it: entries with zero depth, zero active requests, and a last-seen timestamp older than the configured TTL are removed; there is no explicit unregistration API.
 - Weight, priority, credit, and depth are updated individually; no cross-attribute atomicity is guaranteed.
 - Snapshots list only flows with positive depth, contain no duplicates, and assign contiguous 1-based positions.
 - Ephemeral metric label always resolves to a single common value; named labels equal the identity string.
@@ -124,7 +126,7 @@ All statements about the registry remain true regardless of implementation detai
 The registry operates under explicit limitations that shape its safe usage.
 
 - Weight and priority updates are not mutually exclusive with concurrent reads; consumers may observe briefly inconsistent attribute pairs.
-- Active-count decrement uses unsaturated subtraction: debug builds panic on underflow; release builds wrap to maximum representable integer.
+- Active-count decrement uses wrapping atomic subtraction in all build profiles; an underflow wraps to the maximum representable value and never panics.
 - Aggregate depth sum may overflow 32-bit range under extreme depth; overflow behavior depends on compilation profile.
 - Snapshot positions reflect relative order among included flows only; position is not an absolute queue index.
 - Snapshot global counts are caller-supplied and not cross-checked against per-flow data.
@@ -188,7 +190,7 @@ The resolution contract accepts pre-extracted request headers and body bytes, an
   6. `session_id` (pi, Codex Responses wire header)
   7. `metadata.flow_id` (JSON body)
   8. Auto-generated `ephemeral-{UUIDv4}`
-- **Source acceptance** — header values must be valid UTF-8 and non-empty after trimming whitespace; session header names are matched case-insensitively; body must be parseable JSON with a `metadata` object containing non-empty `flow_id` string.
+- **Source acceptance** — accepted per source: the `X-LLM-Flow-ID` override header must be valid UTF-8 and non-empty, but is not trimmed — a whitespace-only override value is adopted verbatim as the flow identifier. Harness session header names are matched case-insensitively and their values are trimmed, so a whitespace-only session value is treated as absent. The JSON body must be parseable with a `metadata` object containing a non-empty `flow_id` string.
 - **FlowId constructor** — accepts any string, including empty and `ephemeral-` prefixed.
 - **FlowId Display** — yields the exact underlying string value.
 - **Ephemeral test** — returns true when identifier begins with `ephemeral-`.
@@ -212,7 +214,7 @@ The following properties hold regardless of implementation changes.
 
 The identification contract operates within strict boundaries on input acceptance and output classification.
 
-- Empty or whitespace-only values from any source are treated as absent; never adopted as the flow identifier.
+- Empty values are treated as absent for the session headers and body source, and for the `X-LLM-Flow-ID` override header only the strictly-empty string is rejected — the override is not trimmed, so a whitespace-only override value is adopted verbatim.
 - Body source requires specific JSON structure: `metadata` object with string-valued `flow_id`.
 - Sources that fail are silently skipped; no diagnostic is emitted and no error propagates.
 - No server-side cross-request persistence; repeated requests resolve to the same flow only when the client repeats an identifier.
@@ -241,3 +243,30 @@ Related concepts and source code for flow identification.
 - [[src/flow/mod.rs#ResolvedFlow]] — resolved flow identity and priority override
 - [[src/flow/cadence.rs]] — cadence-based priority heuristic
 - [[src/flow/mod.rs]] — Flow identifier type and ephemeral classification.
+
+# Cadence-Based Priority Heuristic
+
+A turn-boundary state machine classifies flows as interactive or agentic from request-arrival cadence and adjusts flow priority automatically.
+
+## Purpose
+
+The heuristic replaces static priority defaults with per-flow classification that reacts to how a flow actually sends requests.
+
+- Four `CadenceState` values — Cold, Interactive, AgenticSuspected, AgenticConfirmed — map to configured priority classes via `Priorities`: Cold and Interactive map to `interactive` (default 100), AgenticSuspected to `agent` (default 50), AgenticConfirmed to `background` (default 10).
+- Promotion: a turn-boundary arrival (a `role: user` request) whose gap since the previous arrival is at least `priority_policy.idle_gap_threshold` immediately promotes the flow to Interactive regardless of prior state, and resets the continuous-arrival counter.
+- Demotion: consecutive non-turn-boundary arrivals increment `continuous_arrival_count`; crossing `agentic_suspected_threshold` demotes the flow to AgenticSuspected, and crossing `agentic_confirmed_threshold` demotes it to AgenticConfirmed.
+- A fast turn-boundary arrival (a user request with a gap below the threshold) resets the continuous-arrival counter without promoting the flow.
+- Flows with `priority_source != 0` (a header or admin override pinned the priority) are never modified by the state machine; `priority_policy.enabled = false` acts as a kill switch that suppresses all priority changes.
+- `state_of(flow_id)` exposes the current state for the `llm_flow_cadence_state` metric (see [[metrics#Metric Family Contracts]]).
+- `CadenceRegistry::reap_idle(ttl)` evicts entries whose last arrival is older than the TTL, keeping the cadence registry bounded (see [[app#Idle-Flow Reaper]]).
+
+## Related
+
+Cross-references to related concepts and source locations for the cadence-based priority heuristic.
+
+- [[src/flow/cadence.rs]] — State machine and registry implementation
+- [[gateway#Turn-Boundary Detection]] — Turn-boundary signal that drives promotion
+- [[scheduler#Scheduler Facade and Policy Selection]] — Admission path that applies the classified priority
+- [[config#Configuration Contract]] — `priority_policy` and `priorities` configuration
+- [[metrics#Metric Family Contracts]] — Cadence state and priority metrics
+- [[app#Idle-Flow Reaper]] — Eviction of stale cadence entries

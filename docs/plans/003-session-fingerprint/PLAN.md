@@ -15,7 +15,7 @@ Aug 03 18:42:37 proxy: request_id="cfdb3f81..." flow_id="ephemeral-9393b1c6-..."
 ```
 
 With two concurrent sessions the proxy cannot group turns per session,
-so per-flow fair scheduling (DRR/WFQ), queue depth, credits, and
+so per-flow fair scheduling (DRR), queue depth, credits, and
 metrics all operate on single requests instead of conversations.
 
 Research (plan background, from PR/docs of each harness):

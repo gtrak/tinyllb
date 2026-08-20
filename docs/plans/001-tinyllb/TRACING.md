@@ -1,13 +1,15 @@
+> Status: Living convention doc. The algorithm span field is now always "drr" (only DRR survives; FIFO/WFQ deleted). Update the field table below accordingly when editing.
+
 # Tracing Conventions
 
 ## Initialization
 
-The global tracing subscriber is initialized via `tinyllb_proxy::telemetry::init()`
+The global tracing subscriber is initialized via `tinyllb::telemetry::init()`
 at the start of `main()`. It is configured by two environment variables:
 
 | Env Var | Default | Description |
 | --- | --- | --- |
-| `RUST_LOG` | `info,tinyllb_proxy=debug` | Standard tracing filter directive. |
+| `RUST_LOG` | `info,tinyllb=debug` | Standard tracing filter directive. |
 | `TINYLLB_LOG_JSON` | unset | Set to `1` for JSON output (one JSON object per line). |
 
 When `TINYLLB_LOG_JSON=1`, the subscriber emits JSON-formatted log lines
@@ -59,15 +61,14 @@ via `Span::current().record()` after resolution inside the handler body.
 ### `admit` span
 
 Created by `#[tracing::instrument]` on the shared `Scheduler::admit` in
-`src/scheduler/mod.rs`. This single instrument covers **all algorithms**
-(FIFO, WFQ, DRR) — no per-algorithm instrumentation needed. A terminal
+`src/scheduler/mod.rs`. This single instrument covers **the DRR scheduler** — no per-algorithm instrumentation needed. A terminal
 `"admit decision"` event is emitted inside `admit()` with the final outcome.
 
 | Span field | Type | Description |
 | --- | --- | --- |
 | `flow_id` | String | Flow identifier being admitted. |
 | `queue_depth_before` | u32 | Total queue depth at admit entry (recorded via `Span::current().record()`). |
-| `algorithm` | String | `fifo`, `wfq`, or `drr`. |
+| `algorithm` | String | `drr`. |
 
 | Terminal event field | Description |
 | --- | --- |

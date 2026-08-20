@@ -134,10 +134,9 @@ fn parse_prometheus_line(line: &str) -> Option<(&str, f64)> {
     // Find the metric name (everything before `{` or space).
     let metric_name = if let Some(brace) = line.find('{') {
         &line[..brace]
-    } else if let Some(space) = line.find(' ') {
-        &line[..space]
     } else {
-        return None;
+        let space = line.find(' ')?;
+        &line[..space]
     };
 
     // Find the value (last token that looks like a number).
@@ -303,6 +302,7 @@ impl BackendMonitor {
     }
 
     /// Background polling loop.
+    // @lat: [[backend#Inference Stall Watchdog]]
     async fn poll_loop(
         url: Url,
         interval: Duration,
@@ -399,8 +399,9 @@ impl BackendMonitor {
     /// Used by `KvPolicy` to wait for KV pressure to drop below the delay
     /// threshold before admitting a request.
     ///
-    /// Returns `true` if the predicate was satisfied, `false` if the channel
-    /// was closed.
+    /// Returns once the predicate is satisfied.  If the snapshot channel is
+    /// closed, returns after evaluating the predicate against the last known
+    /// snapshot.
     pub async fn wait_for(&self, predicate: impl Fn(&BackendSnapshot) -> bool + Send + Sync) {
         let mut rx = self.receiver.clone();
         loop {

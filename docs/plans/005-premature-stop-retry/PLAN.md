@@ -1,3 +1,5 @@
+> Status: Implemented with divergence. Detection retries both finish_reason "stop" AND "length" (not just "stop" as originally planned). Context-compression references (rewrite_messages, compression_retries) are historical — that subsystem was deleted 2026-08-19 (d400a93). See src/gateway/retry.rs for current behavior.
+
 # Plan 005 — Premature-Stop Retry for Chat Completions
 
 ## Why

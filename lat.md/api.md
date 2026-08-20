@@ -32,17 +32,9 @@ Each public endpoint carries a precise input contract, output guarantee, and err
 
 **Queue State**
 
-- Returns the current queue snapshot containing active flow count, waiting request count, and per-flow queue positions.
+- Returns the current queue snapshot containing active request count, waiting request count, and per-flow queue positions.
 - Always returns `200 OK`; no error responses are produced.
 - Queue positions are 1-indexed and reflect current ordering.
-
-**Context Inspection** (see [[context#Context Compression]])
-
-- `GET /admin/context` — list all flows with transcript metadata (token counts, compressed-segment count). Optional `?over_threshold=true` filter.
-- `GET /admin/context/{flow_id}` — full segment breakdown for a flow with per-segment previews, token counts, and compression status.
-- `POST /admin/context/{flow_id}/compress` — force-trigger compression for a flow. Returns `202 Accepted` with the turn range, or `409 Conflict` if nothing is compressible.
-- `DELETE /admin/context/{flow_id}` — clear a flow's transcript. Returns `200 OK` or `404` if not found.
-- All context endpoints return `503 Service Unavailable` when context compression is disabled.
 
 ## Invariants
 
@@ -106,10 +98,11 @@ This concept does not cover flow execution, scheduling decisions, or flow remova
 
 A single HTTP endpoint with explicit contracts for request acceptance, response classification, and error handling.
 
-- **POST /flows** — Accepts a flow identity, scheduling weight, and priority class. Returns echoed parameters with a status discriminator.
+- **POST /flows** — Accepts a flow identity, scheduling weight, and priority class. Returns echoed parameters with a status discriminator and a `priority_source` field always set to `2` (admin).
 - **HTTP 201 Created** — Returned for previously unknown flow identities; response body contains `"status": "created"`.
 - **HTTP 200 OK** — Returned for existing flow identities; response body contains `"status": "updated"`.
 - **HTTP 400 Bad Request** — Returned when weight or priority violates bounds; response body is a plain-text error.
+- **Metric side effect** — Every successful registration increments the `llm_flow_priority_source_total` counter with the flow's metric label and `source` value `admin` (see [[metrics#Metric Family Contracts]]).
 
 ## Invariants
 
@@ -119,7 +112,7 @@ All stated conditions hold regardless of implementation details.
 - **Priority bounds** — Every successfully registered flow has `priority` in the inclusive range `[0, 100]`.
 - **Identity-based resolution** — A flow identity that already exists is updated rather than rejected or duplicated.
 - **Status matches outcome** — The response `status` field reflects the actual resolution: `"created"` only for new identities, `"updated"` only for existing ones.
-- **Echo consistency** — The response body mirrors the exact `id`, `weight`, and `priority` supplied by the caller.
+- **Echo consistency** — The response body mirrors the exact `id`, `weight`, and `priority` supplied by the caller, and reports `priority_source` as `2` (admin) for every successful registration.
 
 ## Constraints
 
@@ -153,9 +146,9 @@ This endpoint provides external observability into the current state of the infe
 
 Exposes a unified queue snapshot including active count, waiting count, and per-flow positions, answering "where is my flow in line?" while operating as a read-only observation surface.
 
-- Exposes a unified queue snapshot including active count, waiting count, and per-flow positions.
+- Exposes a unified queue snapshot including active request count, waiting request count, and per-flow positions.
 - Answers "where is my flow in line?" for every waiting flow.
-- Separates active flows (counted) from queued flows (listed with positions).
+- Reports request-level counts (active and waiting) alongside per-flow queue positions; both counts are request counts, not flow counts.
 - Operates as a read-only observation surface; does not modify queue state.
 
 ## Non-goals
@@ -172,7 +165,7 @@ This concept deliberately excludes capabilities beyond queue observation.
 A single query contract that returns a complete queue snapshot.
 
 - Accepts an unauthenticated request with no required parameters.
-- Returns exactly three fields: active flow count, waiting flow count, and an ordered list of per-flow positions.
+- Returns exactly three fields: active request count, waiting request count, and an ordered list of per-flow positions. `active` is the count of in-flight requests currently admitted at the backend; `waiting` is the count of queued requests, including requests held in the KV-delay queue.
 - Each per-flow position entry contains a flow identifier and a 1-indexed queue position.
 - Every response succeeds with the same structural shape; no error status codes are defined.
 - Position values are 1-indexed; position 1 means first in queue.
@@ -181,9 +174,9 @@ A single query contract that returns a complete queue snapshot.
 
 These statements hold regardless of implementation details.
 
-- The active count plus waiting count equals the total number of flows represented in the snapshot.
-- Per-flow positions are strictly ordered: position values form the sequence 1, 2, 3, ... up to the waiting count.
-- Active flows never appear in the per-flow position list.
+- Per-flow positions are strictly ordered: position values form the sequence 1, 2, 3, ... up to the number of listed flows.
+- The global active and waiting counts are request counts supplied by the scheduler and are not cross-checked against the per-flow entries; the position list covers flows with queued requests, not requests themselves.
+- Position entries list flows with positive queued depth; a flow may also have active requests, so a listed flow can appear while simultaneously contributing to the active count.
 
 ## Constraints
 

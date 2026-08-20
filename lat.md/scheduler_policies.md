@@ -36,12 +36,12 @@ The selection contract accepts a set of candidates, each carrying a priority lev
 
 ## Invariants
 
-The selection ordering preserves a strict three-level hierarchy. The equivalence check for base scores takes precedence over the "lower score wins" rule — scores within a tolerance band trigger the FIFO tiebreak, not the lower-score preference.
+Selection ordering preserves a strict three-level hierarchy. The base-score equivalence check takes precedence over the "lower score wins" rule: scores within a tolerance band trigger the arrival-order tiebreak, not the lower-score preference.
 
 - **Priority dominance:** A candidate with a strictly higher priority always wins regardless of base score or enqueue time.
 - **Base-score direction (strict difference):** When priorities are equal and base scores differ by more than the tolerance threshold, the candidate with the lower base score wins.
 - **Base-score equivalence:** Two base scores are treated as equivalent when their absolute difference does not exceed a small positive tolerance value. Equivalent scores do not trigger the "lower wins" rule.
-- **FIFO tiebreak:** When both priority and base score are equivalent, the candidate with the earlier enqueue time wins.
+- **Arrival-order tiebreak:** When both priority and base score are equivalent, the candidate with the earlier enqueue time wins.
 - **Output membership:** The returned identity corresponds to exactly one element from the input set.
 
 ## Constraints
@@ -59,15 +59,15 @@ The ordering and selection logic is bounded by a fixed hierarchy depth and the p
 The three-level hierarchy balances urgency, algorithmic preference, and fairness.
 
 - Priority dominates because urgent work must preempt lower-priority flows regardless of other metrics.
-- Base score provides a secondary preference signal from the base scheduling algorithm without overriding explicit priority.
+- Base score provides a secondary preference signal from DRR (round-robin cursor position) without overriding explicit priority.
 - Enqueue-time tiebreak preserves fairness: among equally deserving candidates, the earliest arrival goes first.
-- Tolerance-based score equivalence prevents spurious ordering differences from numerical noise, and equivalence is checked before the "lower wins" rule to avoid bypassing the FIFO tiebreak.
+- Tolerance-based score equivalence prevents spurious ordering differences from numerical noise, and equivalence is checked before the "lower wins" rule to avoid bypassing the arrival-order tiebreak.
 - Empty-set absence (rather than error) reflects that no candidates is a valid, non-fault state.
 
 This section lists related concepts and source references for priority-aware selection.
 
 - [[flow#Flow Registry and State]] — flows submitted to the scheduler
-- [[scheduler#Scheduler Facade and Policy Selection]] — the base scheduling algorithm that produces base preference scores
+- [[scheduler#Deficit Round Robin Discipline]] — the scheduler that supplies base preference scores (RR cursor position)
 - [[src/scheduler/priority.rs#FlowCandidate]] — candidate identity, priority, score, and timestamp
 - [[src/scheduler/priority.rs#select_best]] — selection entry point
 
@@ -155,7 +155,6 @@ This section lists related concepts and source references for starvation protect
 - [[scheduler_policies#Completion Bias Gate]] — independent completion bias gate starvation path
 - [[src/scheduler/starvation.rs]] — starvation check and metrics recording
 - [[src/scheduler/drr.rs]] — DRR scheduler invocation of starvation check
-- [[src/scheduler/wfq.rs]] — WFQ scheduler invocation of starvation check
 - [[src/scheduler/completion_bias.rs]] — independent completion bias gate starvation path
 - [[src/flow/mod.rs#Flow]] — flow struct with enqueue instant field
 
@@ -266,7 +265,7 @@ Under KV-cache pressure, the scheduler reorders selection among *eligible* waiti
 
 Reduce KV-cache thrash under pressure by continuing the flow that has already invested the most resident cache, instead of fairly rotating to a cold flow whose admission would evict the hot one.
 
-- Reorders DRR and WFQ `try_select` Phase 3 selection; FIFO is unaffected (no selection decision).
+- Reorders DRR's `try_select` Phase 3 selection.
 - Footprint per flow = delivered tokens tracked by [[admission#Per-Flow Token Progress Tracking]].
 - Pressure is the backend's global KV usage gauge from [[backend#Backend KV-Cache Monitor]].
 - Bias strength ramps linearly from 0 below `pressure_below` to full dominance at/above `bias_full_at`; when all footprints are equal it collapses to existing priority→base→enqueue fairness.
@@ -277,11 +276,11 @@ This bias is not an admission control mechanism.
 
 - Does not reject, delay, or 429 any request (contrast [[admission#KV-Cache-Aware Admission Gate]]).
 - Does not source per-flow KV block counts (vLLM exposes only a global gauge); footprint is a proxy via delivered tokens.
-- Does not influence FIFO scheduling, which has no choice among waiting flows.
+- Applies only to DRR selection among waiting flows; it has no other scheduling path to influence.
 
 ## Interface
 
-The bias handle ([`KvBiasHandle`](src/scheduler/kv_bias.rs)) is constructed in [`Policies::new`](src/scheduler/mod.rs) from the `KvBias` config, the backend monitor, and the shared `FlowProgressTracker`, then threaded into each scheduler's `admission_loop` and `try_select`.
+The bias handle ([`KvBiasHandle`](src/scheduler/kv_bias.rs)) is constructed in [`Scheduler::new`](src/scheduler/mod.rs) from the `KvBias` config, the backend monitor, and the shared `FlowProgressTracker`, then passed into DRR's admission loop and `try_select`.
 
 - `pressure() -> f64` reads the latest backend snapshot's `kv_usage`, clamped to `[0,1]`.
 - `bias_weight(pressure) -> f64` ramps `0` below `pressure_below`, `1` at/above `bias_full_at`.
@@ -310,7 +309,7 @@ Letting the high-footprint flow finish under pressure avoids the paging-in/out c
 
 - Delivered tokens as the footprint signal requires no tokenizer dependency and is already streamed via [[admission#Per-Flow Token Progress Tracking]].
 - A continuous weight (rather than a hard threshold) avoids a cliff where selection flips between fair and footprint-ordered as pressure hovers near the threshold.
-- Reusing the shared `FlowCandidate` + `select_best` path keeps DRR and WFQ consistent and leaves FIFO untouched.
+- Reusing the shared `FlowCandidate` + `select_best` path keeps DRR consistent.
 
 ## Related
 
@@ -319,7 +318,6 @@ Cross-concept links and source references for the KV-cache-aware selection bias.
 - [[admission#Per-Flow Token Progress Tracking]] — delivered-token source
 - [[backend#Backend KV-Cache Monitor]] — global pressure gauge
 - [[scheduler#Deficit Round Robin Discipline]] — DRR selection integration
-- [[scheduler#Weighted Fair Queueing Discipline]] — WFQ selection integration
 - [[scheduler_policies#Priority-Aware Flow Selection]] — fairness fallback ordering
 - [[scheduler_policies#KV-Cache-Aware Selection Bias]] — configuration
 - [[src/scheduler/kv_bias.rs#KvBiasHandle]] — bias implementation
@@ -399,7 +397,7 @@ The guard maintains consistent state between construction and termination, ensur
 
 The guard operates within the boundaries of scope-lifetime tracking and scheduler-specific accounting behavior.
 
-- Accounting reports are dispatched unconditionally to all scheduler types; non-DRR schedulers receive the report and ignore it — this is a consumer-side convention, not a dispatch gate.
+- Accounting reports are passed to the DRR scheduler; it adjusts per-flow credit based on actual delivered tokens.
 - Termination accounting depends on the guard being dropped — if the guard value is leaked, neither metrics nor accounting fire and the progress tracker retains the request indefinitely.
 - Over-delivery (delivered tokens exceeding the estimate) on normal completion produces a negative restore cost, applying an additional debit; on cancellation, over-delivery silently clamps restore to zero.
 - When no usage data arrives by scope exit, the full estimated cost is charged with no restore on normal completion — this Phase-1 limitation trades precision for safety.
