@@ -41,7 +41,7 @@ use tower::ServiceExt;
 
 use tinyllb::backend::BackendMonitor;
 use tinyllb::config::{
-    Algorithm, Backpressure, BackpressureMode, CompletionBias, KvPolicyConfig, Priorities, PriorityPolicy,
+    Algorithm, BackpressureMode, CompletionBias, KvPolicyConfig, Priorities, PriorityPolicy,
 };
 use tinyllb::flow::FlowRegistry;
 use tinyllb::gateway;
@@ -97,18 +97,13 @@ fn build_proxy_app(
         tinyllb::config::KvBias::default(),
     ));
 
-    let state = gateway::AppState {
-        client: gateway::build_client(),
-        backend_url: Arc::new(url::Url::parse(backend_url).expect("valid backend URL")),
-        metrics: m.clone(),
-        scheduler: scheduler.clone(),
+    let state = gateway::AppState::test_default(
+        gateway::build_client(),
+        Arc::new(url::Url::parse(backend_url).expect("valid backend URL")),
+        m.clone(),
+        scheduler.clone(),
         flow_registry,
-        backpressure: Backpressure::default(),
-        priorities: Priorities::default(),
-        request_timeout: None,
-        retry_policy: tinyllb::config::RetryPolicy::default(),
-        stall_rx: tinyllb::backend::BackendMonitor::empty().stall_receiver(),
-    };
+    );
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
     let gateway_router = gateway::create_router().with_state(state.clone());

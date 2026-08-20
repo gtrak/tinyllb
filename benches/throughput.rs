@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use axum::routing::get;
 use axum::Router;
-use tinyllb::config::{Algorithm, Backpressure, BackpressureMode, Priorities};
+use tinyllb::config::{Algorithm, BackpressureMode};
 use tinyllb::flow::FlowRegistry;
 use tinyllb::gateway;
 use tinyllb::metrics;
@@ -82,18 +82,13 @@ fn build_proxy_app(backend_url: &str, max_active_flows: u32) -> (Router, Arc<met
         Duration::from_secs(10),
         Duration::from_secs(1),
     );
-    let state = gateway::AppState {
-        client: gateway::build_client(),
-        backend_url: Arc::new(url::Url::parse(backend_url).expect("valid backend URL")),
-        metrics: m.clone(),
-        scheduler: Arc::new(scheduler),
+    let state = gateway::AppState::test_default(
+        gateway::build_client(),
+        Arc::new(url::Url::parse(backend_url).expect("valid backend URL")),
+        m.clone(),
+        Arc::new(scheduler),
         flow_registry,
-        backpressure: Backpressure::default(),
-        priorities: Priorities::default(),
-        request_timeout: None,
-        retry_policy: tinyllb::config::RetryPolicy::default(),
-        stall_rx: tinyllb::backend::BackendMonitor::empty().stall_receiver(),
-    };
+    );
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
     let gateway_router = gateway::create_router().with_state(state.clone());

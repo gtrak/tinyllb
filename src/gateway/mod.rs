@@ -35,6 +35,34 @@ pub struct AppState {
     pub retry_policy: RetryPolicy,
 }
 
+impl AppState {
+    /// Construct a test `AppState` with the given core fields, filling in
+    /// defaults for backpressure, priorities, request_timeout, stall_rx,
+    /// and retry_policy. Tests can override individual fields with struct
+    /// update syntax:
+    ///   `AppState { retry_policy: custom, ..AppState::test_default(...) }`
+    pub fn test_default(
+        client: reqwest::Client,
+        backend_url: Arc<Url>,
+        metrics: Arc<Metrics>,
+        scheduler: Arc<Scheduler>,
+        flow_registry: Arc<FlowRegistry>,
+    ) -> Self {
+        AppState {
+            client,
+            backend_url,
+            metrics,
+            scheduler,
+            flow_registry,
+            backpressure: Backpressure::default(),
+            priorities: Priorities::default(),
+            request_timeout: None,
+            stall_rx: crate::backend::BackendMonitor::empty().stall_receiver(),
+            retry_policy: RetryPolicy::default(),
+        }
+    }
+}
+
 // @lat: [[gateway#Reverse Proxy Request Handling]]
 /// Create the gateway router that handles OpenAI-compatible routes.
 ///

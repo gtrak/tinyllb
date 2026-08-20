@@ -95,18 +95,13 @@ fn build_admin_test_app(
         Duration::from_secs(10),
         Duration::from_secs(1),
     );
-    let state = gateway::AppState {
-        client: gateway::build_client(),
-        backend_url: Arc::new(url::Url::parse(&backend_url_str).expect("valid URL")),
-        metrics: metrics.clone(),
-        scheduler: Arc::new(scheduler),
-        flow_registry: flow_registry.clone(),
-        backpressure: tinyllb::config::Backpressure::default(),
-        priorities: tinyllb::config::Priorities::default(),
-        request_timeout: None,
-        stall_rx: tinyllb::backend::BackendMonitor::empty().stall_receiver(),
-        retry_policy: tinyllb::config::RetryPolicy::default(),
-    };
+    let state = gateway::AppState::test_default(
+        gateway::build_client(),
+        Arc::new(url::Url::parse(&backend_url_str).expect("valid URL")),
+        metrics.clone(),
+        Arc::new(scheduler),
+        flow_registry.clone(),
+    );
 
     let _ = _backend_url;
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));

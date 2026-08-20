@@ -31,18 +31,13 @@ fn build_test_app(backend_url: &str) -> (Router, Arc<tinyllb::metrics::Metrics>)
         std::time::Duration::from_secs(10),
         std::time::Duration::from_secs(1),
     );
-    let state = gateway::AppState {
-        client: gateway::build_client(),
-        backend_url: Arc::new(url::Url::parse(backend_url).expect("valid backend URL")),
-        metrics: metrics.clone(),
-        scheduler: Arc::new(scheduler),
+    let state = gateway::AppState::test_default(
+        gateway::build_client(),
+        Arc::new(url::Url::parse(backend_url).expect("valid backend URL")),
+        metrics.clone(),
+        Arc::new(scheduler),
         flow_registry,
-        backpressure: tinyllb::config::Backpressure::default(),
-        priorities: tinyllb::config::Priorities::default(),
-        request_timeout: None,
-        stall_rx: tinyllb::backend::BackendMonitor::empty().stall_receiver(),
-        retry_policy: tinyllb::config::RetryPolicy::default(),
-    };
+    );
 
     // Touch the queue_depth GaugeVec with an "ephemeral" label so it appears
     // in the Prometheus scrape output (GaugeVec only emits samples for labels
@@ -382,18 +377,13 @@ async fn test_streaming_tokens_count_completion_not_total() {
         std::time::Duration::from_secs(10),
         std::time::Duration::from_secs(1),
     );
-    let state = gateway::AppState {
-        client: gateway::build_client(),
-        backend_url: Arc::new(url::Url::parse(&backend_url).expect("valid backend URL")),
-        metrics: metrics.clone(),
-        scheduler: Arc::new(scheduler),
+    let state = gateway::AppState::test_default(
+        gateway::build_client(),
+        Arc::new(url::Url::parse(&backend_url).expect("valid backend URL")),
+        metrics.clone(),
+        Arc::new(scheduler),
         flow_registry,
-        backpressure: tinyllb::config::Backpressure::default(),
-        priorities: tinyllb::config::Priorities::default(),
-        request_timeout: None,
-        stall_rx: tinyllb::backend::BackendMonitor::empty().stall_receiver(),
-        retry_policy: tinyllb::config::RetryPolicy::default(),
-    };
+    );
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
     let gateway_router = gateway::create_router().with_state(state.clone());
@@ -458,18 +448,13 @@ async fn test_active_gauge_during_streaming() {
         std::time::Duration::from_secs(10),
         std::time::Duration::from_secs(1),
     );
-    let state = gateway::AppState {
-        client: gateway::build_client(),
-        backend_url: Arc::new(url::Url::parse(&backend_url).expect("valid backend URL")),
-        metrics: metrics.clone(),
-        scheduler: Arc::new(scheduler),
+    let state = gateway::AppState::test_default(
+        gateway::build_client(),
+        Arc::new(url::Url::parse(&backend_url).expect("valid backend URL")),
+        metrics.clone(),
+        Arc::new(scheduler),
         flow_registry,
-        backpressure: tinyllb::config::Backpressure::default(),
-        priorities: tinyllb::config::Priorities::default(),
-        request_timeout: None,
-        stall_rx: tinyllb::backend::BackendMonitor::empty().stall_receiver(),
-        retry_policy: tinyllb::config::RetryPolicy::default(),
-    };
+    );
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
     let gateway_router = gateway::create_router().with_state(state.clone());
@@ -543,18 +528,13 @@ async fn test_nonstream_tokens_count_completion_not_total() {
         std::time::Duration::from_secs(10),
         std::time::Duration::from_secs(1),
     );
-    let state = gateway::AppState {
-        client: gateway::build_client(),
-        backend_url: Arc::new(url::Url::parse(&backend_url).expect("valid backend URL")),
-        metrics: metrics.clone(),
-        scheduler: Arc::new(scheduler),
+    let state = gateway::AppState::test_default(
+        gateway::build_client(),
+        Arc::new(url::Url::parse(&backend_url).expect("valid backend URL")),
+        metrics.clone(),
+        Arc::new(scheduler),
         flow_registry,
-        backpressure: tinyllb::config::Backpressure::default(),
-        priorities: tinyllb::config::Priorities::default(),
-        request_timeout: None,
-        stall_rx: tinyllb::backend::BackendMonitor::empty().stall_receiver(),
-        retry_policy: tinyllb::config::RetryPolicy::default(),
-    };
+    );
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
     let gateway_router = gateway::create_router().with_state(state.clone());
@@ -619,18 +599,13 @@ async fn test_active_gauge_during_nonstreaming() {
         std::time::Duration::from_secs(10),
         std::time::Duration::from_secs(1),
     );
-    let state = gateway::AppState {
-        client: gateway::build_client(),
-        backend_url: Arc::new(url::Url::parse(&backend_url).expect("valid backend URL")),
-        metrics: metrics.clone(),
-        scheduler: Arc::new(scheduler),
+    let state = gateway::AppState::test_default(
+        gateway::build_client(),
+        Arc::new(url::Url::parse(&backend_url).expect("valid backend URL")),
+        metrics.clone(),
+        Arc::new(scheduler),
         flow_registry,
-        backpressure: tinyllb::config::Backpressure::default(),
-        priorities: tinyllb::config::Priorities::default(),
-        request_timeout: None,
-        stall_rx: tinyllb::backend::BackendMonitor::empty().stall_receiver(),
-        retry_policy: tinyllb::config::RetryPolicy::default(),
-    };
+    );
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
     let gateway_router = gateway::create_router().with_state(state.clone());

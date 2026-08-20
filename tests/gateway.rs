@@ -175,18 +175,13 @@ fn build_proxy_app(backend_url: &str) -> Router {
         std::time::Duration::from_secs(10),
         std::time::Duration::from_secs(1),
     );
-    let state = gateway::AppState {
-        client: gateway::build_client(),
-        backend_url: std::sync::Arc::new(url::Url::parse(backend_url).expect("valid backend URL")),
-        metrics: metrics.clone(),
-        scheduler: std::sync::Arc::new(scheduler),
+    let state = gateway::AppState::test_default(
+        gateway::build_client(),
+        std::sync::Arc::new(url::Url::parse(backend_url).expect("valid backend URL")),
+        metrics.clone(),
+        std::sync::Arc::new(scheduler),
         flow_registry,
-        backpressure: tinyllb::config::Backpressure::default(),
-        priorities: tinyllb::config::Priorities::default(),
-        request_timeout: None,
-        stall_rx: tinyllb::backend::BackendMonitor::empty().stall_receiver(),
-        retry_policy: tinyllb::config::RetryPolicy::default(),
-    };
+    );
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
     let gateway_router = gateway::create_router().with_state(state.clone());
@@ -605,18 +600,13 @@ fn build_proxy_app_with_max(
         std::time::Duration::from_secs(10),
         std::time::Duration::from_secs(1),
     );
-    let proxy_state = gateway::AppState {
-        client: gateway::build_client(),
-        backend_url: Arc::new(url::Url::parse(&backend_url_str).expect("valid URL")),
-        metrics: metrics.clone(),
-        scheduler: Arc::new(scheduler),
+    let proxy_state = gateway::AppState::test_default(
+        gateway::build_client(),
+        Arc::new(url::Url::parse(&backend_url_str).expect("valid URL")),
+        metrics.clone(),
+        Arc::new(scheduler),
         flow_registry,
-        backpressure: tinyllb::config::Backpressure::default(),
-        priorities: tinyllb::config::Priorities::default(),
-        request_timeout: None,
-        stall_rx: tinyllb::backend::BackendMonitor::empty().stall_receiver(),
-        retry_policy: tinyllb::config::RetryPolicy::default(),
-    };
+    );
 
     let _ = _backend_url; // unused; we use the actual backend URL
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
@@ -753,18 +743,13 @@ async fn test_client_disconnect_releases_permit() {
         std::time::Duration::from_secs(10),
         std::time::Duration::from_secs(1),
     );
-    let state = gateway::AppState {
-        client: gateway::build_client(),
-        backend_url: Arc::new(url::Url::parse(&backend_url).expect("valid backend URL")),
-        metrics: metrics.clone(),
-        scheduler: Arc::new(scheduler),
+    let state = gateway::AppState::test_default(
+        gateway::build_client(),
+        Arc::new(url::Url::parse(&backend_url).expect("valid backend URL")),
+        metrics.clone(),
+        Arc::new(scheduler),
         flow_registry,
-        backpressure: tinyllb::config::Backpressure::default(),
-        priorities: tinyllb::config::Priorities::default(),
-        request_timeout: None,
-        stall_rx: tinyllb::backend::BackendMonitor::empty().stall_receiver(),
-        retry_policy: tinyllb::config::RetryPolicy::default(),
-    };
+    );
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
     let gateway_router = gateway::create_router().with_state(state.clone());

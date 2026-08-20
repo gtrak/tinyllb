@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tower::ServiceExt;
 
-use tinyllb::config::{Algorithm, Backpressure, BackpressureMode, Priorities};
+use tinyllb::config::{Algorithm, BackpressureMode};
 use tinyllb::flow::FlowRegistry;
 use tinyllb::gateway;
 use tinyllb::metrics;
@@ -233,18 +233,13 @@ fn build_proxy_with_drr(backend_url: &str) -> (Router, Arc<metrics::Metrics>, Ar
         Duration::from_secs(1),
     );
     let scheduler_arc = Arc::new(scheduler);
-    let state = gateway::AppState {
-        client: gateway::build_client(),
-        backend_url: Arc::new(url::Url::parse(backend_url).expect("valid backend URL")),
-        metrics: m.clone(),
-        scheduler: scheduler_arc.clone(),
+    let state = gateway::AppState::test_default(
+        gateway::build_client(),
+        Arc::new(url::Url::parse(backend_url).expect("valid backend URL")),
+        m.clone(),
+        scheduler_arc.clone(),
         flow_registry,
-        backpressure: Backpressure::default(),
-        priorities: Priorities::default(),
-        request_timeout: None,
-        stall_rx: tinyllb::backend::BackendMonitor::empty().stall_receiver(),
-        retry_policy: tinyllb::config::RetryPolicy::default(),
-    };
+    );
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
     let gateway_router = gateway::create_router().with_state(state.clone());
@@ -702,16 +697,14 @@ fn build_proxy_with_drr_and_timeout(
     );
     let scheduler_arc = Arc::new(scheduler);
     let state = gateway::AppState {
-        client: gateway::build_client(),
-        backend_url: Arc::new(url::Url::parse(backend_url).expect("valid backend URL")),
-        metrics: m.clone(),
-        scheduler: scheduler_arc.clone(),
-        flow_registry,
-        backpressure: Backpressure::default(),
-        priorities: Priorities::default(),
         request_timeout: Some(timeout),
-        stall_rx: tinyllb::backend::BackendMonitor::empty().stall_receiver(),
-        retry_policy: tinyllb::config::RetryPolicy::default(),
+        ..gateway::AppState::test_default(
+            gateway::build_client(),
+            Arc::new(url::Url::parse(backend_url).expect("valid backend URL")),
+            m.clone(),
+            scheduler_arc.clone(),
+            flow_registry,
+        )
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));

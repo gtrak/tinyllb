@@ -142,16 +142,14 @@ fn build_e2e_proxy_with_config(
     ));
 
     let state = gateway::AppState {
-        client: gateway::build_client(),
-        backend_url: Arc::new(url::Url::parse(backend_url).expect("valid backend URL")),
-        metrics: m.clone(),
-        scheduler: scheduler.clone(),
-        flow_registry,
         backpressure,
-        priorities: Priorities::default(),
-        request_timeout: None,
-        stall_rx: tinyllb::backend::BackendMonitor::empty().stall_receiver(),
-        retry_policy: tinyllb::config::RetryPolicy::default(),
+        ..gateway::AppState::test_default(
+            gateway::build_client(),
+            Arc::new(url::Url::parse(backend_url).expect("valid backend URL")),
+            m.clone(),
+            scheduler.clone(),
+            flow_registry,
+        )
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));

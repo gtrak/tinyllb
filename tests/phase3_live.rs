@@ -27,7 +27,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use tower::ServiceExt;
 
-use tinyllb::config::{Algorithm, Backpressure, BackpressureMode, Priorities};
+use tinyllb::config::{Algorithm, Backpressure, BackpressureMode};
 use tinyllb::flow::FlowRegistry;
 use tinyllb::gateway;
 use tinyllb::metrics;
@@ -72,16 +72,14 @@ fn build_live_proxy(
         backpressure.retry_after_base,
     );
     let state = gateway::AppState {
-        client: gateway::build_client(),
-        backend_url: Arc::new(url::Url::parse(&backend_url()).expect("valid backend URL")),
-        metrics: m.clone(),
-        scheduler: Arc::new(scheduler),
-        flow_registry,
         backpressure,
-        priorities: Priorities::default(),
-        request_timeout: None,
-        stall_rx: tinyllb::backend::BackendMonitor::empty().stall_receiver(),
-        retry_policy: tinyllb::config::RetryPolicy::default(),
+        ..gateway::AppState::test_default(
+            gateway::build_client(),
+            Arc::new(url::Url::parse(&backend_url()).expect("valid backend URL")),
+            m.clone(),
+            Arc::new(scheduler),
+            flow_registry,
+        )
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));

@@ -35,16 +35,14 @@ fn build_proxy_app_with_retry(
         std::time::Duration::from_secs(1),
     );
     let state = gateway::AppState {
-        client: gateway::build_client(),
-        backend_url: Arc::new(url::Url::parse(backend_url).expect("valid backend URL")),
-        metrics: metrics.clone(),
-        scheduler: Arc::new(scheduler),
-        flow_registry,
-        backpressure: tinyllb::config::Backpressure::default(),
-        priorities: tinyllb::config::Priorities::default(),
-        request_timeout: None,
-        stall_rx: tinyllb::backend::BackendMonitor::empty().stall_receiver(),
         retry_policy,
+        ..gateway::AppState::test_default(
+            gateway::build_client(),
+            Arc::new(url::Url::parse(backend_url).expect("valid backend URL")),
+            metrics.clone(),
+            Arc::new(scheduler),
+            flow_registry,
+        )
     };
 
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
