@@ -22,7 +22,6 @@ fn build_test_app(backend_url: &str) -> (Router, Arc<tinyllb::metrics::Metrics>)
     let metrics = metrics::create_metrics();
     let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
     let scheduler = tinyllb::scheduler::Scheduler::new_with_defaults(
-        tinyllb::config::Algorithm::Drr,
         4,
         metrics.clone(),
         flow_registry.clone(),
@@ -368,7 +367,6 @@ async fn test_streaming_tokens_count_completion_not_total() {
     let metrics_clone = metrics.clone();
     let flow_registry = Arc::new(tinyllb::flow::FlowRegistry::new(1.0, 50));
     let scheduler = tinyllb::scheduler::Scheduler::new_with_defaults(
-        tinyllb::config::Algorithm::Drr,
         4,
         metrics.clone(),
         flow_registry.clone(),
@@ -439,7 +437,6 @@ async fn test_active_gauge_during_streaming() {
     let metrics_clone = metrics.clone();
     let flow_registry = Arc::new(tinyllb::flow::FlowRegistry::new(1.0, 50));
     let scheduler = tinyllb::scheduler::Scheduler::new_with_defaults(
-        tinyllb::config::Algorithm::Drr,
         4,
         metrics.clone(),
         flow_registry.clone(),
@@ -519,7 +516,6 @@ async fn test_nonstream_tokens_count_completion_not_total() {
     let metrics_clone = metrics.clone();
     let flow_registry = Arc::new(tinyllb::flow::FlowRegistry::new(1.0, 50));
     let scheduler = tinyllb::scheduler::Scheduler::new_with_defaults(
-        tinyllb::config::Algorithm::Drr,
         4,
         metrics.clone(),
         flow_registry.clone(),
@@ -590,7 +586,6 @@ async fn test_active_gauge_during_nonstreaming() {
     let metrics_clone = metrics.clone();
     let flow_registry = Arc::new(tinyllb::flow::FlowRegistry::new(1.0, 50));
     let scheduler = tinyllb::scheduler::Scheduler::new_with_defaults(
-        tinyllb::config::Algorithm::Drr,
         4,
         metrics.clone(),
         flow_registry.clone(),

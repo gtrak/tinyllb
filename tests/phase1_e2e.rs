@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tower::ServiceExt;
 
-use tinyllb::config::{Algorithm, Backpressure, BackpressureMode};
+use tinyllb::config::{Backpressure, BackpressureMode};
 use tinyllb::flow::FlowRegistry;
 use tinyllb::gateway;
 use tinyllb::metrics;
@@ -150,7 +150,6 @@ fn build_e2e_proxy(
     let m = metrics::create_metrics();
     let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
     let scheduler = Scheduler::new_with_defaults(
-        Algorithm::Drr,
         max_active_flows,
         m.clone(),
         flow_registry.clone(),

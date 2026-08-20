@@ -10,7 +10,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tinyllb::config::{Algorithm, BackpressureMode};
+use tinyllb::config::BackpressureMode;
 use tinyllb::flow::{FlowId, FlowRegistry};
 use tinyllb::metrics;
 use tinyllb::scheduler::Scheduler;
@@ -24,7 +24,6 @@ async fn test_drr_admit_single() {
     let m = metrics::create_metrics();
     let registry = Arc::new(FlowRegistry::new(1.0, 50));
     let scheduler = Scheduler::new_with_defaults(
-        Algorithm::Drr,
         2,
         m.clone(),
         registry.clone(),
@@ -57,7 +56,6 @@ async fn test_drr_credit_accumulation_and_consumption() {
         let m = metrics::create_metrics();
         let registry = Arc::new(FlowRegistry::new(1.0, 50));
         let scheduler = Arc::new(Scheduler::new_with_defaults(
-            Algorithm::Drr,
             1,
             m.clone(),
             registry.clone(),
@@ -129,7 +127,6 @@ async fn test_drr_skip_when_deficit() {
         let m = metrics::create_metrics();
         let registry = Arc::new(FlowRegistry::new(1.0, 50));
         let scheduler = Arc::new(Scheduler::new_with_defaults(
-            Algorithm::Drr,
             1,
             m.clone(),
             registry.clone(),
@@ -215,7 +212,6 @@ async fn test_drr_credit_reset_on_empty() {
     let m = metrics::create_metrics();
     let registry = Arc::new(FlowRegistry::new(1.0, 50));
     let scheduler = Scheduler::new_with_defaults(
-        Algorithm::Drr,
         2,
         m.clone(),
         registry.clone(),
@@ -262,7 +258,6 @@ async fn test_drr_weight_ratio_discrimination() {
         let m = metrics::create_metrics();
         let registry = Arc::new(FlowRegistry::new(1.0, 50));
         let scheduler = Arc::new(Scheduler::new_with_defaults(
-            Algorithm::Drr,
             1,
             m.clone(),
             registry.clone(),
@@ -375,7 +370,6 @@ async fn test_drr_queue_snapshot() {
     let m = metrics::create_metrics();
     let registry = Arc::new(FlowRegistry::new(1.0, 50));
     let scheduler = Scheduler::new_with_defaults(
-        Algorithm::Drr,
         1,
         m.clone(),
         registry.clone(),
@@ -413,7 +407,6 @@ async fn test_drr_fail_fast_rejection() {
     let m = metrics::create_metrics();
     let registry = Arc::new(FlowRegistry::new(1.0, 50));
     let scheduler = Arc::new(Scheduler::new_with_defaults(
-        Algorithm::Drr,
         1, // Only 1 slot — forces queuing.
         m.clone(),
         registry.clone(),
@@ -466,7 +459,6 @@ async fn test_drr_hybrid_timeout() {
     let m = metrics::create_metrics();
     let registry = Arc::new(FlowRegistry::new(1.0, 50));
     let scheduler = Scheduler::new_with_defaults(
-        Algorithm::Drr,
         1,
         m.clone(),
         registry.clone(),
@@ -499,7 +491,6 @@ async fn test_drr_cancelled_waiter_no_active_underflow() {
     let m = metrics::create_metrics();
     let registry = Arc::new(FlowRegistry::new(1.0, 50));
     let scheduler = Arc::new(Scheduler::new_with_defaults(
-        Algorithm::Drr,
         1,
         m.clone(),
         registry.clone(),
@@ -549,7 +540,6 @@ async fn test_drr_sibling_cancel_does_not_kill_other() {
     let m = metrics::create_metrics();
     let registry = Arc::new(FlowRegistry::new(1.0, 50));
     let scheduler = Arc::new(Scheduler::new_with_defaults(
-        Algorithm::Drr,
         1,
         m.clone(),
         registry.clone(),
@@ -627,7 +617,6 @@ async fn test_drr_zero_weight_flow_no_wedge() {
         let m = metrics::create_metrics();
         let registry = Arc::new(FlowRegistry::new(1.0, 50));
         let scheduler = Arc::new(Scheduler::new_with_defaults(
-            Algorithm::Drr,
             1,
             m.clone(),
             registry.clone(),

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tinyllb::backend::{BackendMonitor, BackendSnapshot};
-use tinyllb::config::{Algorithm, BackpressureMode, KvPolicyConfig, Priorities, PriorityPolicy};
+use tinyllb::config::{BackpressureMode, KvPolicyConfig, Priorities, PriorityPolicy};
 use tinyllb::flow::{FlowId, FlowRegistry};
 use tinyllb::metrics;
 use tinyllb::scheduler::Scheduler;
@@ -28,7 +28,6 @@ fn build_scheduler_with_mode(
     let m = metrics::create_metrics();
     let registry = Arc::new(FlowRegistry::new(1.0, 50));
     let scheduler = Scheduler::new(
-        Algorithm::Drr,
         4,
         m.clone(),
         registry,
@@ -217,7 +216,6 @@ async fn kv_admission_decision_counter_increments() {
     let m = metrics::create_metrics();
     let registry = Arc::new(FlowRegistry::new(1.0, 50));
     let scheduler = Arc::new(Scheduler::new(
-        Algorithm::Drr,
         4,
         m.clone(),
         registry,
@@ -296,7 +294,6 @@ async fn kv_admission_delay_to_accept_transition() {
     let m = metrics::create_metrics();
     let registry = Arc::new(FlowRegistry::new(1.0, 50));
     let scheduler = Arc::new(Scheduler::new(
-        Algorithm::Drr,
         4,
         m.clone(),
         registry,
@@ -393,7 +390,6 @@ async fn kv_admission_hybrid_delay_timeout_rejected() {
     let m = metrics::create_metrics();
     let registry = Arc::new(FlowRegistry::new(1.0, 50));
     let scheduler = Arc::new(Scheduler::new(
-        Algorithm::Drr,
         4,
         m.clone(),
         registry,
@@ -447,7 +443,6 @@ async fn kv_admission_delayed_visible_in_queue_depth() {
     let m = metrics::create_metrics();
     let registry = Arc::new(FlowRegistry::new(1.0, 50));
     let scheduler = Arc::new(Scheduler::new(
-        Algorithm::Drr,
         4,
         m.clone(),
         registry,

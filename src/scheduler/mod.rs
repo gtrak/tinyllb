@@ -18,7 +18,6 @@ pub use kv_bias::KvBiasHandle;
 pub use lifecycle::AccountingReport;
 
 use crate::backend::BackendMonitor;
-use crate::config::Algorithm;
 use crate::config::CompletionBias;
 use crate::config::KvBias;
 use crate::config::KvPolicyConfig;
@@ -30,72 +29,14 @@ use crate::metrics::Metrics;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Shared policy state for all scheduler variants.
-///
-/// Each scheduler type gets an Arc clone of the completion bias gate,
-/// the starvation timeout, and the flow progress tracker.
-#[allow(dead_code)]
-pub(crate) struct Policies {
-    /// Completion bias gate for checking before admit.
-    completion_bias: Arc<completion_bias::CompletionBiasGate>,
-    /// Starvation timeout for force-admit in try_select.
-    starvation_timeout: Duration,
-    /// Notify completion bias waiters when active flows change.
-    notify: Arc<tokio::sync::Notify>,
-    /// Flow progress tracker for predictive admit.
-    flow_progress: Arc<flow_progress::FlowProgressTracker>,
-    /// KV-cache-aware selection bias handle.
-    kv_bias: Arc<kv_bias::KvBiasHandle>,
-}
-
-impl Policies {
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        completion_bias: CompletionBias,
-        max_active_flows: u32,
-        starvation_timeout: Duration,
-        metrics: Arc<Metrics>,
-        registry: Arc<FlowRegistry>,
-        notify: Arc<tokio::sync::Notify>,
-        flow_progress: Arc<flow_progress::FlowProgressTracker>,
-        kv_bias: KvBias,
-        monitor: Arc<BackendMonitor>,
-    ) -> Self {
-        let gate = completion_bias::CompletionBiasGate::new(
-            completion_bias.enabled,
-            completion_bias.target_active_flows,
-            completion_bias.predictive_admit,
-            max_active_flows,
-            metrics,
-            registry,
-            notify.clone(),
-            starvation_timeout,
-            flow_progress.clone(),
-        );
-        let kv_bias_handle = kv_bias::KvBiasHandle::new(kv_bias, monitor, flow_progress.clone());
-        Self {
-            completion_bias: Arc::new(gate),
-            starvation_timeout,
-            notify,
-            flow_progress,
-            kv_bias: Arc::new(kv_bias_handle),
-        }
-    }
-}
-
-/// Internal enum for the scheduler algorithm implementation.
-enum SchedulerImpl {
-    Drr(DrrScheduler),
-}
-
-/// Unified scheduler type wrapping the DRR flow scheduler.
+/// Unified scheduler facade wrapping the DRR flow scheduler.
 ///
 /// Wraps a shared `KvPolicy` gate that runs before the flow scheduler,
 /// enabling KV-cache-aware admission decisions.
 // @lat: [[scheduler#Scheduler Facade and Policy Selection]]
 pub struct Scheduler {
-    /// The underlying scheduling algorithm.
-    inner: SchedulerImpl,
+    /// The DRR flow scheduler.
+    inner: DrrScheduler,
     /// KV-cache-aware admission gate.  Checked before every admit.
     kv_policy: Arc<KvPolicy>,
     /// Flow progress tracker for predictive admit.
@@ -106,19 +47,16 @@ pub struct Scheduler {
     cadence: Arc<CadenceRegistry>,
     /// Metrics collector for priority heuristic observability.
     metrics: Arc<Metrics>,
-    /// Human-readable algorithm name for tracing.
-    algorithm_label: &'static str,
 }
 
 impl Scheduler {
-    /// Create a scheduler based on the configured algorithm.
+    /// Create a scheduler.
     ///
     /// This is the full constructor that accepts all policy parameters.
     /// Use [`Scheduler::new_with_defaults`](Self::new_with_defaults) for
     /// backward-compatible construction with default policy values.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        algorithm: Algorithm,
         max_active_flows: u32,
         metrics: Arc<Metrics>,
         registry: Arc<FlowRegistry>,
@@ -136,17 +74,22 @@ impl Scheduler {
     ) -> Self {
         let notify = Arc::new(tokio::sync::Notify::new());
         let flow_progress = Arc::new(flow_progress::FlowProgressTracker::new());
-        let policies = Policies::new(
-            completion_bias,
+        let gate = Arc::new(completion_bias::CompletionBiasGate::new(
+            completion_bias.enabled,
+            completion_bias.target_active_flows,
+            completion_bias.predictive_admit,
             max_active_flows,
-            starvation_timeout,
             metrics.clone(),
             registry.clone(),
             notify.clone(),
+            starvation_timeout,
             flow_progress.clone(),
+        ));
+        let kv_bias_handle = Arc::new(kv_bias::KvBiasHandle::new(
             kv_bias,
             monitor.clone(),
-        );
+            flow_progress.clone(),
+        ));
 
         let kv_policy = Arc::new(KvPolicy::new(
             &kv_config,
@@ -158,23 +101,18 @@ impl Scheduler {
             max_queue_depth,
         ));
 
-        let algorithm_label = match algorithm {
-            Algorithm::Drr => "drr",
-        };
-
-        let inner = match algorithm {
-            Algorithm::Drr => SchedulerImpl::Drr(DrrScheduler::new_with_policies(
-                max_active_flows,
-                metrics.clone(),
-                registry.clone(),
-                backpressure_mode,
-                max_queue_depth,
-                max_wait,
-                retry_after_base,
-                starvation_timeout,
-                policies,
-            )),
-        };
+        let inner = DrrScheduler::new_with_policies(
+            max_active_flows,
+            metrics.clone(),
+            registry.clone(),
+            backpressure_mode,
+            max_queue_depth,
+            max_wait,
+            retry_after_base,
+            starvation_timeout,
+            gate,
+            kv_bias_handle,
+        );
 
         let cadence = Arc::new(CadenceRegistry::new(
             Arc::new(priority_policy),
@@ -188,7 +126,6 @@ impl Scheduler {
             registry,
             cadence,
             metrics,
-            algorithm_label,
         }
     }
 
@@ -200,7 +137,6 @@ impl Scheduler {
     /// - `kv_policy = disabled` (enabled=false)
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_defaults(
-        algorithm: Algorithm,
         max_active_flows: u32,
         metrics: Arc<Metrics>,
         registry: Arc<FlowRegistry>,
@@ -211,7 +147,6 @@ impl Scheduler {
     ) -> Self {
         let monitor = Arc::new(BackendMonitor::empty());
         Self::new(
-            algorithm,
             max_active_flows,
             metrics,
             registry,
@@ -237,7 +172,7 @@ impl Scheduler {
     #[tracing::instrument(skip(self, flow_id, work_unit), fields(
         flow_id = %flow_id,
         queue_depth_before,
-        algorithm = self.algorithm_label,
+        algorithm = "drr",
     ))]
     pub async fn admit(
         &self,
@@ -256,7 +191,7 @@ impl Scheduler {
     #[tracing::instrument(skip(self, flow_id, work_unit), fields(
         flow_id = %flow_id,
         queue_depth_before,
-        algorithm = self.algorithm_label,
+        algorithm = "drr",
         is_turn_boundary,
     ))]
     pub async fn admit_with_turn_boundary(
@@ -298,9 +233,7 @@ impl Scheduler {
 
         // KV policy gate runs FIRST before any flow scheduling.
         self.kv_policy.check().await?;
-        let result = match &self.inner {
-            SchedulerImpl::Drr(s) => s.admit(flow_id, work_unit).await,
-        };
+        let result = self.inner.admit(flow_id, work_unit).await;
 
         let wait_secs = enter.elapsed().as_secs_f64();
         match &result {
@@ -331,10 +264,7 @@ impl Scheduler {
     ///
     /// Includes both flow-scheduler queue depth and KV-delay-waiting requests.
     pub fn queue_depth(&self) -> u32 {
-        let inner_depth = match &self.inner {
-            SchedulerImpl::Drr(s) => s.queue_depth(),
-        };
-        inner_depth + self.kv_policy.delayed_count()
+        self.inner.queue_depth() + self.kv_policy.delayed_count()
     }
 
     /// Build a snapshot of the current queue state.
@@ -342,9 +272,7 @@ impl Scheduler {
     /// Waiting count includes both flow-scheduler queue depth and KV-delay
     /// requests so GET /queue reports all pending requests.
     pub fn queue_snapshot(&self) -> crate::flow::QueueSnapshot {
-        let inner_snapshot = match &self.inner {
-            SchedulerImpl::Drr(s) => s.queue_snapshot(),
-        };
+        let inner_snapshot = self.inner.queue_snapshot();
         // Add delayed count to the waiting total.
         let delayed = self.kv_policy.delayed_count();
         crate::flow::QueueSnapshot {
@@ -354,28 +282,16 @@ impl Scheduler {
         }
     }
 
-    /// Return the total service_done for the given flow.
-    /// Always returns 0.0 (the DRR scheduler tracks credit, not service_done).
-    pub fn service_done(&self, _flow_id: &crate::flow::FlowId) -> f64 {
-        match &self.inner {
-            SchedulerImpl::Drr(_) => 0.0,
-        }
-    }
-
     /// Return the current credit for the given flow.
     pub fn credit(&self, flow_id: &crate::flow::FlowId) -> i64 {
-        match &self.inner {
-            SchedulerImpl::Drr(s) => s.credit(flow_id),
-        }
+        self.inner.credit(flow_id)
     }
 
     /// Report accounting for a completed or cancelled request.
     ///
     /// DRR adjusts per-flow credit based on actual delivered tokens.
     pub fn report_accounting(&self, flow_id: &crate::flow::FlowId, report: AccountingReport) {
-        match &self.inner {
-            SchedulerImpl::Drr(s) => s.report_accounting(flow_id, report),
-        }
+        self.inner.report_accounting(flow_id, report)
     }
 
     /// Return a reference to the flow progress tracker for predictive admit.

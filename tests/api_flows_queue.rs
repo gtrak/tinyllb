@@ -13,7 +13,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tower::ServiceExt;
 
-use tinyllb::config::Algorithm;
 use tinyllb::config::BackpressureMode;
 use tinyllb::flow::FlowRegistry;
 use tinyllb::gateway;
@@ -86,7 +85,6 @@ fn build_admin_test_app(
     let metrics = metrics::create_metrics();
     let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
     let scheduler = Scheduler::new_with_defaults(
-        Algorithm::Drr,
         max_active_flows,
         metrics.clone(),
         flow_registry.clone(),

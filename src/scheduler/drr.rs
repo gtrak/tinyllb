@@ -100,51 +100,6 @@ pub struct DrrScheduler {
 }
 
 impl DrrScheduler {
-    /// Create a new DRR scheduler.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        max_active_flows: u32,
-        metrics: Arc<Metrics>,
-        registry: Arc<FlowRegistry>,
-        backpressure_mode: BackpressureMode,
-        max_queue_depth: u32,
-        max_wait: std::time::Duration,
-        retry_after_base: std::time::Duration,
-    ) -> Self {
-        let notify = Arc::new(tokio::sync::Notify::new());
-        let flow_progress = Arc::new(super::flow_progress::FlowProgressTracker::new());
-        let gate = Arc::new(CompletionBiasGate::new(
-            false,
-            0,
-            false, // predictive_admit
-            max_active_flows,
-            metrics.clone(),
-            registry.clone(),
-            notify,
-            Duration::from_secs(300),
-            flow_progress.clone(),
-        ));
-        Self::new_inner(
-            max_active_flows,
-            metrics,
-            registry,
-            backpressure_mode,
-            max_queue_depth,
-            max_wait,
-            retry_after_base,
-            Duration::from_secs(300),
-            gate,
-            Arc::new(super::kv_bias::KvBiasHandle::new(
-                crate::config::KvBias {
-                    enabled: false,
-                    ..crate::config::KvBias::default()
-                },
-                Arc::new(crate::backend::BackendMonitor::empty()),
-                flow_progress,
-            )),
-        )
-    }
-
     /// Create a new DRR scheduler with policy hooks.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_with_policies(
@@ -156,7 +111,8 @@ impl DrrScheduler {
         max_wait: std::time::Duration,
         retry_after_base: std::time::Duration,
         starvation_timeout: Duration,
-        policies: super::Policies,
+        completion_bias_gate: Arc<CompletionBiasGate>,
+        kv_bias: Arc<super::kv_bias::KvBiasHandle>,
     ) -> Self {
         Self::new_inner(
             max_active_flows,
@@ -167,8 +123,8 @@ impl DrrScheduler {
             max_wait,
             retry_after_base,
             starvation_timeout,
-            policies.completion_bias,
-            policies.kv_bias,
+            completion_bias_gate,
+            kv_bias,
         )
     }
 

@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tower::ServiceExt;
 
-use tinyllb::config::{Algorithm, BackpressureMode};
+use tinyllb::config::BackpressureMode;
 use tinyllb::flow::FlowRegistry;
 use tinyllb::gateway;
 use tinyllb::metrics;
@@ -223,7 +223,6 @@ fn build_proxy_with_drr(backend_url: &str) -> (Router, Arc<metrics::Metrics>, Ar
     let m = metrics::create_metrics();
     let flow_registry = Arc::new(FlowRegistry::new(10.0, 50));
     let scheduler = Scheduler::new_with_defaults(
-        Algorithm::Drr,
         4,
         m.clone(),
         flow_registry.clone(),
@@ -686,7 +685,6 @@ fn build_proxy_with_drr_and_timeout(
     let m = metrics::create_metrics();
     let flow_registry = Arc::new(FlowRegistry::new(10.0, 50));
     let scheduler = Scheduler::new_with_defaults(
-        Algorithm::Drr,
         4,
         m.clone(),
         flow_registry.clone(),

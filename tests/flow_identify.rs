@@ -13,7 +13,6 @@ use axum::Router;
 use std::sync::Arc;
 use tower::ServiceExt;
 
-use tinyllb::config::Algorithm;
 use tinyllb::config::BackpressureMode;
 use tinyllb::flow::{FlowId, FlowRegistry};
 use tinyllb::gateway;
@@ -28,7 +27,6 @@ fn build_flow_test_app_with_handles(
     let metrics = metrics::create_metrics();
     let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
     let scheduler = Scheduler::new_with_defaults(
-        Algorithm::Drr,
         4,
         metrics.clone(),
         flow_registry.clone(),

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tinyllb::backend::BackendMonitor;
-use tinyllb::config::{Algorithm, BackpressureMode, CompletionBias, KvPolicyConfig, Priorities, PriorityPolicy};
+use tinyllb::config::{BackpressureMode, CompletionBias, KvPolicyConfig, Priorities, PriorityPolicy};
 use tinyllb::flow::{FlowId, FlowRegistration, FlowRegistry};
 use tinyllb::metrics;
 use tinyllb::scheduler::Scheduler;
@@ -39,7 +39,6 @@ async fn test_completion_bias_blocks_new_flow() {
         // Use a LONG starvation timeout so that if C is admitted promptly via
         // drain-release, starvation is NOT the cause.
         let scheduler = Arc::new(Scheduler::new(
-            Algorithm::Drr,
             4, // 4 slots, but target=2
             m.clone(),
             registry.clone(),
@@ -113,7 +112,6 @@ async fn test_completion_bias_allows_active_flow_requests() {
         let m = metrics::create_metrics();
         let registry = Arc::new(FlowRegistry::new(1.0, 50));
         let scheduler = Arc::new(Scheduler::new(
-            Algorithm::Drr,
             2,
             m.clone(),
             registry.clone(),
@@ -171,7 +169,6 @@ async fn test_priority_drr_higher_prio_selected_first() {
         let m = metrics::create_metrics();
         let registry = Arc::new(FlowRegistry::new(1.0, 50));
         let scheduler = Arc::new(Scheduler::new(
-            Algorithm::Drr,
             1,
             m.clone(),
             registry.clone(),
@@ -246,7 +243,6 @@ async fn test_starvation_drr_force_admit() {
         let registry = Arc::new(FlowRegistry::new(1.0, 50));
         let starvation_timeout = Duration::from_millis(50);
         let scheduler = Arc::new(Scheduler::new(
-            Algorithm::Drr,
             2,
             m.clone(),
             registry.clone(),

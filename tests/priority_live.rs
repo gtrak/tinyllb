@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use tinyllb::backend::BackendMonitor;
 use tinyllb::config::{
-    Algorithm, BackpressureMode, CompletionBias, KvPolicyConfig, Priorities, PriorityPolicy,
+    BackpressureMode, CompletionBias, KvPolicyConfig, Priorities, PriorityPolicy,
 };
 use tinyllb::flow::FlowRegistry;
 use tinyllb::metrics::{self, Metrics};
@@ -42,7 +42,6 @@ fn build_scheduler(policy: PriorityPolicy) -> (Arc<Metrics>, Arc<FlowRegistry>, 
     let m = metrics::create_metrics();
     let registry = Arc::new(FlowRegistry::new(1.0, 50));
     let scheduler = Arc::new(Scheduler::new(
-        Algorithm::Drr,
         1, // max_active_flows=1 — contention is visible
         m.clone(),
         registry.clone(),

@@ -41,7 +41,7 @@ use tower::ServiceExt;
 
 use tinyllb::backend::BackendMonitor;
 use tinyllb::config::{
-    Algorithm, BackpressureMode, CompletionBias, KvPolicyConfig, Priorities, PriorityPolicy,
+    BackpressureMode, CompletionBias, KvPolicyConfig, Priorities, PriorityPolicy,
 };
 use tinyllb::flow::FlowRegistry;
 use tinyllb::gateway;
@@ -80,7 +80,6 @@ fn build_proxy_app(
     let m = metrics::create_metrics();
     let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
     let scheduler = Arc::new(Scheduler::new(
-        Algorithm::Drr,
         max_active_flows,
         m.clone(),
         flow_registry.clone(),

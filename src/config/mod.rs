@@ -218,8 +218,6 @@ impl Default for PriorityPolicy {
 /// Scheduler configuration.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Scheduler {
-    #[serde(default)]
-    pub algorithm: Algorithm,
     #[serde(default = "Scheduler::default_max_active_flows")]
     pub max_active_flows: u32,
     #[serde(
@@ -246,7 +244,6 @@ impl Scheduler {
 impl Default for Scheduler {
     fn default() -> Self {
         Self {
-            algorithm: Algorithm::default(),
             max_active_flows: Self::default_max_active_flows(),
             starvation_timeout: Self::default_starvation_timeout(),
             completion_bias: CompletionBias::default(),
@@ -340,14 +337,6 @@ impl Default for CompletionBias {
             predictive_admit: false,
         }
     }
-}
-
-/// Scheduling algorithm.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Algorithm {
-    #[default]
-    Drr,
 }
 
 /// Per-flow defaults.

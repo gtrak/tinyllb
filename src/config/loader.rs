@@ -65,7 +65,6 @@ pub fn load() -> anyhow::Result<Config> {
 
     let builder = config::Config::builder()
         .set_default("backend.url", "http://localhost:8000")?
-        .set_default("scheduler.algorithm", "drr")?
         .set_default("scheduler.max_active_flows", 4u32)?
         .set_default("scheduler.starvation_timeout", "300s")?
         .set_default("flows.default_weight", 1.0f64)?

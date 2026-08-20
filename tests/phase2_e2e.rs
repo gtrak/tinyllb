@@ -22,7 +22,7 @@ use tower::ServiceExt;
 
 use tinyllb::backend::BackendMonitor;
 use tinyllb::config::{
-    Algorithm, Backpressure, BackpressureMode, CompletionBias, KvPolicyConfig, Priorities, PriorityPolicy,
+    Backpressure, BackpressureMode, CompletionBias, KvPolicyConfig, Priorities, PriorityPolicy,
 };
 use tinyllb::gateway;
 use tinyllb::metrics;
@@ -115,7 +115,6 @@ async fn start_tracking_stub(service_time_ms: u64) -> (SocketAddr, Arc<StubFlowS
 /// Build a full proxy app with configurable scheduler settings.
 fn build_e2e_proxy_with_config(
     backend_url: &str,
-    algorithm: Algorithm,
     max_active_flows: u32,
     backpressure: Backpressure,
     starvation_timeout: Duration,
@@ -124,7 +123,6 @@ fn build_e2e_proxy_with_config(
     let m = metrics::create_metrics();
     let flow_registry = Arc::new(tinyllb::flow::FlowRegistry::new(1.0, 50));
     let scheduler = Arc::new(Scheduler::new(
-        algorithm,
         max_active_flows,
         m.clone(),
         flow_registry.clone(),
@@ -253,7 +251,6 @@ async fn test_no_starvation_interactive_completes() {
 
         let (app, m, _scheduler) = build_e2e_proxy_with_config(
             &backend_url,
-            Algorithm::Drr,
             2, // 2 slots — background fills both
             backpressure,
             starvation_timeout,
@@ -376,7 +373,6 @@ async fn test_queue_endpoint_reflects_state() {
 
         let (app, _m, _scheduler) = build_e2e_proxy_with_config(
             &backend_url,
-            Algorithm::Drr,
             2, // 2 slots active
             backpressure,
             Duration::from_secs(300),

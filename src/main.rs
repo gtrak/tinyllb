@@ -101,7 +101,6 @@ async fn main() {
     let monitor = Arc::new(monitor);
 
     let scheduler = tinyllb::scheduler::Scheduler::new(
-        cfg.scheduler.algorithm,
         cfg.scheduler.max_active_flows,
         metrics.clone(),
         flow_registry.clone(),
@@ -157,7 +156,6 @@ mod tests {
         let metrics = metrics::create_metrics();
         let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
         let scheduler = tinyllb::scheduler::Scheduler::new_with_defaults(
-            tinyllb::config::Algorithm::Drr,
             4,
             metrics.clone(),
             flow_registry.clone(),
