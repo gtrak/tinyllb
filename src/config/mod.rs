@@ -346,6 +346,12 @@ pub struct Flows {
     pub default_weight: f64,
     #[serde(default = "Flows::default_default_priority")]
     pub default_priority: u32,
+    /// How long a flow can be idle before eviction. Default 10 minutes.
+    #[serde(
+        default = "Flows::default_flow_idle_ttl",
+        with = "loader::humantime_serde"
+    )]
+    pub flow_idle_ttl: Duration,
 }
 
 impl Flows {
@@ -356,6 +362,10 @@ impl Flows {
     fn default_default_priority() -> u32 {
         50
     }
+
+    fn default_flow_idle_ttl() -> Duration {
+        Duration::from_secs(600)
+    }
 }
 
 impl Default for Flows {
@@ -363,6 +373,7 @@ impl Default for Flows {
         Self {
             default_weight: Self::default_default_weight(),
             default_priority: Self::default_default_priority(),
+            flow_idle_ttl: Self::default_flow_idle_ttl(),
         }
     }
 }

@@ -100,7 +100,7 @@ async fn main() {
     }
     let monitor = Arc::new(monitor);
 
-    let scheduler = tinyllb::scheduler::Scheduler::new(
+    let scheduler = Arc::new(tinyllb::scheduler::Scheduler::new(
         cfg.scheduler.max_active_flows,
         metrics.clone(),
         flow_registry.clone(),
@@ -115,13 +115,13 @@ async fn main() {
         cfg.priority_policy.clone(),
         cfg.priorities.clone(),
         cfg.scheduler.kv_bias.clone(),
-    );
+    ));
 
     let state = gateway::AppState {
         client,
         backend_url: Arc::new(cfg.backend.url),
         metrics: metrics.clone(),
-        scheduler: Arc::new(scheduler),
+        scheduler: scheduler.clone(),
         flow_registry,
         backpressure: cfg.backpressure,
         priorities: cfg.priorities.clone(),
@@ -129,6 +129,24 @@ async fn main() {
         stall_rx: monitor.stall_receiver(),
         retry_policy: cfg.retry_policy.clone(),
     };
+
+    // Periodic flow eviction: remove idle flows to prevent unbounded
+    // growth of the flow/cadence registries from accumulating session IDs.
+    {
+        let reaper = scheduler.clone();
+        let idle_ttl = cfg.flows.flow_idle_ttl;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                let removed = reaper.reap_idle(idle_ttl);
+                if removed > 0 {
+                    tracing::info!(removed = removed, "reaped idle flows");
+                }
+            }
+        });
+    }
 
     let app = create_router(state);
 

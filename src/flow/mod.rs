@@ -106,6 +106,9 @@ pub struct Flow {
     /// 0 = heuristic-derived (default), 1 = X-LLM-Priority header,
     /// 2 = POST /flows admin API.
     pub priority_source: AtomicU8,
+    /// Unix timestamp (seconds) of the last request for this flow.
+    /// Used by the reaper to evict idle flows.
+    pub last_seen: AtomicU64,
 }
 
 impl Flow {
@@ -120,6 +123,7 @@ impl Flow {
             enqueued_at: std::sync::RwLock::new(None),
             active: AtomicU32::new(0),
             priority_source: AtomicU8::new(0),
+            last_seen: AtomicU64::new(now_unix_secs()),
         }
     }
 
@@ -225,10 +229,14 @@ impl FlowRegistry {
         let dw = self.default_weight;
         let dp = self.default_priority;
         let flow_id = id.clone();
-        self.flows
+        let flow = self
+            .flows
             .entry(id)
             .or_insert_with(|| Arc::new(Flow::new(flow_id, dw, dp)))
-            .clone()
+            .clone();
+        // Refresh the idle-eviction timestamp on every access.
+        flow.last_seen.store(now_unix_secs(), Ordering::Relaxed);
+        flow
     }
 
     /// Register (upsert) a flow with explicit weight and priority.
@@ -239,12 +247,14 @@ impl FlowRegistry {
         let id = reg.id.clone();
         let weight_bits = reg.weight.to_bits();
         let priority = reg.priority;
+        let now = now_unix_secs();
 
         // Try to get existing entry; if exists, update in place.
         if let Some(entry) = self.flows.get_mut(&id) {
             entry.value().weight.store(weight_bits, Ordering::Relaxed);
             entry.value().priority.store(priority, Ordering::Relaxed);
             entry.value().priority_source.store(2, Ordering::Relaxed);
+            entry.value().last_seen.store(now, Ordering::Relaxed);
             false // updated
         } else {
             let flow = Arc::new(Flow {
@@ -256,10 +266,39 @@ impl FlowRegistry {
                 enqueued_at: std::sync::RwLock::new(None),
                 active: AtomicU32::new(0),
                 priority_source: AtomicU8::new(2),
+                last_seen: AtomicU64::new(now),
             });
             self.flows.insert(FlowId::new(id.to_string()), flow);
             true // created
         }
+    }
+
+    /// Remove flows that have no active or queued requests and haven't
+    /// been seen in the last `ttl` seconds. Returns the number of flows
+    /// removed.
+    pub fn reap_idle(&self, ttl: std::time::Duration) -> usize {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let cutoff = now.saturating_sub(ttl.as_secs());
+
+        let to_remove: Vec<FlowId> = self
+            .flows
+            .iter()
+            .filter(|entry| {
+                let flow = entry.value();
+                flow.depth.load(Ordering::Relaxed) == 0
+                    && flow.active.load(Ordering::Relaxed) == 0
+                    && flow.last_seen.load(Ordering::Relaxed) < cutoff
+            })
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        for id in &to_remove {
+            self.flows.remove(id);
+        }
+        to_remove.len()
     }
 
     /// Return the number of registered flows.
@@ -352,6 +391,15 @@ impl FlowRegistry {
     }
 }
 
+/// Current unix timestamp in seconds, clamped to 0 if the clock is
+/// pre-1970 (should never happen).
+fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 impl std::fmt::Debug for FlowRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FlowRegistry")
@@ -359,5 +407,65 @@ impl std::fmt::Debug for FlowRegistry {
             .field("default_weight", &self.default_weight)
             .field("default_priority", &self.default_priority)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reap_idle_removes_idle_stale_flows() {
+        let reg = FlowRegistry::new(1.0, 50);
+        let idle = FlowId::new("idle-flow");
+        let fresh = FlowId::new("fresh-flow");
+        let busy = FlowId::new("busy-flow");
+        let deep = FlowId::new("deep-flow");
+
+        reg.get_or_create(idle.clone());
+        reg.get_or_create(fresh.clone());
+        reg.get_or_create(busy.clone());
+        reg.get_or_create(deep.clone());
+
+        // Age the idle, busy, and deep flows beyond the TTL. `fresh` stays
+        // recent so the reaper must keep it.
+        for id in [&idle, &busy, &deep] {
+            reg.flows.get(id).unwrap().last_seen.store(1, Ordering::Relaxed);
+        }
+        reg.flows.get(&busy).unwrap().active.fetch_add(1, Ordering::Relaxed);
+        reg.flows.get(&deep).unwrap().depth.fetch_add(1, Ordering::Relaxed);
+
+        let removed = reg.reap_idle(std::time::Duration::from_secs(600));
+
+        assert_eq!(removed, 1, "only the idle stale flow should be removed");
+        assert!(reg.flows.get(&idle).is_none());
+        assert!(reg.flows.get(&fresh).is_some());
+        assert!(reg.flows.get(&busy).is_some());
+        assert!(reg.flows.get(&deep).is_some());
+    }
+
+    #[test]
+    fn reap_idle_keeps_recent_flows() {
+        let reg = FlowRegistry::new(1.0, 50);
+        let id = FlowId::new("recent");
+        reg.get_or_create(id.clone());
+
+        let removed = reg.reap_idle(std::time::Duration::from_secs(600));
+
+        assert_eq!(removed, 0, "recently seen flow must not be reaped");
+        assert!(reg.flows.get(&id).is_some());
+    }
+
+    #[test]
+    fn get_or_create_updates_last_seen() {
+        let reg = FlowRegistry::new(1.0, 50);
+        let id = FlowId::new("f");
+        let flow = reg.get_or_create(id.clone());
+        let first = flow.last_seen.load(Ordering::Relaxed);
+        assert!(first > 0, "last_seen should be set on creation");
+        // Second access refreshes it (monotonically non-decreasing).
+        let flow2 = reg.get_or_create(id.clone());
+        assert!(flow2.last_seen.load(Ordering::Relaxed) >= first);
+        assert!(flow2.last_seen.load(Ordering::Relaxed) >= now_unix_secs() - 5);
     }
 }

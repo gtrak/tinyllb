@@ -315,4 +315,24 @@ impl Scheduler {
     pub fn flow_progress_tracker(&self) -> Arc<flow_progress::FlowProgressTracker> {
         self.flow_progress.clone()
     }
+
+    /// Evict idle flows and cadence entries older than `ttl`.
+    ///
+    /// Called periodically by the background reaper task (see `main.rs`) to
+    /// prevent unbounded growth of the flow and cadence registries from
+    /// accumulating session IDs. Returns the number of flows removed from
+    /// the flow registry (cadence entries are reaped with the same `ttl`).
+    pub fn reap_idle(&self, ttl: Duration) -> usize {
+        let removed = self.registry.reap_idle(ttl);
+        let cadence_removed = self.cadence.reap_idle(ttl);
+        if removed > 0 || cadence_removed > 0 {
+            tracing::debug!(
+                flows_removed = removed,
+                cadence_removed = cadence_removed,
+                ttl_secs = ttl.as_secs(),
+                "reaped idle flows"
+            );
+        }
+        removed
+    }
 }
