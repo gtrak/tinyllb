@@ -92,7 +92,7 @@ The KV-admission policy governs whether incoming requests are admitted, delayed,
 
 - Admits requests when KV-cache usage is within normal operating range
 - Delays requests when usage exceeds a configured delay threshold, holding them until pressure subsides
-- Rejects requests with a `Retry-After` hint when usage exceeds a configured reject threshold
+- Rejects requests with a `Retry-After` hint when usage exceeds a configured reject threshold in hybrid/failfast modes only — in blocking mode the reject band is held like the delay band
 - Bypasses both the delay and reject checks for interactive (priority-100) flows when the interactive bypass is enabled
 - Exposes a count of delayed requests observable by queue-depth queries
 - Records admission decisions for metrics collection
@@ -113,7 +113,7 @@ The policy exposes one admission gate, a decision type, a configuration surface 
 **Admission Gate.** The gate method returns a `Result` where success indicates admission and failure carries a backpressure rejection with a `Retry-After` duration.
 
 - `Ok(())` is returned when the request is admitted directly or a delay wait completes within bounds
-- `Err(BackpressureRejected { retry_after })` is returned when the request must be back-pressured, carrying the backoff duration
+- `Err(BackpressureRejected { retry_after })` is returned when the request must be back-pressured, carrying the backoff duration. In hybrid/failfast modes this happens instantly in the reject band or after a bounded delay wait; in blocking mode the reject band is absorbed into the delay band (hold, no instant 429)
 - When the policy is enabled, records the initial decision outcome to the metrics subsystem before returning
 - When the interactive bypass is enabled and the caller marks the request as interactive, the gate returns `Ok(())` immediately without consulting KV pressure and records a `bypass` decision
 
@@ -121,7 +121,7 @@ The policy exposes one admission gate, a decision type, a configuration surface 
 
 - **Accept** — KV pressure is at or below the delay threshold — proceed immediately
 - **Delay** — KV pressure exceeds the delay threshold — request enters a delay wait
-- **Reject(Duration)** — KV pressure exceeds the reject threshold — return rejection with the embedded duration as `Retry-After`
+- **Reject** — KV pressure exceeds the reject threshold — no embedded duration; in hybrid/failfast modes the gate rejects with a `Retry-After` computed via `fail_fast_retry_after`, and in blocking mode the decision is absorbed into the Delay band (hold) before any wait begins
 
 **Configuration.** The admission thresholds (`enabled`, `delay_threshold`, `reject_threshold`) and the interactive-bypass flag (`bypass_interactive`) are carried in a dedicated policy config: defaults are `enabled: false`, `reject_threshold: 0.95`, `delay_threshold: 0.80`, `bypass_interactive: true`.
 
@@ -149,12 +149,14 @@ These statements hold regardless of implementation details and survive a complet
 
 **Interactive Bypass.** When `bypass_interactive` is enabled and the caller marks the request as interactive (flow priority equals `priorities.interactive`), the gate returns `Ok(())` immediately without consulting KV pressure, skipping both the delay and reject thresholds. The DRR scheduler and `max_active_flows` still bound concurrency, and an interactive session never sees a KV-gate 429. The decision is recorded with the `bypass` label, so the metrics-completeness guarantee still holds.
 
+**Mode-Aware Reject.** In blocking mode the reject threshold does not produce an instant 429: the reject band is absorbed into the delay band, so requests are held (unbounded, matching the DRR blocking contract) until KV pressure drops below the delay threshold or the client disconnects. A genuinely wedged engine is caught first by the stall gate (instant 429). Instant KV-gate 429s only occur in hybrid/failfast modes, where the retry-after is computed via `fail_fast_retry_after`. This honors the blocking contract that the DRR scheduler and the delay band already follow; the stall gate is the sole admission path that instant-rejects in all modes (an unrecoverable wedge).
+
 ## Constraints
 
 Operational and configurational boundaries that shape the design space.
 
 - Backpressure mode determines whether delay waits can be unbounded: blocking mode allows indefinite waits, while other modes enforce a timeout
-- `Retry-After` on reject-scale overflows follows the formula 5 s base + (excess × 10 s), where excess is the fraction of KV usage above the reject threshold. These constants are hardcoded
+- `Retry-After` on KV-gate rejections (reject band, hybrid/failfast modes only) is computed via `fail_fast_retry_after` — the same formula as delay-timeout. In blocking mode the reject band produces no 429: requests are held in the delay band
 - `Retry-After` on delay-timeout is computed from the delayed-request count relative to the configured maximum
 - The policy operates on a single aggregate KV-usage value — per-segment or per-key granularity is not available
 - At exactly the delay threshold value, the request is admitted (not delayed). At exactly the reject threshold value, the request is delayed (not rejected). Strict inequality governs both comparisons

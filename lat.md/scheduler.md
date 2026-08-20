@@ -47,7 +47,7 @@ These statements hold regardless of configuration or how the facade is reconstru
 
 **KV gate ordering.** The KV-cache admission gate always executes before the DRR scheduler on every admission attempt. A KV-policy rejection prevents the DRR scheduler from seeing the request.
 
-**Stall gate ordering.** While the backend stall signal is set, new admissions are rejected with a 429 carrying a fixed 5-second retry-after; the KV gate and the DRR scheduler are not consulted.
+**Stall gate ordering.** While the backend stall signal is set, new admissions are rejected with a 429 carrying a fixed 5-second retry-after; the KV gate and the DRR scheduler are not consulted. The blocking contract — wait indefinitely, never proactively reject — applies to every admission gate the facade runs (the KV-cache gate and the DRR scheduler); the stall gate is the sole exception, instant-rejecting in all modes for an unrecoverable wedge.
 
 **Queue metric aggregation.** The reported queue depth always equals the DRR scheduler's queue depth plus the number of requests currently delayed by the KV gate.
 

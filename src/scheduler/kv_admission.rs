@@ -24,8 +24,10 @@ pub enum KVMDecision {
     /// KV pressure is between delay and reject thresholds.  Park the request
     /// and wait for usage to drop below `delay_threshold`.
     Delay,
-    /// KV pressure exceeds the reject threshold.  Return 429 with Retry-After.
-    Reject(Duration),
+    /// KV pressure exceeds the reject threshold. In hybrid/failfast modes this
+    /// produces an instant 429; in blocking mode it is absorbed into the delay
+    /// band (hold).
+    Reject,
 }
 
 // ---------------------------------------------------------------------------
@@ -121,11 +123,7 @@ impl KvPolicy {
     /// delay when `kv_usage > delay_threshold`.
     fn decide(&self, snapshot: &crate::backend::BackendSnapshot) -> KVMDecision {
         if snapshot.kv_usage > self.reject_threshold {
-            // Reject with a Retry-After proportional to how far above threshold.
-            let excess = snapshot.kv_usage - self.reject_threshold;
-            // Base 5s, scale by excess fraction (up to ~5s at 1.0 usage).
-            let retry_after = Duration::from_secs_f64(5.0 + excess * 10.0);
-            KVMDecision::Reject(retry_after)
+            KVMDecision::Reject
         } else if snapshot.kv_usage > self.delay_threshold {
             KVMDecision::Delay
         } else {
@@ -151,7 +149,10 @@ impl KvPolicy {
     ///   Interactive sessions must never see a KV-gate 429; the DRR scheduler
     ///   and `max_active_flows` still bound concurrency, and vLLM's own
     ///   preemption handles true KV exhaustion.
-    /// - If KV usage exceeds `reject_threshold`, returns `Err(BackpressureRejected)`.
+    /// - If KV usage exceeds `reject_threshold`: in **blocking** mode the reject
+    ///   band is absorbed into the delay band (hold, no 429); in **hybrid/failfast**
+    ///   modes the gate returns `Err(BackpressureRejected)` instantly, with a
+    ///   `Retry-After` computed via `fail_fast_retry_after`.
     /// - If KV usage exceeds `delay_threshold`, waits for usage to drop below
     ///   `delay_threshold` before proceeding.
     ///   - **Blocking**: waits indefinitely (blocking contract).
@@ -185,7 +186,16 @@ impl KvPolicy {
             }
         };
 
-        match self.decide(&snapshot) {
+        let decision = self.decide(&snapshot);
+        // In blocking mode the reject band is absorbed into the delay band:
+        // hold (unbounded) rather than instant-429, honoring the blocking
+        // contract that the DRR scheduler and the delay band already follow.
+        // Only hybrid/failfast reject instantly.
+        let decision = match (decision, self.backpressure_mode) {
+            (KVMDecision::Reject, BackpressureMode::Blocking) => KVMDecision::Delay,
+            (d, _) => d,
+        };
+        match decision {
             KVMDecision::Accept => {
                 self.metrics
                     .kv_admission_decisions_total
@@ -238,11 +248,17 @@ impl KvPolicy {
                 drop(_delay_guard);
                 result
             }
-            KVMDecision::Reject(retry_after) => {
+            KVMDecision::Reject => {
                 self.metrics
                     .kv_admission_decisions_total
                     .with_label_values(&["reject"])
                     .inc();
+                let depth = self.delayed_count.load(Ordering::Relaxed);
+                let retry_after = fail_fast_retry_after(
+                    depth,
+                    self.max_queue_depth,
+                    self.retry_after_base,
+                );
                 Err(BackpressureRejected { retry_after })
             }
         }

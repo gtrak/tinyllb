@@ -837,11 +837,14 @@ async fn test_models_passthrough_under_kv_pressure() {
 
     let metrics = metrics::create_metrics();
     let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
+    // Hybrid mode: the reject band instant-rejects (429) at 0.96. Blocking
+    // mode would hold indefinitely (never proactively rejects), so the
+    // background-POST-429 assertion below requires a rejecting mode.
     let scheduler = Arc::new(Scheduler::new(
         4,
         metrics.clone(),
         flow_registry.clone(),
-        BackpressureMode::Blocking,
+        BackpressureMode::Hybrid,
         100,
         Duration::from_secs(10),
         Duration::from_secs(1),

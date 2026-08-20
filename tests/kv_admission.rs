@@ -136,21 +136,23 @@ async fn kv_admission_delay_until_drop() {
     drop(ticket);
 }
 
-/// Above reject_threshold → Reject with BackpressureRejected.
+/// Above reject_threshold in hybrid mode → instant Reject with
+/// BackpressureRejected (blocking mode instead holds — see the
+/// blocking-hold test below).
 #[tokio::test]
 async fn kv_admission_reject_above_threshold() {
-    let (tx, rx) = tokio::sync::watch::channel(BackendSnapshot {
+    let (_tx, rx) = tokio::sync::watch::channel(BackendSnapshot {
         kv_usage: 0.96,
         kv_free: 0.04,
         preemptions: 5,
     ..Default::default()
     });
     let monitor = Arc::new(BackendMonitor::from_receiver(rx));
-    let _tx = tx;
 
-    let scheduler = build_scheduler(enabled_kv_policy(), monitor);
+    let scheduler =
+        build_scheduler_with_mode(enabled_kv_policy(), monitor, BackpressureMode::Hybrid);
 
-    // Should be rejected immediately.
+    // Should be rejected immediately (hybrid mode still instant-rejects at 0.96).
     let result = tokio::time::timeout(
         Duration::from_secs(1),
         scheduler.admit(FlowId::new("test"), 1024.0),
@@ -161,11 +163,11 @@ async fn kv_admission_reject_above_threshold() {
     match result {
         Ok(_) => panic!("admit should be rejected at 0.96 usage"),
         Err(rejected) => {
-            // Retry-After should be ~5s + excess scaling.
+            // Retry-After comes from fail_fast_retry_after (base 1s, scaled by
+            // queue depth) — only check that it is non-zero.
             assert!(
-                rejected.retry_after >= Duration::from_secs(5),
-                "Retry-After should be >= 5s, got {:?}",
-                rejected.retry_after
+                !rejected.retry_after.is_zero(),
+                "should have a non-zero Retry-After"
             );
         }
     }
@@ -230,7 +232,7 @@ async fn kv_admission_decision_counter_increments() {
         4,
         m.clone(),
         registry,
-        BackpressureMode::Blocking,
+        BackpressureMode::Hybrid,
         100,
         Duration::from_secs(10),
         Duration::from_secs(1),
@@ -708,7 +710,7 @@ async fn kv_admission_background_still_rejects() {
         4,
         m.clone(),
         registry.clone(),
-        BackpressureMode::Blocking,
+        BackpressureMode::Hybrid,
         100,
         Duration::from_secs(10),
         Duration::from_secs(1),
@@ -753,4 +755,44 @@ async fn kv_admission_background_still_rejects() {
         .with_label_values(&["bypass"])
         .get();
     assert_eq!(bypass_count, 0.0, "background flow must not bypass");
+}
+
+/// In blocking mode, kv_usage above reject_threshold does NOT instant-429:
+/// the request is held (reject band absorbed into the delay band) and
+/// admitted once KV drops below delay_threshold. This is the worker-death fix.
+#[tokio::test]
+async fn kv_admission_blocking_holds_reject_band() {
+    // KV pinned in the reject zone (0.96 > 0.95).
+    let (tx, rx) = tokio::sync::watch::channel(BackendSnapshot {
+        kv_usage: 0.96,
+        kv_free: 0.04,
+        preemptions: 5,
+        ..Default::default()
+    });
+    let monitor = Arc::new(BackendMonitor::from_receiver(rx));
+
+    // Blocking mode + bypass disabled (enabled_kv_policy sets bypass_interactive: false).
+    let scheduler = build_scheduler(enabled_kv_policy(), monitor);
+
+    // Spawn the admit — it must HOLD (not 429) at 0.96 in blocking mode.
+    let sched_clone = scheduler.clone();
+    let admit_task =
+        tokio::spawn(async move { sched_clone.admit(FlowId::new("held"), 1024.0).await });
+
+    // Let it enter the hold.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Drop KV below the delay threshold — the held request should admit.
+    let _ = tx.send(BackendSnapshot {
+        kv_usage: 0.30,
+        kv_free: 0.70,
+        preemptions: 0,
+        ..Default::default()
+    });
+
+    let ticket = tokio::time::timeout(Duration::from_secs(5), admit_task)
+        .await
+        .expect("blocking mode should hold through the reject band, then admit")
+        .expect("should admit after KV drops");
+    drop(ticket);
 }
