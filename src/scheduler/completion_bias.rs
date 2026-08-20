@@ -15,11 +15,12 @@
 //! flow finishes.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::flow::{Flow, FlowRegistry};
 use crate::metrics::Metrics;
 use crate::scheduler::flow_progress::FlowProgressTracker;
+use crate::scheduler::starvation;
 
 /// Threshold for predictive admit: if delivered >= this fraction of estimated,
 /// the flow is considered "near done."
@@ -158,19 +159,12 @@ impl CompletionBiasGate {
     /// Check if the flow has exceeded the starvation timeout.
     /// If so, record metrics and return true to allow the flow through.
     async fn maybe_force_admit(&self, flow: &Arc<Flow>) -> bool {
-        let enqueued_at = flow.enqueued_at.read().unwrap();
-        if let Some(queued_at) = *enqueued_at {
-            let wait = Instant::now().duration_since(queued_at);
-            if wait > self.starvation_timeout {
-                self.metrics
-                    .flow_starvation_seconds
-                    .with_label_values(&[flow.id.metric_label()])
-                    .set(wait.as_secs_f64());
-                self.metrics.starvation_force_admits_total.inc();
-                return true;
-            }
+        if let Some(wait) = starvation::is_starved(flow, self.starvation_timeout) {
+            starvation::record_force_admit(&self.metrics, flow, wait);
+            true
+        } else {
+            false
         }
-        false
     }
 
     /// Wake all waiters.  Called when a ticket is dropped (active flow count changes).
