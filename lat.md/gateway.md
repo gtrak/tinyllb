@@ -109,7 +109,7 @@ The gateway proxy forwards requests to a vLLM backend with controlled header fil
 
 **Guarantees.**
 
-- Backpressure is enforced through an external scheduler before any work reaches the backend.
+- Backpressure is enforced through an external scheduler before any work reaches the backend; backpressure applies only to inference requests, and all other requests are proxied directly without admission.
 - Request body size is bounded to prevent unbounded resource consumption.
 - Hop-by-hop headers are stripped from both request and response paths.
 - A single request identifier is attached to the full lifecycle of each proxied exchange.
@@ -137,6 +137,7 @@ The gateway exposes three HTTP routes that share a uniform proxying contract. Ca
 
 **Admission and Sizing.**
 
+- Scheduler admission applies only to inference requests — `POST /v1/chat/completions` and `POST /v1/completions` ([[src/gateway/proxy.rs#is_inference_request]]). All other methods and routes (e.g. `GET /v1/models`) bypass admission, lifecycle tracking, premature-stop retry, and token accounting, and are proxied directly, sharing only the body-size guard, header filtering, and backend URL building.
 - Requests with a body of 32 MiB or larger are rejected with `413 Payload Too Large` before reaching the scheduler or backend.
 - Requests blocked by the scheduler receive `429 Too Many Requests` with a `Retry-After` header (integer seconds), a JSON body `{"error":"queue full"}`, and `Content-Type: application/json`.
 - Requests exceeding the configured timeout receive `408 Request Timeout`.
@@ -204,6 +205,11 @@ Structural properties of the gateway proxy hold regardless of implementation det
 
 - An admission slot is retained from the moment the scheduler admits the request until the response body is fully delivered to the client or the request is cancelled.
 
+**Admission Scoping.** Only inference requests are admitted; metadata is never held behind inference backpressure.
+
+- Scheduler admission, lifecycle tracking, premature-stop retry, and token accounting apply only to `POST` requests to `/v1/chat/completions` or `/v1/completions` ([[src/gateway/proxy.rs#is_inference_request]]).
+- All other requests are proxied directly, returning the backend status and body verbatim with filtered headers and the `X-Request-ID`, and never touch the flow registry, scheduler, or token credits.
+
 **Active Request Tracking.**
 
 - Active request counts are maintained for all requests, regardless of whether the response is streaming or non-streaming.
@@ -260,6 +266,7 @@ Concepts and source artifacts associated with reverse proxy request handling.
 - [[gateway#Streaming Passthrough and Token Accounting]] — streaming response token accumulation and request tracking.
 - [[gateway#Gateway Application State]] — configuration surface for backend URL, timeout, and scheduler binding.
 - [[src/gateway/proxy.rs#proxy_handler]] — main request handler.
+- [[src/gateway/proxy.rs#is_inference_request]] — inference-route gate that scopes admission, retry, and token accounting.
 - [[src/gateway/proxy.rs#MAX_BODY_SIZE]] — body size limit constant.
 - [[src/gateway/proxy.rs#HOP_BY_HOP]] — hop-by-hop and excluded header definitions.
 - [[src/gateway/error.rs#ProxyError]] — proxy error types and status code mapping.

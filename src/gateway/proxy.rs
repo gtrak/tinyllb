@@ -180,6 +180,16 @@ fn is_turn_boundary_request(body: &bytes::Bytes) -> bool {
     }
 }
 
+/// Determine whether this request is an inference request that must go
+/// through the admission gate. Only POSTs to the two OpenAI completion
+/// routes queue; all other methods and routes (e.g. `GET /v1/models`,
+/// health probes) are proxied directly. Future POST inference routes must
+/// opt in explicitly here; all GETs and unknown routes bypass the gate.
+// @lat: [[gateway#Reverse Proxy Request Handling]]
+fn is_inference_request(method: &axum::http::Method, path: &str) -> bool {
+    method == axum::http::Method::POST
+        && (path == "/v1/chat/completions" || path == "/v1/completions")
+}
 
 /// Build the backend URL by joining the base URL with the request path and query.
 fn build_backend_url(
@@ -328,6 +338,39 @@ pub async fn proxy_handler(
         builder = builder.body(injected);
     } else {
         builder = builder.body(body_bytes);
+    }
+
+    // Non-inference requests (e.g. `GET /v1/models`, health probes) bypass
+    // the admission gate, lifecycle tracking, premature-stop retry, and
+    // token accounting. Only the body-size guard, header filtering, and
+    // backend URL building above are shared. Metadata must never be held
+    // behind inference backpressure or a KV-gate 429.
+    if !is_inference_request(&method, &original_path) {
+        for (name, value) in headers.iter() {
+            builder = builder.header(name, value);
+        }
+        let response = if let Some(timeout) = state.request_timeout {
+            match tokio::time::timeout(timeout, builder.send()).await {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => return Err(ProxyError::Network(e)),
+                Err(_) => return Err(ProxyError::Timeout),
+            }
+        } else {
+            builder.send().await.map_err(ProxyError::Network)?
+        };
+        let status = response.status();
+        let response_headers = response.headers().clone();
+        let body_bytes = collect_response_body(response, "metadata-response").await?;
+        let mut resp = Response::new(Body::from(body_bytes.to_vec()));
+        *resp.status_mut() = status;
+        for (name, value) in filter_response_headers(&response_headers).iter() {
+            resp.headers_mut().append(name, value.clone());
+        }
+        resp.headers_mut().insert(
+            axum::http::HeaderName::from_static("x-request-id"),
+            axum::http::HeaderValue::from_str(&request_id).expect("valid UUID header value"),
+        );
+        return Ok(resp);
     }
 
     // Apply any explicit priority override from the X-LLM-Priority header.
