@@ -31,7 +31,7 @@ use crate::flow::{Flow, FlowId, FlowRegistry, QueueSnapshot};
 use crate::metrics::Metrics;
 use crate::scheduler::backpressure::{fail_fast_retry_after, BackpressureRejected};
 use crate::scheduler::completion_bias::CompletionBiasGate;
-use crate::scheduler::fifo::{make_ticket, QueueTicket};
+use crate::scheduler::ticket::{make_ticket, QueueTicket};
 use crate::scheduler::lifecycle::AccountingReport;
 use crate::scheduler::priority;
 use crate::scheduler::starvation;

@@ -1,18 +1,18 @@
 mod backpressure;
 mod completion_bias;
 mod drr;
-mod fifo;
 mod flow_progress;
 mod kv_admission;
 mod kv_bias;
 pub mod lifecycle;
 mod priority;
 mod starvation;
+pub mod ticket;
 
 pub use backpressure::{fail_fast_retry_after, mode_label, BackpressureRejected};
 pub use drr::DrrScheduler;
-pub use fifo::{make_ticket, FifoScheduler, QueueTicket};
 pub use flow_progress::FlowProgressTracker;
+pub use ticket::{make_ticket, QueueTicket};
 pub use kv_admission::KvPolicy;
 pub use kv_bias::KvBiasHandle;
 pub use lifecycle::AccountingReport;
@@ -85,11 +85,10 @@ impl Policies {
 
 /// Internal enum for the scheduler algorithm implementation.
 enum SchedulerImpl {
-    Fifo(FifoScheduler),
     Drr(DrrScheduler),
 }
 
-/// Unified scheduler type that dispatches to FIFO or DRR based on config.
+/// Unified scheduler type wrapping the DRR flow scheduler.
 ///
 /// Wraps a shared `KvPolicy` gate that runs before the flow scheduler,
 /// enabling KV-cache-aware admission decisions.
@@ -160,21 +159,10 @@ impl Scheduler {
         ));
 
         let algorithm_label = match algorithm {
-            Algorithm::Fifo => "fifo",
             Algorithm::Drr => "drr",
         };
 
         let inner = match algorithm {
-            Algorithm::Fifo => SchedulerImpl::Fifo(FifoScheduler::new_with_policies(
-                max_active_flows,
-                metrics.clone(),
-                registry.clone(),
-                backpressure_mode,
-                max_queue_depth,
-                max_wait,
-                retry_after_base,
-                policies,
-            )),
             Algorithm::Drr => SchedulerImpl::Drr(DrrScheduler::new_with_policies(
                 max_active_flows,
                 metrics.clone(),
@@ -311,7 +299,6 @@ impl Scheduler {
         // KV policy gate runs FIRST before any flow scheduling.
         self.kv_policy.check().await?;
         let result = match &self.inner {
-            SchedulerImpl::Fifo(s) => s.admit(flow_id, work_unit).await,
             SchedulerImpl::Drr(s) => s.admit(flow_id, work_unit).await,
         };
 
@@ -345,7 +332,6 @@ impl Scheduler {
     /// Includes both flow-scheduler queue depth and KV-delay-waiting requests.
     pub fn queue_depth(&self) -> u32 {
         let inner_depth = match &self.inner {
-            SchedulerImpl::Fifo(s) => s.queue_depth(),
             SchedulerImpl::Drr(s) => s.queue_depth(),
         };
         inner_depth + self.kv_policy.delayed_count()
@@ -357,7 +343,6 @@ impl Scheduler {
     /// requests so GET /queue reports all pending requests.
     pub fn queue_snapshot(&self) -> crate::flow::QueueSnapshot {
         let inner_snapshot = match &self.inner {
-            SchedulerImpl::Fifo(s) => s.queue_snapshot(),
             SchedulerImpl::Drr(s) => s.queue_snapshot(),
         };
         // Add delayed count to the waiting total.
@@ -370,19 +355,16 @@ impl Scheduler {
     }
 
     /// Return the total service_done for the given flow.
-    /// Always returns 0.0 (no remaining scheduler tracks per-flow service).
+    /// Always returns 0.0 (the DRR scheduler tracks credit, not service_done).
     pub fn service_done(&self, _flow_id: &crate::flow::FlowId) -> f64 {
         match &self.inner {
-            SchedulerImpl::Fifo(_) => 0.0,
             SchedulerImpl::Drr(_) => 0.0,
         }
     }
 
-    /// Return the current credit for the given flow (DRR only).
-    /// For FIFO this always returns 0.
+    /// Return the current credit for the given flow.
     pub fn credit(&self, flow_id: &crate::flow::FlowId) -> i64 {
         match &self.inner {
-            SchedulerImpl::Fifo(_) => 0,
             SchedulerImpl::Drr(s) => s.credit(flow_id),
         }
     }
@@ -390,10 +372,8 @@ impl Scheduler {
     /// Report accounting for a completed or cancelled request.
     ///
     /// DRR adjusts per-flow credit based on actual delivered tokens.
-    /// FIFO is a no-op (it doesn't use per-request credit).
     pub fn report_accounting(&self, flow_id: &crate::flow::FlowId, report: AccountingReport) {
         match &self.inner {
-            SchedulerImpl::Fifo(_) => {}
             SchedulerImpl::Drr(s) => s.report_accounting(flow_id, report),
         }
     }

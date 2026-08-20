@@ -80,7 +80,7 @@ fn build_proxy_app(
     let m = metrics::create_metrics();
     let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
     let scheduler = Arc::new(Scheduler::new(
-        Algorithm::Fifo,
+        Algorithm::Drr,
         max_active_flows,
         m.clone(),
         flow_registry.clone(),

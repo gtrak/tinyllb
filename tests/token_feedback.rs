@@ -542,7 +542,7 @@ async fn test_predictive_admit_on_allows_pre_admit_when_near_done() {
         let m = metrics::create_metrics();
         let registry = Arc::new(FlowRegistry::new(1.0, 50));
         let scheduler = Arc::new(Scheduler::new(
-            Algorithm::Fifo,
+            Algorithm::Drr,
             4, // max_active_flows=4, but target=2
             m.clone(),
             registry.clone(),
@@ -618,7 +618,7 @@ async fn test_predictive_admit_on_defers_when_not_near_done() {
         let m = metrics::create_metrics();
         let registry = Arc::new(FlowRegistry::new(1.0, 50));
         let scheduler = Arc::new(Scheduler::new(
-            Algorithm::Fifo,
+            Algorithm::Drr,
             4,
             m.clone(),
             registry.clone(),

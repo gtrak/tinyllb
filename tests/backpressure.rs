@@ -18,7 +18,7 @@ use tinyllb::config::{Algorithm, Backpressure, BackpressureMode};
 use tinyllb::flow::FlowRegistry;
 use tinyllb::gateway;
 use tinyllb::metrics;
-use tinyllb::scheduler::{FifoScheduler, Scheduler};
+use tinyllb::scheduler::Scheduler;
 
 /// Build a proxy app with specific backpressure config for tests.
 fn build_proxy_app_with_backpressure(
@@ -29,7 +29,7 @@ fn build_proxy_app_with_backpressure(
     let metrics = metrics::create_metrics();
     let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
     let scheduler = Scheduler::new_with_defaults(
-        Algorithm::Fifo,
+        Algorithm::Drr,
         max_active_flows,
         metrics.clone(),
         flow_registry.clone(),
@@ -137,7 +137,8 @@ async fn test_fail_fast_reject_has_retry_after() {
     let m = metrics::create_metrics();
 
     // max_active_flows=1, max_queue_depth=0 (reject immediately when queue has any waiters).
-    let scheduler = Arc::new(FifoScheduler::new(
+    let scheduler = Arc::new(Scheduler::new_with_defaults(
+        Algorithm::Drr,
         1,
         m.clone(),
         Arc::new(FlowRegistry::new(1.0, 50)),
@@ -188,7 +189,8 @@ async fn test_hybrid_timeout_returns_429() {
     let m = metrics::create_metrics();
 
     // max_active_flows=0 means no slots available at all.
-    let scheduler = FifoScheduler::new(
+    let scheduler = Scheduler::new_with_defaults(
+        Algorithm::Drr,
         0,
         m.clone(),
         Arc::new(FlowRegistry::new(1.0, 50)),
@@ -223,7 +225,8 @@ async fn test_hybrid_admits_when_slot_frees_before_timeout() {
     let m = metrics::create_metrics();
 
     // max_active_flows=1, max_wait=2s.
-    let scheduler = FifoScheduler::new(
+    let scheduler = Scheduler::new_with_defaults(
+        Algorithm::Drr,
         1,
         m.clone(),
         Arc::new(FlowRegistry::new(1.0, 50)),
@@ -337,7 +340,8 @@ async fn test_hybrid_gateway_returns_429_with_retry_after() {
 async fn test_blocking_waits_until_slot_available() {
     let m = metrics::create_metrics();
 
-    let scheduler = FifoScheduler::new(
+    let scheduler = Scheduler::new_with_defaults(
+        Algorithm::Drr,
         1,
         m.clone(),
         Arc::new(FlowRegistry::new(1.0, 50)),
@@ -460,7 +464,7 @@ async fn test_backpressure_rejections_metric() {
 
     let m = metrics::create_metrics();
     let scheduler = Scheduler::new_with_defaults(
-        Algorithm::Fifo,
+        Algorithm::Drr,
         1,
         m.clone(),
         Arc::new(FlowRegistry::new(1.0, 50)),

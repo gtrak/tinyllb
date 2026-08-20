@@ -166,7 +166,7 @@ fn build_proxy_app(backend_url: &str) -> Router {
     let metrics = metrics::create_metrics();
     let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
     let scheduler = scheduler::Scheduler::new_with_defaults(
-        Algorithm::Fifo,
+        Algorithm::Drr,
         4,
         metrics.clone(),
         flow_registry.clone(),
@@ -596,7 +596,7 @@ fn build_proxy_app_with_max(
     let metrics = metrics::create_metrics();
     let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
     let scheduler = scheduler::Scheduler::new_with_defaults(
-        tinyllb::config::Algorithm::Fifo,
+        tinyllb::config::Algorithm::Drr,
         max_active_flows,
         metrics.clone(),
         flow_registry.clone(),
@@ -744,7 +744,7 @@ async fn test_client_disconnect_releases_permit() {
     let metrics_clone = metrics.clone();
     let flow_registry = Arc::new(tinyllb::flow::FlowRegistry::new(1.0, 50));
     let scheduler = scheduler::Scheduler::new_with_defaults(
-        tinyllb::config::Algorithm::Fifo,
+        tinyllb::config::Algorithm::Drr,
         4,
         metrics.clone(),
         flow_registry.clone(),

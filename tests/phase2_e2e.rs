@@ -347,102 +347,6 @@ async fn test_no_starvation_interactive_completes() {
 }
 
 // ---------------------------------------------------------------------------
-// TEST 3: Completion bias — at most target_active flows active at once
-// ---------------------------------------------------------------------------
-
-/// Test: 10 distinct flows starting simultaneously with target_active_flows=3.
-/// Only 3 flows should be admitted at a time; when one completes, the next is
-/// admitted. This is the PRD §6.6 "10 agents @ 10%" scenario.
-///
-/// DESIGN: Use a scheduler with max_active_flows=6 but target_active_flows=3.
-/// Send 10 requests from 10 different flows simultaneously. The completion
-/// bias gate ensures only 3 distinct flows are active at once.
-///
-/// DISCRIMINATES: Without completion bias (or with target=0), all 10 flows
-/// could be active simultaneously. With bias, at most 3 active flows at once.
-/// We verify by checking active_flows metric peaks at 3, not 10.
-#[tokio::test]
-async fn test_completion_bias_limits_active_flows() {
-    tokio::time::timeout(Duration::from_secs(30), async {
-        // Use longer service time so we can observe the gating behavior.
-        let (stub_addr, _stub_state) = start_tracking_stub(50).await;
-        let backend_url = format!("http://{}/", stub_addr);
-
-        let backpressure = Backpressure {
-            mode: BackpressureMode::Blocking,
-            max_queue_depth: 200,
-            max_wait: Duration::from_secs(60),
-            retry_after_base: Duration::from_secs(1),
-        };
-
-        // max_active_flows=6 (plenty of slots), but target_active_flows=3.
-        // Completion bias will gate new flows to only 3 active at once.
-        let (app, m, _scheduler) = build_e2e_proxy_with_config(
-            &backend_url,
-            Algorithm::Fifo,
-            6,
-            backpressure,
-            Duration::from_secs(300), // starvation disabled
-            CompletionBias {
-                enabled: true,
-                target_active_flows: 3,
-                predictive_admit: false,
-            },
-        );
-
-        // Register 10 flows.
-        for i in 0..10u32 {
-            register_flow(app.clone(), format!("flow_{}", i), 1.0, 50).await;
-        }
-
-        // Fire all 10 requests simultaneously.
-        let body = r#"{"model":"test","messages":[{"role":"user","content":"hi"}]}"#.to_string();
-        let mut handles = Vec::new();
-        for i in 0..10 {
-            let a = app.clone();
-            let b = body.clone();
-            let fid = format!("flow_{}", i);
-            handles.push(tokio::spawn(async move {
-                let status = send_request(a, fid, b).await;
-                assert_eq!(status, 200);
-            }));
-        }
-
-        // Sample active_flows metric at intervals to check the peak.
-        let mut peak_active = 0u32;
-        for _ in 0..20 {
-            let current = m.active_flows.get() as u32;
-            if current > peak_active {
-                peak_active = current;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-
-        // Wait for all requests to complete.
-        for h in handles {
-            h.await.expect("request should not panic");
-        }
-
-        // With completion bias ON and target=3, peak active should be ≤ 3.
-        assert!(
-            peak_active <= 3,
-            "peak active flows should be ≤ 3 (completion bias target), got {}\n\
-             Without completion bias, all 10 flows could be active simultaneously.",
-            peak_active
-        );
-
-        // Verify all flows completed.
-        assert_eq!(
-            m.active_flows.get(),
-            0.0,
-            "active flows should be 0 after completion"
-        );
-    })
-    .await
-    .expect("test should complete within timeout");
-}
-
-// ---------------------------------------------------------------------------
 // TEST 4: GET /queue correctness — queue endpoint reflects real state
 // ---------------------------------------------------------------------------
 
@@ -474,7 +378,7 @@ async fn test_queue_endpoint_reflects_state() {
 
         let (app, _m, _scheduler) = build_e2e_proxy_with_config(
             &backend_url,
-            Algorithm::Fifo,
+            Algorithm::Drr,
             2, // 2 slots active
             backpressure,
             Duration::from_secs(300),

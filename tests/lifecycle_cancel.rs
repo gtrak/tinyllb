@@ -219,52 +219,6 @@ async fn start_stub_backend_hang() -> SocketAddr {
 // Proxy builders
 // ---------------------------------------------------------------------------
 
-fn build_proxy_with_fifo(backend_url: &str) -> (Router, Arc<metrics::Metrics>) {
-    let m = metrics::create_metrics();
-    let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
-    let scheduler = Scheduler::new_with_defaults(
-        Algorithm::Fifo,
-        4,
-        m.clone(),
-        flow_registry.clone(),
-        BackpressureMode::Blocking,
-        100,
-        Duration::from_secs(10),
-        Duration::from_secs(1),
-    );
-    let state = gateway::AppState {
-        client: gateway::build_client(),
-        backend_url: Arc::new(url::Url::parse(backend_url).expect("valid backend URL")),
-        metrics: m.clone(),
-        scheduler: Arc::new(scheduler),
-        flow_registry,
-        backpressure: Backpressure::default(),
-        priorities: Priorities::default(),
-        request_timeout: None,
-        stall_rx: tinyllb::backend::BackendMonitor::empty().stall_receiver(),
-        retry_policy: tinyllb::config::RetryPolicy::default(),
-    };
-
-    let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
-    let gateway_router = gateway::create_router().with_state(state.clone());
-    let metrics_router = Router::new()
-        .route(
-            "/metrics",
-            get(tinyllb::metrics::endpoint::metrics_handler),
-        )
-        .with_state(state.clone());
-    let admin_router = tinyllb::api::create_router().with_state(state.clone());
-
-    let app = Router::new()
-        .merge(health_router)
-        .merge(metrics_router)
-        .merge(gateway_router)
-        .merge(admin_router)
-        .with_state(state);
-
-    (app, m)
-}
-
 fn build_proxy_with_drr(backend_url: &str) -> (Router, Arc<metrics::Metrics>, Arc<Scheduler>) {
     let m = metrics::create_metrics();
     let flow_registry = Arc::new(FlowRegistry::new(10.0, 50));
@@ -339,7 +293,7 @@ async fn collect_chunks(resp: Response<Body>) -> Vec<Bytes> {
 async fn test_normal_completion_emits_completed_event() {
     let addr = start_stub_backend_with_usage().await;
     let backend_url = format!("http://{}/", addr);
-    let (app, m) = build_proxy_with_fifo(&backend_url);
+    let (app, m, _scheduler) = build_proxy_with_drr(&backend_url);
 
     assert_eq!(m.active_flows.get(), 0.0);
 
@@ -390,7 +344,7 @@ async fn test_normal_completion_emits_completed_event() {
 async fn test_client_disconnect_releases_slot_and_emits_cancelled() {
     let addr = start_stub_backend_slow().await;
     let backend_url = format!("http://{}/", addr);
-    let (app, m) = build_proxy_with_fifo(&backend_url);
+    let (app, m, _scheduler) = build_proxy_with_drr(&backend_url);
 
     let initial_active = m.active_flows.get();
     let initial_requests = m.requests_active.get();
@@ -456,7 +410,7 @@ async fn test_client_disconnect_releases_slot_and_emits_cancelled() {
 async fn test_nonstreaming_completion_emits_completed_event() {
     let addr = start_stub_backend_with_usage().await;
     let backend_url = format!("http://{}/", addr);
-    let (app, m) = build_proxy_with_fifo(&backend_url);
+    let (app, m, _scheduler) = build_proxy_with_drr(&backend_url);
 
     // Send a non-streaming request.
     let body = r#"{"model":"test","messages":[{"role":"user","content":"hi"}]}"#;
@@ -503,7 +457,7 @@ async fn test_nonstreaming_completion_emits_completed_event() {
 async fn test_streaming_with_usage_tracks_tokens() {
     let addr = start_stub_backend_with_usage().await;
     let backend_url = format!("http://{}/", addr);
-    let (app, m) = build_proxy_with_fifo(&backend_url);
+    let (app, m, _scheduler) = build_proxy_with_drr(&backend_url);
 
     let body = r#"{"model":"test","messages":[{"role":"user","content":"hi"}],"stream":true}"#;
     let resp = app
@@ -513,7 +467,7 @@ async fn test_streaming_with_usage_tracks_tokens() {
                 .uri("/v1/chat/completions")
                 .header("content-type", "application/json")
                 .body(Body::from(body))
-                .unwrap(),
+                .unwrap()
         )
         .await
         .unwrap();
@@ -570,7 +524,7 @@ async fn test_request_timeout_config_exists() {
 async fn test_concurrent_requests_lifecycle_events() {
     let addr = start_stub_backend_with_usage().await;
     let backend_url = format!("http://{}/", addr);
-    let (app, m) = build_proxy_with_fifo(&backend_url);
+    let (app, m, _scheduler) = build_proxy_with_drr(&backend_url);
 
     let body = r#"{"model":"test","messages":[{"role":"user","content":"hi"}],"stream":true}"#;
 

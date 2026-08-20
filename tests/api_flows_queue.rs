@@ -86,7 +86,7 @@ fn build_admin_test_app(
     let metrics = metrics::create_metrics();
     let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
     let scheduler = Scheduler::new_with_defaults(
-        Algorithm::Fifo,
+        Algorithm::Drr,
         max_active_flows,
         metrics.clone(),
         flow_registry.clone(),
