@@ -1,7 +1,68 @@
 # 01 — Interactive sessions starve under KV pressure; non-inference requests queue
 
-Status: **Report (not yet implemented)** · Component: `tinyllb` (scheduler admission, gateway routing)
+Status: **RESOLVED & DEPLOYED (2026-08-20)** · Component: `tinyllb` (scheduler admission, gateway routing)
 Reported: 2026-08-20 · Severity: high (interactive UX broken under concurrent agent load)
+
+## Resolution Summary
+
+Both defects are fixed, reviewed, committed, and deployed to the live
+tinyllb service on 2026-08-20.
+
+### What changed
+
+**Change 1 — priority-100 flows bypass the KV gate.** `KvPolicy::check` now
+takes `is_interactive: bool` and, when `kv_policy.bypass_interactive` is enabled
+(default `true`), records a `bypass` decision and returns `Ok(())` immediately,
+skipping both the delay band and the reject threshold. `Scheduler` stores
+`interactive_priority` (= `priorities.interactive`) and threads `is_interactive`
+at the single `check` call site. Interactive sessions never see a KV-gate 429;
+the DRR scheduler + `max_active_flows` still bound concurrency and vLLM's
+preemption handles true KV exhaustion.
+
+**Change 2 — only inference requests queue.** `proxy_handler` now branches on
+`is_inference_request` (POST `/v1/chat/completions` or `/v1/completions` only).
+Non-inference requests (`GET /v1/models`, health probes, unknown routes) take a
+lean passthrough that shares only the 32 MiB body guard, header filtering, and
+backend URL building, then forwards the backend response verbatim with
+`X-Request-ID` echoed. They never touch the scheduler, lifecycle, ticket, retry,
+token accounting, or the flow/cadence registry, so metadata is never held behind
+inference backpressure or a KV-gate 429. Network error still maps to 502 (a dead
+backend yields 502, preserving `test_backend_unreachable_returns_502`). The
+inference path is byte-for-byte unchanged (pure-additive diff).
+
+### Config knob
+`kv_policy.bypass_interactive: true` (serde default; loader default). Documented
+in `lat.md/admission.md` (an Interactive Bypass invariant) and `config.example.yaml`.
+
+### Tests
+- `tests/kv_admission.rs`: +4 tests — interactive flows bypass delay (0.85) and
+  reject (0.96) with `bypass` metric == 1; background flows pinned via
+  `apply_priority_override` still delay (`delay`==1) and reject (`reject`==1)
+  with `bypass`==0. Existing tests pinned to `bypass_interactive: false` so they
+  exercise the gate unchanged. 13/13 green.
+- `tests/gateway.rs`: +1 test `test_models_passthrough_under_kv_pressure` — under
+  KV 0.96 a background inference POST is 429'd while `GET /v1/models` returns 200
+  byte-identical. Extracted `build_app_from_state` (consolidates router wiring).
+  11/11 green.
+
+### Commits
+- `c4e6ffa` feat(scheduler): bypass KV admission gate for interactive flows
+- `dbaa141` feat(gateway): bypass admission gate for non-inference requests
+- `8415f6c` test: cover KV interactive bypass and metadata scheduler bypass
+- `9875873` docs: document kv_policy.bypass_interactive invariant and knob
+
+### Deployment (2026-08-20)
+`cargo build --release` → `~/.local/bin/tinyllb`; added `bypass_interactive: true`
+to the live `~/.config/tinyllb/config.yaml`; `systemctl --user restart tinyllb`.
+Verified: config loaded with `bypass_interactive: true`; the `bypass` metric
+counted up (`llm_kv_admission_decisions_total{decision="bypass"}` > 0) under
+priority-100 traffic; `GET /v1/models` → 200.
+
+---
+
+*Original report below.*
+
+
 
 ## Summary
 

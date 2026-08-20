@@ -1,7 +1,92 @@
 # 02 — KV gate instant-rejects in blocking mode; reject path duplicated across 3 sites; config splits one subsystem into two keys
 
-Status: **Report (not yet implemented)** · Component: `tinyllb` (scheduler admission, config)
+Status: **RESOLVED & DEPLOYED (2026-08-20)** · Component: `tinyllb` (scheduler admission, config)
 Reported: 2026-08-20 · Severity: high (worker threads die under transient KV pressure)
+
+## Resolution Summary
+
+The worker-death bug and its structural root cause are fixed, reviewed,
+committed, and deployed to the live tinyllb service on 2026-08-20.
+
+### What changed
+
+**Change 1 — KV reject band is now mode-aware (the worker-death fix).**
+`KvPolicy::check` now absorbs `Reject` into `Delay` for `BackpressureMode::Blocking`,
+so `kv_usage > reject_threshold` HOLDS (unbounded, matching the DRR blocking
+contract and the delay band) instead of instant-429ing. A transient >0.95 spike
+is ridden out rather than killing the thread. Hybrid/FailFast keep the instant
+429, now computed via `fail_fast_retry_after` (the same formula the DRR scheduler
+and the delay-timeout path use). `KVMDecision::Reject(Duration)` was reduced to a
+bare `Reject` variant, DELETING the ad-hoc `5.0 + excess * 10.0` retry_after
+formula that lived in `decide()`. The stall gate is unchanged (instant 429 in all
+modes for an unrecoverable wedge — correct).
+
+**Change 3 — `kv_policy` nested under `backpressure` (structural root-cause fix).**
+The config split one admission subsystem into two sibling keys (`backpressure:`
+and `kv_policy:`), which is why the KV reject band was implemented without a mode.
+`KvPolicyConfig` is now a nested field on `Backpressure`, so the gate inherits the
+hold-vs-reject contract from `backpressure.mode` by construction. A deprecated
+`Option<KvPolicyConfig>` migration sentinel on `Config` makes a stale top-level
+`kv_policy:` key fail loudly (with a message naming `backpressure` + `kv_policy`)
+instead of being silently ignored. `KvPolicy::new` / `Scheduler::new` signatures are
+unchanged (the fix is at the config level only).
+
+### Change 2 — reject-path unification: folded into Change 1
+The issue proposed a `reject_for(mode, reason)` helper routing all reject sites.
+The substantive unification (KV hybrid/failfast retry_after now uses the shared
+`fail_fast_retry_after`, deleting the ad-hoc formula) is achieved by Change 1.
+The explicit `reject_for` enum/helper was NOT added as a separate abstraction:
+the remaining reject sites the issue lists are intentional edges — the stall gate
+(fixed 5s, all modes, unrecoverable) and the DRR oneshot-drop (fixed 1s, can fire
+in blocking mode when a sender is dropped — a catastrophic edge, not transient
+pressure, so a mode-aware helper with a `mode != Blocking` assertion would panic
+there). Routing those through a mode-aware helper would add risk to working code
+for no behavioral gain. The formula unification + config nesting address the root
+cause with less risk. Flagged as a deliberate deviation from the issue's Option A.
+
+### Deviation from the issue's safety analysis
+The issue claimed that in blocking mode a wedged KV would be caught by
+`request_timeout` (300s) yielding a 408. That is **inaccurate**: `request_timeout`
+wraps `builder.send()` (the backend forward), not `admit_with_turn_boundary` (the KV
+gate hold). So the blocking KV hold is unbounded until KV drops or the client
+disconnects; a genuinely wedged engine is caught first by the stall gate (instant
+429). The `lat.md/admission.md` invariant was written to reflect actual behavior,
+not the 408 claim.
+
+### Tests
+- `tests/kv_admission.rs`: +1 test `kv_admission_blocking_holds_reject_band`
+  (blocking holds at 0.96, admits when KV drops — the exact worker-death scenario);
+  3 existing reject-band tests switched to Hybrid (where instant-429 still holds);
+  reject-test retry_after assertion relaxed to non-zero. 14/14 green.
+- `tests/gateway.rs`: the issue-01 pressure test switched Blocking→Hybrid (it
+  encoded the pre-fix blocking+0.96→429 behavior that now holds). 11/11 green.
+- `tests/config.rs`: +1 test `top_level_kv_policy_errors_with_migration_message`.
+- 18 `Backpressure` struct literals across phase1/phase2/phase3/backpressure tests
+  gained `kv_policy: Default::default()`.
+- `cargo test --all` green (0 failures).
+
+### Docs
+`lat.md/admission.md` (mode-aware reject invariant + Reject variant),
+`lat.md/scheduler.md` (blocking contract applies to all admission gates, stall
+gate excepted), `lat.md/config.md` (nesting + migration), `config.example.yaml`.
+
+### Commits
+- `8f5f4aa` fix(scheduler): KV gate holds (not 429) in blocking mode at reject band
+- `550aef7` refactor(config): nest kv_policy under backpressure
+
+### Deployment (2026-08-20)
+`cargo build --release` → `~/.local/bin/tinyllb`; moved the `kv_policy:` block under
+`backpressure:` in the live `~/.config/tinyllb/config.yaml` (removed the top-level
+key); `systemctl --user restart tinyllb`. Verified: config loaded with
+`backpressure.kv_policy { enabled: true, reject_threshold: 0.95, delay_threshold:
+0.8, bypass_interactive: true }` and the migration sentinel `kv_policy: None` (no
+top-level key → no migration error); service active; `GET /v1/models` → 200.
+
+---
+
+*Original report below.*
+
+
 
 ## Summary
 
