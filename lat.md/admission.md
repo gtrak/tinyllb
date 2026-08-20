@@ -147,6 +147,8 @@ These statements hold regardless of implementation details and survive a complet
 
 **Metrics Completeness.** When the policy is enabled, every admission decision produces exactly one metrics record with a label identifying the outcome. The disabled path bypasses all metrics recording. The metrics label corresponds to the initial decision, not to the final disposition of a delayed request that later times out.
 
+**Interactive Bypass.** When `bypass_interactive` is enabled and the caller marks the request as interactive (flow priority equals `priorities.interactive`), the gate returns `Ok(())` immediately without consulting KV pressure, skipping both the delay and reject thresholds. The DRR scheduler and `max_active_flows` still bound concurrency, and an interactive session never sees a KV-gate 429. The decision is recorded with the `bypass` label, so the metrics-completeness guarantee still holds.
+
 ## Constraints
 
 Operational and configurational boundaries that shape the design space.

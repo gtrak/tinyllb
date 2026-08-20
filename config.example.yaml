@@ -49,6 +49,7 @@ kv_policy:
   enabled: false              # KV-cache-aware admission (delay/reject near capacity)
   reject_threshold: 0.95      # reject when KV utilization > this
   delay_threshold: 0.80       # delay admission when KV utilization > this
+  bypass_interactive: true     # interactive (priority-100) flows skip delay/reject (never 429)
 
 priority_policy:
   enabled: true               # turn-boundary priority reclassification
