@@ -47,6 +47,9 @@ pub struct Scheduler {
     cadence: Arc<CadenceRegistry>,
     /// Metrics collector for priority heuristic observability.
     metrics: Arc<Metrics>,
+    /// Stall signal from the backend monitor (`true` = engine stalled).
+    /// While set, new admissions are rejected with 429 + Retry-After.
+    stall_rx: tokio::sync::watch::Receiver<bool>,
 }
 
 impl Scheduler {
@@ -73,6 +76,7 @@ impl Scheduler {
         kv_bias: KvBias,
     ) -> Self {
         let notify = Arc::new(tokio::sync::Notify::new());
+        let stall_rx = monitor.stall_receiver();
         let flow_progress = Arc::new(flow_progress::FlowProgressTracker::new());
         let gate = Arc::new(completion_bias::CompletionBiasGate::new(
             completion_bias.enabled,
@@ -126,6 +130,7 @@ impl Scheduler {
             registry,
             cadence,
             metrics,
+            stall_rx,
         }
     }
 
@@ -233,6 +238,18 @@ impl Scheduler {
 
         // KV policy gate runs FIRST before any flow scheduling.
         self.kv_policy.check().await?;
+
+        // Stall gate: reject new admissions while the backend is stalled.
+        // The client gets an immediate 429 + Retry-After and backs off,
+        // rather than being admitted, waiting ~30s for the stall watchdog
+        // to abort the stream, and getting an Err then.
+        if *self.stall_rx.borrow() {
+            tracing::info!("admit rejected: backend stalled");
+            return Err(BackpressureRejected {
+                retry_after: Duration::from_secs(5),
+            });
+        }
+
         let result = self.inner.admit(flow_id, work_unit).await;
 
         let wait_secs = enter.elapsed().as_secs_f64();

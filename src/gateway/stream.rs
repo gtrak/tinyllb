@@ -337,7 +337,7 @@ pub fn spawn_retry_stream(
     let policy = state.retry_policy.clone();
     let client = state.client.clone();
     let request_timeout = state.request_timeout;
-    let mut stall_rx = state.stall_rx.clone();
+    let stall_rx = state.stall_rx.clone();
     // Pre-parse forwarded body once.  If it fails to parse as JSON, we cannot
     // bump temperature — fall back to raw passthrough of the first stream
     // (no retry) and mark_completed on end.
@@ -354,15 +354,6 @@ pub fn spawn_retry_stream(
         let mut attempt: u32 = 0;
         let can_retry = forwarded_value.is_some() && policy.enabled && policy.max_retries > 0;
         let fwd_value = forwarded_value;
-
-        // Transport retries (stream EOF / stall abort without a terminal
-        // frame) retry the ORIGINAL request: they are connection-layer
-        // failures, not sampling failures, so they get a separate, more
-        // generous budget with exponential backoff and never bump the
-        // temperature. The request_timeout deadline is per-attempt so a
-        // legitimate long thinking turn is not killed mid-flight.
-        const MAX_TRANSPORT_RETRIES: u32 = 8;
-        let mut transport_retries: u32 = 0;
 
         // Whether the stream completed normally (terminal frame accepted and
         // forwarded). When false at loop exit, the body is terminated with an
@@ -386,30 +377,20 @@ pub fn spawn_retry_stream(
             enum Outcome {
                 Eof,
                 Deadline,
+                Stall,
             }
             let outcome = loop {
                 // Inference-watchdog: if the monitor declares the engine
-                // deadlocked, abort this stream (dropping `inner` on the
-                // next assignment closes the backend connection) and retry.
+                // deadlocked, abort this stream (dropping `inner` on task
+                // exit closes the backend connection). The client retries.
                 if *stall_rx.borrow() {
-                    tracing::warn!(
-                        transport_retries = transport_retries,
-                        "backend stall watchdog fired — aborting stream to retry"
-                    );
-                    break Outcome::Eof;
+                    tracing::warn!("backend stall detected — aborting stream");
+                    break Outcome::Stall;
                 }
 
-                let chunk = tokio::select! {
-                    changed = stall_rx.changed() => {
-                        if changed.is_err() {
-                            // Monitor dropped — ignore and keep streaming.
-                        }
-                        continue;
-                    }
-                    c = StreamExt::next(&mut inner) => match c {
-                        Some(Ok(c)) => c,
-                        Some(Err(_)) | None => break Outcome::Eof,
-                    },
+                let chunk = match StreamExt::next(&mut inner).await {
+                    Some(Ok(c)) => c,
+                    Some(Err(_)) | None => break Outcome::Eof,
                 };
 
                 // Deadline check.
@@ -563,78 +544,40 @@ pub fn spawn_retry_stream(
                 break 'retry;
             }
 
-            if matches!(outcome, Outcome::Deadline) {
-                // Attempt exceeded the per-attempt request timeout. Nothing
-                // salvageable — abort the body (client retry is the remedy).
-                tracing::warn!(
-                    timeout_secs = request_timeout.map(|t| t.as_secs()),
-                    "stream attempt exceeded request timeout without a terminal frame"
-                );
-                break 'retry;
-            }
-
-            // Outcome::Eof — stream ended (or was aborted by the stall
-            // watchdog) without a terminal frame. Only retry when nothing
-            // substantive was delivered (content/tool_calls would be
-            // duplicated on the client; reasoning-only is tolerated).
-            if saw_content || saw_tool_calls {
-                tracing::warn!(
-                    "stream ended without terminal frame after partial content/tool_calls — aborting body to avoid duplication"
-                );
-                break 'retry;
-            }
-
-            // Transport retry: same request, backoff, generous budget.
-            while transport_retries < MAX_TRANSPORT_RETRIES {
-                transport_retries += 1;
-                metrics.stream_eof_retries_total.inc();
-                let backoff = std::time::Duration::from_millis(
-                    (250u64 << (transport_retries - 1).min(4)).min(4000),
-                );
-                tracing::warn!(
-                    transport_retry = transport_retries,
-                    backoff_ms = backoff.as_millis() as u64,
-                    "stream retry (eof/stall): stream ended without terminal frame, re-sending original request"
-                );
-                let notice = format!(
-                    ": tinyllb: stream retry {} (backend stream ended early) — re-sending request\n\n",
-                    transport_retries
-                );
-                if tx.send(Ok(bytes::Bytes::from(notice))).await.is_err() {
-                    return; // client disconnected
+            match outcome {
+                Outcome::Deadline => {
+                    // Attempt exceeded the per-attempt request timeout.
+                    // Nothing salvageable — abort the body (client retry is
+                    // the remedy).
+                    tracing::warn!(
+                        timeout_secs = request_timeout.map(|t| t.as_secs()),
+                        "stream attempt exceeded request timeout without a terminal frame"
+                    );
                 }
-                tokio::time::sleep(backoff).await;
-
-                let send = send_retry_request(
-                    &client,
-                    &method,
-                    &backend_url,
-                    &headers,
-                    forwarded_body.clone(),
-                    request_timeout,
-                )
-                .await;
-
-                match send {
-                    Ok(r) if r.status().is_success() => {
-                        inner = r.bytes_stream();
-                        continue 'retry;
-                    }
-                    _ => {
-                        // Send failed — loop retries with further backoff.
-                        continue;
+                Outcome::Stall => {
+                    // Watchdog declared the backend deadlocked. Abort the
+                    // body; the scheduler's stall gate rejects new
+                    // admissions with 429 until the stall clears and the
+                    // client's exponential retry backoff keeps the queue
+                    // honest.
+                    tracing::warn!("backend stall — aborting body, client will retry");
+                }
+                Outcome::Eof => {
+                    if saw_content || saw_tool_calls {
+                        tracing::warn!(
+                            "stream ended without terminal frame after partial content/tool_calls — aborting body to avoid duplication"
+                        );
+                    } else {
+                        // Nothing substantive was delivered. No in-proxy
+                        // transport retry — an abrupt termination is a
+                        // transport failure the client retries with
+                        // exponential backoff.
+                        tracing::warn!(
+                            "stream ended without terminal frame — aborting body, client will retry"
+                        );
                     }
                 }
             }
-
-            // Transport retries exhausted: give up. Do NOT fabricate a
-            // terminal frame and do NOT close the body cleanly — an abrupt
-            // termination is a transport error the client can retry.
-            metrics.premature_stop_exhausted_total.inc();
-            tracing::warn!(
-                transport_retries = transport_retries,
-                "stream retries exhausted — aborting body"
-            );
             break 'retry;
         }
 

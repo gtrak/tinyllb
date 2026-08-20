@@ -58,8 +58,6 @@ pub struct Metrics {
     pub llm_backend_stalled: prometheus::Gauge,
     /// Backend inference stalls detected by the watchdog.
     pub backend_stall_events_total: prometheus::Counter,
-    /// Stream retries issued after backend stream EOF/abort without a terminal frame.
-    pub stream_eof_retries_total: prometheus::Counter,
     /// KV admission decisions: accept, delay, reject.
     pub kv_admission_decisions_total: CounterVec,
 
@@ -202,12 +200,6 @@ impl Metrics {
         )
         .expect("backend_stall_events_total should be creatable");
 
-        let stream_eof_retries_total = prometheus::Counter::new(
-            "tinyllb_stream_eof_retries_total",
-            "Stream retries issued after backend stream EOF/abort without a terminal frame",
-        )
-        .expect("stream_eof_retries_total should be creatable");
-
         let kv_admission_decisions_total = CounterVec::new(
             Opts::new(
                 "llm_kv_admission_decisions_total",
@@ -323,9 +315,6 @@ impl Metrics {
             .register(Box::new(backend_stall_events_total.clone()))
             .expect("backend_stall_events_total registration should succeed");
         registry
-            .register(Box::new(stream_eof_retries_total.clone()))
-            .expect("stream_eof_retries_total registration should succeed");
-        registry
             .register(Box::new(kv_admission_decisions_total.clone()))
             .expect("llm_kv_admission_decisions_total registration should succeed");
 
@@ -372,7 +361,6 @@ impl Metrics {
             vllm_kv_cache_free,
             llm_backend_stalled,
             backend_stall_events_total,
-            stream_eof_retries_total,
             kv_admission_decisions_total,
             flow_priority_class,
             flow_priority_source_total,
