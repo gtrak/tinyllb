@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::flow::identify;
 use crate::gateway::error::ProxyError;
-use crate::gateway::stream::{MetricStream, RequestActiveGuard};
+use crate::gateway::stream::{MetricStream, RequestActiveGuard, send_retry_request};
 use crate::scheduler::lifecycle::LifecycleGuard;
 use crate::scheduler::mode_label;
 
@@ -601,29 +601,20 @@ pub async fn proxy_handler(
                             Ok(b) => b,
                             Err(_) => break, // fail-open
                         };
-                        // Build retry request directly to the backend (bypass scheduler).
-                        // Strip Content-Length so hyper recomputes from the new body
-                        // (bump_temperature changes body length; stale header truncates).
-                        let mut retry_headers = headers.clone();
-                        retry_headers.remove(axum::http::header::CONTENT_LENGTH);
-                        let mut retry_builder = state
-                            .client
-                            .request(method.clone(), backend_url.clone());
-                        // Re-apply the filtered headers (without stale Content-Length).
-                        for (name, value) in retry_headers.iter() {
-                            retry_builder = retry_builder.header(name, value);
-                        }
-                        retry_builder = retry_builder.body(retry_bytes);
-                        // Send with optional timeout (mirror the first send).
-                        let send_result = if let Some(timeout) = state.request_timeout {
-                            match tokio::time::timeout(timeout, retry_builder.send()).await {
-                                Ok(Ok(resp)) => Ok(resp),
-                                Ok(Err(_)) => Err(()),
-                                Err(_) => Err(()), // timeout
-                            }
-                        } else {
-                            retry_builder.send().await.map_err(|_| ())
-                        };
+                        // Build and send the retry request directly to the
+                        // backend (bypass scheduler). send_retry_request strips
+                        // Content-Length so hyper recomputes from the new body
+                        // (bump_temperature changes body length; stale header
+                        // truncates) and applies the optional per-attempt timeout.
+                        let send_result = send_retry_request(
+                            &state.client,
+                            &method,
+                            &backend_url,
+                            &headers,
+                            Bytes::from(retry_bytes),
+                            state.request_timeout,
+                        )
+                        .await;
                         match send_result {
                             Ok(resp) if resp.status().is_success() => {
                                 match resp.bytes().await {

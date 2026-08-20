@@ -262,6 +262,55 @@ fn is_ascii_ws(b: u8) -> bool {
     matches!(b, b' ' | b'\t' | b'\r')
 }
 
+/// Clone headers, strip content-length, build and send a retry request
+/// with optional per-attempt timeout. Returns the reqwest response on
+/// success, or `Err(())` on send failure or timeout. The caller decides
+/// what to do with the response status.
+pub(crate) async fn send_retry_request(
+    client: &reqwest::Client,
+    method: &axum::http::Method,
+    backend_url: &url::Url,
+    headers: &axum::http::HeaderMap,
+    body: bytes::Bytes,
+    request_timeout: Option<std::time::Duration>,
+) -> Result<reqwest::Response, ()> {
+    let mut rh = headers.clone();
+    rh.remove(axum::http::header::CONTENT_LENGTH);
+    let mut rb = client
+        .request(method.clone(), backend_url.clone())
+        .body(body);
+    for (n, v) in rh.iter() {
+        rb = rb.header(n, v);
+    }
+    match request_timeout {
+        Some(t) => match tokio::time::timeout(t, rb.send()).await {
+            Ok(x) => x.map_err(|_| ()),
+            Err(_) => Err(()),
+        },
+        None => rb.send().await.map_err(|_| ()),
+    }
+}
+
+/// Count usage tokens (if present) and forward a frame to the client.
+/// Returns false if the client disconnected (caller should return).
+async fn count_and_forward_frame(
+    frame: Vec<u8>,
+    has_usage: bool,
+    metrics: &crate::metrics::Metrics,
+    lifecycle_guard: &mut LifecycleGuard,
+    tx: &mpsc::Sender<Result<Bytes, std::io::Error>>,
+) -> bool {
+    if has_usage {
+        let t = completion_tokens_from_frame(&frame);
+        if t > 0 {
+            metrics.tokens_generated_total.inc_by(t as f64);
+            lifecycle_guard.add_delivered_tokens(t);
+            lifecycle_guard.record_token();
+        }
+    }
+    tx.send(Ok(Bytes::from(frame))).await.is_ok()
+}
+
 /// Spawn a retry-capable streaming task and return the client-facing body.
 ///
 /// The spawned task owns the `QueueTicket`, `LifecycleGuard`, and
@@ -297,7 +346,7 @@ pub fn spawn_retry_stream(
     tokio::spawn(async move {
         let _active_guard = RequestActiveGuard::new(metrics.clone());
         let _queue_ticket = queue_ticket;
-        let lifecycle_guard = lifecycle_guard;
+        let mut lifecycle_guard = lifecycle_guard;
         let mut inner = response.bytes_stream();
 
         // Premature-stop retries (degenerate model output) have their own
@@ -417,21 +466,15 @@ pub fn spawn_retry_stream(
                                     }
                                 };
 
-                                let mut rh = headers.clone();
-                                rh.remove(axum::http::header::CONTENT_LENGTH);
-                                let mut rb = client.request(method.clone(), backend_url.clone()).body(retry_bytes);
-                                for (n, v) in rh.iter() {
-                                    rb = rb.header(n, v);
-                                }
-
-                                let send = if let Some(t) = request_timeout {
-                                    match tokio::time::timeout(t, rb.send()).await {
-                                        Ok(x) => x.map_err(|_| ()),
-                                        Err(_) => Err(()),
-                                    }
-                                } else {
-                                    rb.send().await.map_err(|_| ())
-                                };
+                                let send = send_retry_request(
+                                    &client,
+                                    &method,
+                                    &backend_url,
+                                    &headers,
+                                    Bytes::from(retry_bytes),
+                                    request_timeout,
+                                )
+                                .await;
 
                                 match send {
                                     Ok(r) if r.status().is_success() => {
@@ -452,15 +495,15 @@ pub fn spawn_retry_stream(
                                 if (fr == "stop" || fr == "length") && !saw_content && !saw_tool_calls && attempt >= policy.max_retries {
                                     metrics.premature_stop_exhausted_total.inc();
                                 }
-                                if cls.has_usage {
-                                    let t = completion_tokens_from_frame(&frame);
-                                    if t > 0 {
-                                        metrics.tokens_generated_total.inc_by(t as f64);
-                                        lifecycle_guard.add_delivered_tokens(t);
-                                        lifecycle_guard.record_token();
-                                    }
-                                }
-                                if tx.send(Ok(Bytes::from(frame))).await.is_err() {
+                                if !count_and_forward_frame(
+                                    frame,
+                                    cls.has_usage,
+                                    &metrics,
+                                    &mut lifecycle_guard,
+                                    &tx,
+                                )
+                                .await
+                                {
                                     return;
                                 }
                             }
@@ -471,16 +514,17 @@ pub fn spawn_retry_stream(
                             }
                         } else if cls.has_usage {
                             // Usage frame before terminal: forward if accepted.
-                            if accepted {
-                                let t = completion_tokens_from_frame(&frame);
-                                if t > 0 {
-                                    metrics.tokens_generated_total.inc_by(t as f64);
-                                    lifecycle_guard.add_delivered_tokens(t);
-                                    lifecycle_guard.record_token();
-                                }
-                                if tx.send(Ok(Bytes::from(frame))).await.is_err() {
-                                    return;
-                                }
+                            if accepted
+                                && !count_and_forward_frame(
+                                    frame,
+                                    cls.has_usage,
+                                    &metrics,
+                                    &mut lifecycle_guard,
+                                    &tx,
+                                )
+                                .await
+                            {
+                                return;
                             }
                         } else {
                             // Non-terminal reasoning/content delta: forward live.
@@ -490,15 +534,15 @@ pub fn spawn_retry_stream(
                         }
                     } else {
                         // Accepted: forward everything; count usage tokens.
-                        if cls.has_usage {
-                            let t = completion_tokens_from_frame(&frame);
-                            if t > 0 {
-                                metrics.tokens_generated_total.inc_by(t as f64);
-                                lifecycle_guard.add_delivered_tokens(t);
-                                lifecycle_guard.record_token();
-                            }
-                        }
-                        if tx.send(Ok(Bytes::from(frame))).await.is_err() {
+                        if !count_and_forward_frame(
+                            frame,
+                            cls.has_usage,
+                            &metrics,
+                            &mut lifecycle_guard,
+                            &tx,
+                        )
+                        .await
+                        {
                             return;
                         }
                     }
@@ -561,23 +605,15 @@ pub fn spawn_retry_stream(
                 }
                 tokio::time::sleep(backoff).await;
 
-                let mut rh = headers.clone();
-                rh.remove(axum::http::header::CONTENT_LENGTH);
-                let mut rb = client
-                    .request(method.clone(), backend_url.clone())
-                    .body(forwarded_body.clone());
-                for (n, v) in rh.iter() {
-                    rb = rb.header(n, v);
-                }
-
-                let send = if let Some(t) = request_timeout {
-                    match tokio::time::timeout(t, rb.send()).await {
-                        Ok(x) => x.map_err(|_| ()),
-                        Err(_) => Err(()),
-                    }
-                } else {
-                    rb.send().await.map_err(|_| ())
-                };
+                let send = send_retry_request(
+                    &client,
+                    &method,
+                    &backend_url,
+                    &headers,
+                    forwarded_body.clone(),
+                    request_timeout,
+                )
+                .await;
 
                 match send {
                     Ok(r) if r.status().is_success() => {
