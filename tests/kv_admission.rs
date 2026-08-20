@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use tinyllb::backend::{BackendMonitor, BackendSnapshot};
 use tinyllb::config::{BackpressureMode, KvPolicyConfig, Priorities, PriorityPolicy};
-use tinyllb::flow::{FlowId, FlowRegistry};
+use tinyllb::flow::{FlowId, FlowRegistry, PriorityClass};
 use tinyllb::metrics;
 use tinyllb::scheduler::Scheduler;
 
@@ -52,6 +52,15 @@ fn enabled_kv_policy() -> KvPolicyConfig {
         reject_threshold: 0.95,
         delay_threshold: 0.80,
         bypass_interactive: false,
+    }
+}
+
+fn bypass_enabled_kv_policy() -> KvPolicyConfig {
+    KvPolicyConfig {
+        enabled: true,
+        bypass_interactive: true,
+        reject_threshold: 0.95,
+        delay_threshold: 0.80,
     }
 }
 
@@ -504,4 +513,244 @@ async fn kv_admission_delayed_visible_in_queue_depth() {
     let _ = tokio::time::timeout(Duration::from_secs(5), admit_task)
         .await
         .expect("delayed request should proceed after usage drops");
+}
+
+// ---------------------------------------------------------------------------
+// Bypass-interactive tests
+// ---------------------------------------------------------------------------
+
+/// Interactive (priority-100) flows bypass the delay band when
+/// bypass_interactive is enabled. A fresh flow is Cold=priority100.
+#[tokio::test]
+async fn kv_admission_interactive_bypasses_delay() {
+    let (tx, rx) = tokio::sync::watch::channel(BackendSnapshot {
+        kv_usage: 0.85,
+        kv_free: 0.15,
+        preemptions: 0,
+        ..Default::default()
+    });
+    let monitor = Arc::new(BackendMonitor::from_receiver(rx));
+    let _tx = tx;
+
+    let m = metrics::create_metrics();
+    let registry = Arc::new(FlowRegistry::new(1.0, 50));
+    let scheduler = Arc::new(Scheduler::new(
+        4,
+        m.clone(),
+        registry,
+        BackpressureMode::Blocking,
+        100,
+        Duration::from_secs(10),
+        Duration::from_secs(1),
+        Duration::from_secs(300),
+        Default::default(),
+        bypass_enabled_kv_policy(),
+        monitor,
+        PriorityPolicy::default(),
+        Priorities::default(),
+        tinyllb::config::KvBias::default(),
+    ));
+
+    let start = std::time::Instant::now();
+    let ticket = tokio::time::timeout(
+        Duration::from_secs(2),
+        scheduler.admit(FlowId::new("interactive"), 1024.0),
+    )
+    .await
+    .expect("interactive bypass must not hang in the delay band")
+    .expect("interactive bypass should admit");
+    let elapsed = start.elapsed();
+    drop(ticket);
+    assert!(
+        elapsed < Duration::from_millis(150),
+        "bypass should be near-instant, took {:?}",
+        elapsed
+    );
+
+    let bypass_count = m
+        .kv_admission_decisions_total
+        .with_label_values(&["bypass"])
+        .get();
+    assert_eq!(bypass_count, 1.0, "should record exactly 1 bypass decision");
+}
+
+/// Interactive flows bypass the reject threshold (no 429) when
+/// bypass_interactive is enabled.
+#[tokio::test]
+async fn kv_admission_interactive_bypasses_reject() {
+    let (tx, rx) = tokio::sync::watch::channel(BackendSnapshot {
+        kv_usage: 0.96,
+        kv_free: 0.04,
+        preemptions: 5,
+        ..Default::default()
+    });
+    let monitor = Arc::new(BackendMonitor::from_receiver(rx));
+    let _tx = tx;
+
+    let m = metrics::create_metrics();
+    let registry = Arc::new(FlowRegistry::new(1.0, 50));
+    let scheduler = Arc::new(Scheduler::new(
+        4,
+        m.clone(),
+        registry,
+        BackpressureMode::Blocking,
+        100,
+        Duration::from_secs(10),
+        Duration::from_secs(1),
+        Duration::from_secs(300),
+        Default::default(),
+        bypass_enabled_kv_policy(),
+        monitor,
+        PriorityPolicy::default(),
+        Priorities::default(),
+        tinyllb::config::KvBias::default(),
+    ));
+
+    let ticket = scheduler
+        .admit(FlowId::new("interactive"), 1024.0)
+        .await
+        .expect("interactive bypass should admit at 0.96 KV usage");
+    drop(ticket);
+
+    let bypass_count = m
+        .kv_admission_decisions_total
+        .with_label_values(&["bypass"])
+        .get();
+    assert_eq!(bypass_count, 1.0, "should record exactly 1 bypass decision");
+}
+
+/// Background (priority-10) flows do NOT bypass: they still hit the
+/// delay band. Pinned via apply_priority_override (priority_source=1
+/// -> cadence state machine skips it).
+#[tokio::test]
+async fn kv_admission_background_still_delays() {
+    let (tx, rx) = tokio::sync::watch::channel(BackendSnapshot {
+        kv_usage: 0.85,
+        kv_free: 0.15,
+        preemptions: 0,
+        ..Default::default()
+    });
+    let monitor = Arc::new(BackendMonitor::from_receiver(rx));
+    let _tx = tx;
+
+    let m = metrics::create_metrics();
+    let registry = Arc::new(FlowRegistry::new(1.0, 50));
+    let priorities = Priorities::default();
+    let scheduler = Arc::new(Scheduler::new(
+        4,
+        m.clone(),
+        registry.clone(),
+        BackpressureMode::Hybrid,
+        100,
+        Duration::from_millis(200),
+        Duration::from_secs(1),
+        Duration::from_secs(300),
+        Default::default(),
+        bypass_enabled_kv_policy(),
+        monitor,
+        PriorityPolicy::default(),
+        priorities.clone(),
+        tinyllb::config::KvBias::default(),
+    ));
+
+    // Pin the flow to background (priority 10, source=1).
+    let flow_id = FlowId::new("bg");
+    registry.apply_priority_override(
+        &flow_id,
+        Some(PriorityClass::Background),
+        false,
+        &priorities,
+    );
+
+    // Background flow in the delay band should delay, then time out -> 429.
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        scheduler.admit(flow_id, 1024.0),
+    )
+    .await
+    .expect("should not exceed outer timeout");
+    assert!(
+        result.is_err(),
+        "background flow must not bypass the delay band"
+    );
+
+    let delay_count = m
+        .kv_admission_decisions_total
+        .with_label_values(&["delay"])
+        .get();
+    assert_eq!(
+        delay_count, 1.0,
+        "background flow should hit the delay path"
+    );
+    let bypass_count = m
+        .kv_admission_decisions_total
+        .with_label_values(&["bypass"])
+        .get();
+    assert_eq!(bypass_count, 0.0, "background flow must not bypass");
+}
+
+/// Background flows do NOT bypass the reject threshold: they get 429.
+#[tokio::test]
+async fn kv_admission_background_still_rejects() {
+    let (tx, rx) = tokio::sync::watch::channel(BackendSnapshot {
+        kv_usage: 0.96,
+        kv_free: 0.04,
+        preemptions: 5,
+        ..Default::default()
+    });
+    let monitor = Arc::new(BackendMonitor::from_receiver(rx));
+    let _tx = tx;
+
+    let m = metrics::create_metrics();
+    let registry = Arc::new(FlowRegistry::new(1.0, 50));
+    let priorities = Priorities::default();
+    let scheduler = Arc::new(Scheduler::new(
+        4,
+        m.clone(),
+        registry.clone(),
+        BackpressureMode::Blocking,
+        100,
+        Duration::from_secs(10),
+        Duration::from_secs(1),
+        Duration::from_secs(300),
+        Default::default(),
+        bypass_enabled_kv_policy(),
+        monitor,
+        PriorityPolicy::default(),
+        priorities.clone(),
+        tinyllb::config::KvBias::default(),
+    ));
+
+    let flow_id = FlowId::new("bg");
+    registry.apply_priority_override(
+        &flow_id,
+        Some(PriorityClass::Background),
+        false,
+        &priorities,
+    );
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        scheduler.admit(flow_id, 1024.0),
+    )
+    .await
+    .expect("should not timeout");
+    assert!(
+        result.is_err(),
+        "background flow should be rejected at 0.96 KV usage"
+    );
+
+    let reject_count = m
+        .kv_admission_decisions_total
+        .with_label_values(&["reject"])
+        .get();
+    assert_eq!(
+        reject_count, 1.0,
+        "background flow should hit the reject path"
+    );
+    let bypass_count = m
+        .kv_admission_decisions_total
+        .with_label_values(&["bypass"])
+        .get();
+    assert_eq!(bypass_count, 0.0, "background flow must not bypass");
 }

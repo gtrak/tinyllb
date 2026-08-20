@@ -182,6 +182,14 @@ fn build_proxy_app(backend_url: &str) -> Router {
         flow_registry,
     );
 
+    build_app_from_state(state)
+}
+
+/// Wire up the full proxy app (health + gateway + metrics + admin routers)
+/// from a constructed `AppState`. Shared by `build_proxy_app` and tests that
+/// need a custom scheduler.
+fn build_app_from_state(state: tinyllb::gateway::AppState) -> Router {
+    use tinyllb::gateway;
     let health_router = Router::new().route("/healthz", get(|| async { "ok" }));
     let gateway_router = gateway::create_router().with_state(state.clone());
     let metrics_router = Router::new()
@@ -191,7 +199,6 @@ fn build_proxy_app(backend_url: &str) -> Router {
         )
         .with_state(state.clone());
     let admin_router = tinyllb::api::create_router().with_state(state);
-
     Router::new()
         .merge(health_router)
         .merge(metrics_router)
@@ -800,5 +807,105 @@ async fn test_client_disconnect_releases_permit() {
         0.0,
         "requests_active should be 0 after client disconnect, got {}",
         metrics_clone.requests_active.get()
+    );
+}
+
+/// GET /v1/models bypasses the scheduler entirely, so it returns 200 even
+/// when the KV gate would 429 inference. A background inference POST under
+/// the same KV pressure is 429'd, proving the gate is active.
+#[tokio::test]
+async fn test_models_passthrough_under_kv_pressure() {
+    use tinyllb::backend::{BackendMonitor, BackendSnapshot};
+    use tinyllb::config::{BackpressureMode, KvBias, KvPolicyConfig, Priorities, PriorityPolicy};
+    use tinyllb::flow::FlowRegistry;
+    use tinyllb::gateway::{self, AppState};
+    use tinyllb::metrics;
+    use tinyllb::scheduler::Scheduler;
+
+    let addr = start_stub_backend().await;
+    let backend_url = format!("http://{}/", addr);
+
+    // KV pinned in the reject zone.
+    let (tx, rx) = tokio::sync::watch::channel(BackendSnapshot {
+        kv_usage: 0.96,
+        kv_free: 0.04,
+        preemptions: 5,
+        ..Default::default()
+    });
+    let monitor = Arc::new(BackendMonitor::from_receiver(rx));
+    let _tx = tx;
+
+    let metrics = metrics::create_metrics();
+    let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
+    let scheduler = Arc::new(Scheduler::new(
+        4,
+        metrics.clone(),
+        flow_registry.clone(),
+        BackpressureMode::Blocking,
+        100,
+        Duration::from_secs(10),
+        Duration::from_secs(1),
+        Duration::from_secs(300),
+        Default::default(),
+        KvPolicyConfig {
+            enabled: true,
+            bypass_interactive: true,
+            reject_threshold: 0.95,
+            delay_threshold: 0.80,
+        },
+        monitor,
+        PriorityPolicy::default(),
+        Priorities::default(),
+        KvBias::default(),
+    ));
+    let state = AppState::test_default(
+        gateway::build_client(),
+        Arc::new(url::Url::parse(&backend_url).expect("valid backend URL")),
+        metrics.clone(),
+        scheduler,
+        flow_registry,
+    );
+    let app = build_app_from_state(state);
+
+    // Background inference POST must be rejected by the KV gate (429),
+    // proving the gate is active for non-interactive inference.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-llm-priority", "background")
+                .body(Body::from(r#"{"model":"local","max_tokens":1}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        429,
+        "background inference must be rejected by the KV gate at 0.96"
+    );
+
+    // GET /v1/models must bypass the scheduler entirely and return 200,
+    // proving metadata passthrough works under KV pressure.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/models")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "GET /v1/models must bypass the KV gate");
+    let body_bytes = collect_body_bytes(resp).await;
+    let expected = r#"{"data":[{"id":"llama-2-7b","object":"model"}]}"#;
+    assert_eq!(
+        body_bytes.as_ref(),
+        expected.as_bytes(),
+        "models body should be byte-identical to stub output"
     );
 }
