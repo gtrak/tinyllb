@@ -62,6 +62,9 @@ pub struct KvPolicy {
     reject_threshold: f64,
     /// Delay if `kv_usage > delay_threshold` (but below reject).
     delay_threshold: f64,
+    /// When true, interactive (priority-100) flows bypass the delay and
+    /// reject checks entirely.
+    bypass_interactive: bool,
     /// Shared monitor for reading latest snapshots.
     monitor: Arc<BackendMonitor>,
     /// Metrics handle for recording decisions.
@@ -101,6 +104,7 @@ impl KvPolicy {
             enabled: config.enabled,
             reject_threshold: config.reject_threshold,
             delay_threshold: config.delay_threshold,
+            bypass_interactive: config.bypass_interactive,
             monitor,
             metrics: metrics.clone(),
             backpressure_mode,
@@ -141,15 +145,34 @@ impl KvPolicy {
     /// Check KV-cache pressure before admitting a request.
     ///
     /// - If KV policy is disabled, always proceeds.
+    /// - If `is_interactive` is true and `bypass_interactive` is enabled, an
+    ///   interactive (priority-100) flow bypasses both the delay band and the
+    ///   reject threshold: records a `bypass` decision and proceeds immediately.
+    ///   Interactive sessions must never see a KV-gate 429; the DRR scheduler
+    ///   and `max_active_flows` still bound concurrency, and vLLM's own
+    ///   preemption handles true KV exhaustion.
     /// - If KV usage exceeds `reject_threshold`, returns `Err(BackpressureRejected)`.
     /// - If KV usage exceeds `delay_threshold`, waits for usage to drop below
     ///   `delay_threshold` before proceeding.
     ///   - **Blocking**: waits indefinitely (blocking contract).
     ///   - **Hybrid/FailFast**: waits up to `max_wait`; rejects with 429 on timeout.
     /// - Otherwise, proceeds immediately.
-    pub async fn check(&self) -> Result<(), BackpressureRejected> {
+    pub async fn check(&self, is_interactive: bool) -> Result<(), BackpressureRejected> {
         // KV policy disabled — always proceed.
         if !self.enabled {
+            return Ok(());
+        }
+
+        // Interactive (priority-100) flows bypass both the delay band and the
+        // reject threshold when bypass_interactive is enabled. The DRR
+        // scheduler + max_active_flows still bounds concurrency; vLLM's own
+        // preemption handles true KV exhaustion. An interactive session must
+        // never see a KV-gate 429.
+        if self.bypass_interactive && is_interactive {
+            self.metrics
+                .kv_admission_decisions_total
+                .with_label_values(&["bypass"])
+                .inc();
             return Ok(());
         }
 

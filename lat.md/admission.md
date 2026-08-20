@@ -93,6 +93,7 @@ The KV-admission policy governs whether incoming requests are admitted, delayed,
 - Admits requests when KV-cache usage is within normal operating range
 - Delays requests when usage exceeds a configured delay threshold, holding them until pressure subsides
 - Rejects requests with a `Retry-After` hint when usage exceeds a configured reject threshold
+- Bypasses both the delay and reject checks for interactive (priority-100) flows when the interactive bypass is enabled
 - Exposes a count of delayed requests observable by queue-depth queries
 - Records admission decisions for metrics collection
 
@@ -114,6 +115,7 @@ The policy exposes one admission gate, a decision type, a configuration surface 
 - `Ok(())` is returned when the request is admitted directly or a delay wait completes within bounds
 - `Err(BackpressureRejected { retry_after })` is returned when the request must be back-pressured, carrying the backoff duration
 - When the policy is enabled, records the initial decision outcome to the metrics subsystem before returning
+- When the interactive bypass is enabled and the caller marks the request as interactive, the gate returns `Ok(())` immediately without consulting KV pressure and records a `bypass` decision
 
 **Decision Type (`KVMDecision`).** A public enum with three variants representing the initial admission outcome before any delay-wait resolution.
 
@@ -121,7 +123,7 @@ The policy exposes one admission gate, a decision type, a configuration surface 
 - **Delay** — KV pressure exceeds the delay threshold — request enters a delay wait
 - **Reject(Duration)** — KV pressure exceeds the reject threshold — return rejection with the embedded duration as `Retry-After`
 
-**Configuration.** The admission thresholds (`enabled`, `delay_threshold`, `reject_threshold`) are carried in a dedicated policy config: defaults are `enabled: false`, `reject_threshold: 0.95`, `delay_threshold: 0.80`.
+**Configuration.** The admission thresholds (`enabled`, `delay_threshold`, `reject_threshold`) and the interactive-bypass flag (`bypass_interactive`) are carried in a dedicated policy config: defaults are `enabled: false`, `reject_threshold: 0.95`, `delay_threshold: 0.80`, `bypass_interactive: true`.
 
 - The wait behavior (`backpressure_mode`, `max_wait`, `retry_after_base`, `max_queue_depth`) is carried in a separate backpressure config and threaded into the policy at construction time
 - If disabled, the gate always admits — thresholds and modes are ignored

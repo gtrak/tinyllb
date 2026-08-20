@@ -89,6 +89,8 @@ pub struct KvPolicyConfig {
     pub reject_threshold: f64,
     #[serde(default = "KvPolicyConfig::default_delay_threshold")]
     pub delay_threshold: f64,
+    #[serde(default = "KvPolicyConfig::default_bypass_interactive")]
+    pub bypass_interactive: bool,
 }
 
 impl KvPolicyConfig {
@@ -99,6 +101,10 @@ impl KvPolicyConfig {
     fn default_delay_threshold() -> f64 {
         0.80
     }
+
+    fn default_bypass_interactive() -> bool {
+        true
+    }
 }
 
 impl Default for KvPolicyConfig {
@@ -107,6 +113,7 @@ impl Default for KvPolicyConfig {
             enabled: false,
             reject_threshold: Self::default_reject_threshold(),
             delay_threshold: Self::default_delay_threshold(),
+            bypass_interactive: Self::default_bypass_interactive(),
         }
     }
 }

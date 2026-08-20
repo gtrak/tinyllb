@@ -50,6 +50,8 @@ pub struct Scheduler {
     /// Stall signal from the backend monitor (`true` = engine stalled).
     /// While set, new admissions are rejected with 429 + Retry-After.
     stall_rx: tokio::sync::watch::Receiver<bool>,
+    /// Priority value that marks a flow as interactive (KV-gate bypass).
+    interactive_priority: u32,
 }
 
 impl Scheduler {
@@ -118,6 +120,7 @@ impl Scheduler {
             kv_bias_handle,
         );
 
+        let interactive_priority = priorities.interactive;
         let cadence = Arc::new(CadenceRegistry::new(
             Arc::new(priority_policy),
             Arc::new(priorities),
@@ -131,6 +134,7 @@ impl Scheduler {
             cadence,
             metrics,
             stall_rx,
+            interactive_priority,
         }
     }
 
@@ -237,7 +241,8 @@ impl Scheduler {
         let enter = std::time::Instant::now();
 
         // KV policy gate runs FIRST before any flow scheduling.
-        self.kv_policy.check().await?;
+        let is_interactive = flow.priority() == self.interactive_priority;
+        self.kv_policy.check(is_interactive).await?;
 
         // Stall gate: reject new admissions while the backend is stalled.
         // The client gets an immediate 429 + Retry-After and backs off,

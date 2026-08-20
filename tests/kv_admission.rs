@@ -51,6 +51,7 @@ fn enabled_kv_policy() -> KvPolicyConfig {
         enabled: true,
         reject_threshold: 0.95,
         delay_threshold: 0.80,
+        bypass_interactive: false,
     }
 }
 
@@ -177,6 +178,7 @@ async fn kv_admission_disabled_always_accepts() {
         enabled: false,
         reject_threshold: 0.95,
         delay_threshold: 0.80,
+        bypass_interactive: false,
     };
 
     let scheduler = build_scheduler(kv_config, monitor);

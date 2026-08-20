@@ -82,6 +82,7 @@ pub fn load() -> anyhow::Result<Config> {
         .set_default("kv_policy.enabled", false)?
         .set_default("kv_policy.reject_threshold", 0.95f64)?
         .set_default("kv_policy.delay_threshold", 0.80f64)?
+        .set_default("kv_policy.bypass_interactive", true)?
         .set_default("retry_policy.enabled", false)?
         .set_default("retry_policy.max_retries", 2u64)?
         .set_default("retry_policy.temperature_step", 0.3f64)?
