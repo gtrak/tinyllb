@@ -28,9 +28,11 @@ pub struct Config {
     /// response body). Defaults to the reqwest client timeout (300s).
     #[serde(default, with = "loader::humantime_serde_option")]
     pub request_timeout: Option<Duration>,
-    /// KV-cache-aware admission policy.  Defaults to `enabled: false`.
+    /// DEPRECATED migration guard: a top-level `kv_policy:` key is no longer
+    /// supported (it moved under `backpressure:`). If present, config loading
+    /// errors with a helpful message. Remove this field after migration.
     #[serde(default)]
-    pub kv_policy: KvPolicyConfig,
+    pub kv_policy: Option<KvPolicyConfig>,
     /// Premature-stop retry policy.  Defaults to `enabled: false`.
     #[serde(default)]
     pub retry_policy: RetryPolicy,
@@ -437,6 +439,11 @@ pub struct Backpressure {
         with = "loader::humantime_serde"
     )]
     pub retry_after_base: Duration,
+    /// KV-cache-aware admission sub-policy. Nested under backpressure so the
+    /// gate inherits the hold-vs-reject contract from `mode` by construction
+    /// rather than by parameter threading. See [[admission#KV-Cache-Aware Admission Gate]].
+    #[serde(default)]
+    pub kv_policy: KvPolicyConfig,
 }
 
 impl Backpressure {
@@ -460,6 +467,7 @@ impl Default for Backpressure {
             max_queue_depth: Self::default_max_queue_depth(),
             max_wait: Self::default_max_wait(),
             retry_after_base: Self::default_retry_after_base(),
+            kv_policy: KvPolicyConfig::default(),
         }
     }
 }

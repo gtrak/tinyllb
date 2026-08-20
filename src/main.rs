@@ -110,7 +110,7 @@ async fn main() {
         cfg.backpressure.retry_after_base,
         cfg.scheduler.starvation_timeout,
         cfg.scheduler.completion_bias.clone(),
-        cfg.kv_policy.clone(),
+        cfg.backpressure.kv_policy.clone(),
         monitor.clone(),
         cfg.priority_policy.clone(),
         cfg.priorities.clone(),

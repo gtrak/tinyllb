@@ -226,6 +226,7 @@ async fn test_burst_50_max_4_concurrent() {
         max_queue_depth: 200,
         max_wait: Duration::from_secs(60),
         retry_after_base: Duration::from_secs(1),
+        kv_policy: Default::default(),
     };
 
     let (app, _m) = build_e2e_proxy(&backend_url, 4, backpressure);
@@ -295,6 +296,7 @@ async fn test_streaming_ordering_across_queue() {
         max_queue_depth: 100,
         max_wait: Duration::from_secs(30),
         retry_after_base: Duration::from_secs(1),
+        kv_policy: Default::default(),
     };
 
     // max_active_flows=2 so both requests can proceed in parallel.
@@ -401,6 +403,7 @@ async fn test_429_retry_after_and_retry_succeeds() {
         max_queue_depth: 0,
         max_wait: Duration::from_secs(10),
         retry_after_base: Duration::from_secs(2),
+        kv_policy: Default::default(),
     };
 
     // max_active_flows=1 with FailFast and max_queue_depth=0.
@@ -540,6 +543,7 @@ async fn test_metrics_reflects_activity() {
         max_queue_depth: 100,
         max_wait: Duration::from_secs(10),
         retry_after_base: Duration::from_secs(1),
+        kv_policy: Default::default(),
     };
 
     let (app, m) = build_e2e_proxy(&backend_url, 2, backpressure);

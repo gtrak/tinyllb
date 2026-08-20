@@ -236,3 +236,34 @@ scheduler:
         "error mentions metrics_interval: {err}"
     );
 }
+
+#[test]
+#[serial_test::serial]
+fn top_level_kv_policy_errors_with_migration_message() {
+    let tmp = "/tmp/test_config_legacy_kv_policy.yaml";
+    std::fs::write(
+        tmp,
+        r#"
+backend:
+  url: http://localhost:8000
+backpressure:
+  mode: blocking
+kv_policy:
+  enabled: true
+  reject_threshold: 0.95
+  delay_threshold: 0.80
+"#,
+    )
+    .expect("write temp yaml");
+
+    let vars = no_env_overrides(&[("CONFIG_PATH", tmp)]);
+    let result = with_env(&vars, config::load);
+    std::fs::remove_file(tmp).ok();
+
+    assert!(result.is_err(), "top-level kv_policy should error");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("backpressure") && err.contains("kv_policy"),
+        "error should explain the migration: {err}"
+    );
+}

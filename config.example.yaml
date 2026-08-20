@@ -37,6 +37,11 @@ backpressure:
   max_queue_depth: 100        # max queued requests before backpressure
   max_wait: 10s               # max time a request waits in queue (hybrid)
   retry_after_base: 1s        # base Retry-After for backpressure rejections
+  kv_policy:                  # KV-cache-aware admission (nested: inherits mode)
+    enabled: false            # delay/reject near KV capacity (blocking holds; hybrid/failfast 429)
+    reject_threshold: 0.95    # reject when KV utilization > this (hybrid/failfast only)
+    delay_threshold: 0.80     # delay admission when KV utilization > this
+    bypass_interactive: true  # interactive (priority-100) flows skip delay/reject (never 429)
 
 metrics:
   endpoint: /metrics          # path serving Prometheus metrics
@@ -44,12 +49,6 @@ metrics:
 server:
   bind: "0.0.0.0:8080"
   tps_window_secs: 10         # rolling window for the llm_tokens_per_second gauge
-
-kv_policy:
-  enabled: false              # KV-cache-aware admission (delay/reject near capacity)
-  reject_threshold: 0.95      # reject when KV utilization > this
-  delay_threshold: 0.80       # delay admission when KV utilization > this
-  bypass_interactive: true     # interactive (priority-100) flows skip delay/reject (never 429)
 
 priority_policy:
   enabled: true               # turn-boundary priority reclassification

@@ -79,10 +79,10 @@ pub fn load() -> anyhow::Result<Config> {
         .set_default("backend.metrics_interval", "1s")?
         .set_default("metrics.endpoint", "/metrics")?
         .set_default("server.bind", "0.0.0.0:8080")?
-        .set_default("kv_policy.enabled", false)?
-        .set_default("kv_policy.reject_threshold", 0.95f64)?
-        .set_default("kv_policy.delay_threshold", 0.80f64)?
-        .set_default("kv_policy.bypass_interactive", true)?
+        .set_default("backpressure.kv_policy.enabled", false)?
+        .set_default("backpressure.kv_policy.reject_threshold", 0.95f64)?
+        .set_default("backpressure.kv_policy.delay_threshold", 0.80f64)?
+        .set_default("backpressure.kv_policy.bypass_interactive", true)?
         .set_default("retry_policy.enabled", false)?
         .set_default("retry_policy.max_retries", 2u64)?
         .set_default("retry_policy.temperature_step", 0.3f64)?
@@ -108,6 +108,13 @@ pub fn load() -> anyhow::Result<Config> {
 }
 
 fn validate(cfg: &Config) -> anyhow::Result<()> {
+    // Migration guard: a top-level `kv_policy:` key is no longer supported —
+    // it moved under `backpressure:`.
+    if cfg.kv_policy.is_some() {
+        return Err(anyhow::anyhow!(
+            "`kv_policy` has moved under `backpressure`; nest it as `backpressure.kv_policy` (the top-level `kv_policy:` key is no longer supported)"
+        ));
+    }
     if cfg.scheduler.max_active_flows == 0 {
         return Err(anyhow::anyhow!("max_active_flows must be > 0"));
     }
@@ -155,18 +162,22 @@ fn validate(cfg: &Config) -> anyhow::Result<()> {
     }
 
     // Validate KV policy thresholds.
-    if cfg.kv_policy.enabled {
-        if cfg.kv_policy.reject_threshold <= 0.0 || cfg.kv_policy.reject_threshold > 1.0 {
+    if cfg.backpressure.kv_policy.enabled {
+        if cfg.backpressure.kv_policy.reject_threshold <= 0.0
+            || cfg.backpressure.kv_policy.reject_threshold > 1.0
+        {
             return Err(anyhow::anyhow!(
                 "kv_policy.reject_threshold must be in (0, 1]"
             ));
         }
-        if cfg.kv_policy.delay_threshold < 0.0 || cfg.kv_policy.delay_threshold > 1.0 {
+        if cfg.backpressure.kv_policy.delay_threshold < 0.0
+            || cfg.backpressure.kv_policy.delay_threshold > 1.0
+        {
             return Err(anyhow::anyhow!(
                 "kv_policy.delay_threshold must be in [0, 1]"
             ));
         }
-        if cfg.kv_policy.delay_threshold >= cfg.kv_policy.reject_threshold {
+        if cfg.backpressure.kv_policy.delay_threshold >= cfg.backpressure.kv_policy.reject_threshold {
             return Err(anyhow::anyhow!(
                 "kv_policy.delay_threshold must be less than reject_threshold"
             ));

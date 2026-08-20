@@ -102,6 +102,7 @@ async fn test_fail_fast_returns_429_when_queue_full() {
         max_queue_depth: 0,
         max_wait: Duration::from_secs(10),
         retry_after_base: Duration::from_secs(1),
+        kv_policy: Default::default(),
     };
     let app = build_proxy_app_with_backpressure(&backend_url, 1, backpressure);
 
@@ -271,6 +272,7 @@ async fn test_hybrid_gateway_returns_429_with_retry_after() {
         max_queue_depth: 100,
         max_wait: Duration::from_millis(200),
         retry_after_base: Duration::from_secs(1),
+        kv_policy: Default::default(),
     };
 
     // max_active_flows=0 means no slots.
@@ -384,6 +386,7 @@ async fn test_blocking_gateway_returns_200() {
         max_queue_depth: 100,
         max_wait: Duration::from_secs(10),
         retry_after_base: Duration::from_secs(1),
+        kv_policy: Default::default(),
     };
 
     let app = build_proxy_app_with_backpressure(&backend_url, 4, backpressure);
@@ -421,6 +424,7 @@ async fn test_backpressure_rejections_metric() {
         max_queue_depth: 0,
         max_wait: Duration::from_secs(10),
         retry_after_base: Duration::from_secs(1),
+        kv_policy: Default::default(),
     };
     let app = build_proxy_app_with_backpressure(&backend_url, 1, backpressure);
 
@@ -470,6 +474,7 @@ async fn test_backpressure_rejections_metric() {
         max_queue_depth: 0,
         max_wait: Duration::from_secs(10),
         retry_after_base: Duration::from_secs(1),
+        kv_policy: Default::default(),
     };
     let state = gateway::AppState {
         backpressure: bp,

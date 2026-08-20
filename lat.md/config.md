@@ -36,10 +36,10 @@ The configuration surface presents contractual guarantees about what values are 
 - **KV-cache-aware selection bias** controls scheduler selection reordering under pressure: `enabled` (default `true`), `bias_full_at` (default `0.9`, pressure at which footprint fully dominates selection), and `pressure_below` (default `0.5`, pressure below which the bias is inactive and selection is purely fair). Never rejects. See [[scheduler_policies#KV-Cache-Aware Selection Bias]].
 - **Flow defaults** declare `default_weight` (default `1.0`) and `default_priority` (default `50`).
 - **Priority classes** declare `interactive` (default `100`), `agent` (default `50`), and `background` (default `10`).
-- **Backpressure** declares a mode (`blocking`, `failfast`, `hybrid`; default `blocking`), `max_queue_depth` (default `100`), `max_wait` (default `10s`), and `retry_after_base` (default `1s`).
+- **Backpressure** declares a mode (`blocking`, `failfast`, `hybrid`; default `blocking`), `max_queue_depth` (default `100`), `max_wait` (default `10s`), `retry_after_base` (default `1s`), and a nested `kv_policy` sub-policy (documented below). Nesting the KV gate under backpressure makes it structurally inherit the hold-vs-reject contract from `mode` by construction rather than by parameter threading.
 - **Metrics** declares the metrics endpoint path (default `/metrics`).
 - **Server** declares the listener bind address (default `0.0.0.0:8080`).
-- **KV-cache policy** declares `enabled` (default `false`), `reject_threshold` (default `0.95`), and `delay_threshold` (default `0.80`).
+- **KV-cache policy** is nested under backpressure as `backpressure.kv_policy` (not a top-level key), so the gate inherits the hold-vs-reject contract from `backpressure.mode` by construction. It declares `enabled` (default `false`), `reject_threshold` (default `0.95`), `delay_threshold` (default `0.80`), and `bypass_interactive` (default `true`). A legacy top-level `kv_policy:` key is rejected at load with a migration message instructing operators to nest it under `backpressure.kv_policy`.
 - **Retry policy** declares premature-stop retry settings: `enabled` (default `false`), `max_retries` (default `2`), `temperature_step` (default `0.3`), `max_temperature` (default `1.5`), and `default_temperature` (default `0.0`). When enabled, degenerate `/v1/chat/completions` responses are retried with bumped temperature.
 - **Priority policy** declares turn-boundary state-machine heuristic settings: `enabled` (default `true`), `idle_gap_threshold` (default `30s`), `agentic_suspected_threshold` (default `5`), and `agentic_confirmed_threshold` (default `12`). When enabled, the scheduler classifies flows by turn-boundary idles versus continuous activity and adjusts priority automatically. See [[scheduler#Scheduler Facade and Policy Selection]].
 
@@ -76,7 +76,8 @@ These limitations are inherent to the configuration model.
 - When backpressure mode is `failfast` or `hybrid`, `max_queue_depth` must be positive; zero is rejected.
 - When backpressure mode is `hybrid`, `max_wait` must be positive; zero is rejected.
 - When backpressure mode is `blocking`, no positive-threshold constraints apply; zero values for queue depth and wait time are valid.
-- When `kv_policy.enabled` is `true`, thresholds must satisfy: `reject_threshold` in `(0, 1]`, `delay_threshold` in `[0, 1]`, and `delay_threshold` strictly less than `reject_threshold`. When `enabled` is `false`, these thresholds are not validated.
+- When `backpressure.kv_policy.enabled` is `true`, thresholds must satisfy: `reject_threshold` in `(0, 1]`, `delay_threshold` in `[0, 1]`, and `delay_threshold` strictly less than `reject_threshold`. When `enabled` is `false`, these thresholds are not validated.
+- A top-level `kv_policy:` key is rejected at load with a migration message: the KV policy now lives under `backpressure.kv_policy`. This guard exists so the removed top-level key is never silently ignored.
 - When `retry_policy.enabled` is `true`, `max_retries` must be > 0, `temperature_step` must be > 0.0, `max_temperature` must be >= `default_temperature`, and `max_temperature` must be <= 2.0. When `enabled` is `false`, these fields are not validated.
 - `agentic_confirmed_threshold` must be strictly greater than `agentic_suspected_threshold`, and `agentic_suspected_threshold` must be at least 1. These constraints are validated regardless of the `enabled` flag.
 
@@ -227,6 +228,7 @@ Configuration loading operates within specific boundaries on sourcing, format, a
 - Under hybrid backpressure mode, both `max_queue_depth` and `max_wait` must be positive; under fail-fast mode, only `max_queue_depth` must be positive. Under blocking mode, neither is validated.
 - `retry_after_base` and `request_timeout` are not validated for positivity; zero (for `retry_after_base`) or absent values (for `request_timeout`) are accepted.
 - A zero `metrics_interval` is rejected because it silently disables the metrics monitor, blocking key-value policy enforcement.
+- A top-level `kv_policy:` key is rejected before any other validation runs; the migration sentinel on the config type is checked first so the removed key fails loudly with a message directing it under `backpressure.kv_policy`.
 
 ## Rationale
 

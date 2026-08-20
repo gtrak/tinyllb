@@ -247,6 +247,7 @@ async fn test_no_starvation_interactive_completes() {
             max_queue_depth: 200,
             max_wait: Duration::from_secs(60),
             retry_after_base: Duration::from_secs(1),
+            kv_policy: Default::default(),
         };
 
         let (app, m, _scheduler) = build_e2e_proxy_with_config(
@@ -369,6 +370,7 @@ async fn test_queue_endpoint_reflects_state() {
             max_queue_depth: 200,
             max_wait: Duration::from_secs(60),
             retry_after_base: Duration::from_secs(1),
+            kv_policy: Default::default(),
         };
 
         let (app, _m, _scheduler) = build_e2e_proxy_with_config(

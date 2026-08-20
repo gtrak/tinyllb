@@ -193,6 +193,7 @@ async fn test_api_compatibility_models() {
         max_queue_depth: 100,
         max_wait: Duration::from_secs(30),
         retry_after_base: Duration::from_secs(1),
+        kv_policy: Default::default(),
     };
     let (app, _m) = build_live_proxy(4, backpressure);
 
@@ -261,6 +262,7 @@ async fn test_nonstream_passthrough() {
         max_queue_depth: 100,
         max_wait: Duration::from_secs(60),
         retry_after_base: Duration::from_secs(1),
+        kv_policy: Default::default(),
     };
     let (app, _m) = build_live_proxy(4, backpressure);
 
@@ -333,6 +335,7 @@ async fn test_stream_passthrough() {
         max_queue_depth: 100,
         max_wait: Duration::from_secs(60),
         retry_after_base: Duration::from_secs(1),
+        kv_policy: Default::default(),
     };
     let (app, _m) = build_live_proxy(4, backpressure);
 
@@ -426,6 +429,7 @@ async fn test_admission_control_concurrent() {
         max_queue_depth: 100,
         max_wait: Duration::from_secs(120),
         retry_after_base: Duration::from_secs(1),
+        kv_policy: Default::default(),
     };
     let (app, m) = build_live_proxy(MAX_ACTIVE_FLOWS, backpressure);
 
@@ -540,6 +544,7 @@ async fn test_token_accounting() {
         max_queue_depth: 100,
         max_wait: Duration::from_secs(60),
         retry_after_base: Duration::from_secs(1),
+        kv_policy: Default::default(),
     };
     let (app, m) = build_live_proxy(4, backpressure);
 
@@ -656,6 +661,7 @@ async fn test_backpressure_failfast_429() {
         max_queue_depth: 0,
         max_wait: Duration::from_secs(1),
         retry_after_base: Duration::from_secs(1),
+        kv_policy: Default::default(),
     };
     let (app, _m) = build_live_proxy(1, backpressure);
 
@@ -745,6 +751,7 @@ async fn test_queue_endpoint_live() {
         max_queue_depth: 100,
         max_wait: Duration::from_secs(60),
         retry_after_base: Duration::from_secs(1),
+        kv_policy: Default::default(),
     };
     let (app, _m) = build_live_proxy(2, backpressure);
 
