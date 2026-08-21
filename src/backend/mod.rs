@@ -395,6 +395,14 @@ impl BackendMonitor {
         self.stall_receiver.clone()
     }
 
+    /// Clone the snapshot watch receiver.
+    ///
+    /// `changed()` returns `Err` immediately when the monitor has no live
+    /// sender (e.g. `BackendMonitor::empty()`).
+    pub fn snapshot_receiver(&self) -> tokio::sync::watch::Receiver<BackendSnapshot> {
+        self.receiver.clone()
+    }
+
     /// Create a new monitor with an initial default snapshot.
     ///
     /// Returns the monitor handle and a `tokio::Task` that you should spawn.

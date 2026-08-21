@@ -94,6 +94,7 @@ fn build_proxy_app(
         PriorityPolicy::default(),
         Priorities::default(),
         tinyllb::config::KvBias::default(),
+        tinyllb::config::KvPressure::default(),
     ));
 
     let state = gateway::AppState::test_default(

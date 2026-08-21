@@ -57,6 +57,7 @@ async fn test_completion_bias_blocks_new_flow() {
             PriorityPolicy::default(),
             Priorities::default(),
             tinyllb::config::KvBias::default(),
+            tinyllb::config::KvPressure::default(),
         ));
 
         // Fill 2 slots with A and B.
@@ -130,6 +131,7 @@ async fn test_completion_bias_allows_active_flow_requests() {
             PriorityPolicy::default(),
             Priorities::default(),
             tinyllb::config::KvBias::default(),
+            tinyllb::config::KvPressure::default(),
         ));
 
         // A gets admitted. active=1, target=1.
@@ -183,6 +185,7 @@ async fn test_priority_drr_higher_prio_selected_first() {
             PriorityPolicy::default(),
             Priorities::default(),
             tinyllb::config::KvBias::default(),
+            tinyllb::config::KvPressure::default(),
         ));
 
         registry.register(FlowRegistration {
@@ -257,6 +260,7 @@ async fn test_starvation_drr_force_admit() {
             PriorityPolicy::default(),
             Priorities::default(),
             tinyllb::config::KvBias::default(),
+            tinyllb::config::KvPressure::default(),
         ));
 
         registry.register(FlowRegistration {

@@ -554,6 +554,7 @@ async fn test_predictive_admit_on_allows_pre_admit_when_near_done() {
             PriorityPolicy::default(),
             Priorities::default(),
             tinyllb::config::KvBias::default(),
+            tinyllb::config::KvPressure::default(),
         ));
 
         // Fill target (2 active flows).
@@ -629,6 +630,7 @@ async fn test_predictive_admit_on_defers_when_not_near_done() {
             PriorityPolicy::default(),
             Priorities::default(),
             tinyllb::config::KvBias::default(),
+            tinyllb::config::KvPressure::default(),
         ));
 
         // Fill target (2 active flows).

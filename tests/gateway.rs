@@ -816,7 +816,7 @@ async fn test_client_disconnect_releases_permit() {
 #[tokio::test]
 async fn test_models_passthrough_under_kv_pressure() {
     use tinyllb::backend::{BackendMonitor, BackendSnapshot};
-    use tinyllb::config::{BackpressureMode, KvBias, KvPolicyConfig, Priorities, PriorityPolicy};
+    use tinyllb::config::{BackpressureMode, KvBias, KvPolicyConfig, KvPressure, Priorities, PriorityPolicy};
     use tinyllb::flow::FlowRegistry;
     use tinyllb::gateway::{self, AppState};
     use tinyllb::metrics;
@@ -860,6 +860,7 @@ async fn test_models_passthrough_under_kv_pressure() {
         PriorityPolicy::default(),
         Priorities::default(),
         KvBias::default(),
+        KvPressure::default(),
     ));
     let state = AppState::test_default(
         gateway::build_client(),

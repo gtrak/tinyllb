@@ -26,6 +26,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::backend::BackendSnapshot;
 use crate::config::BackpressureMode;
 use crate::flow::{Flow, FlowId, FlowRegistry, QueueSnapshot};
 use crate::metrics::Metrics;
@@ -60,6 +61,8 @@ struct DrrState {
     rr_cursor: VecDeque<FlowId>,
     /// Number of available permits (max_active_flows - currently active).
     available_permits: u32,
+    /// Static permit budget (`max_active_flows`); `active = max_permits - available_permits`.
+    max_permits: u32,
     /// Monotonically increasing counter for unique pending IDs.
     next_pending_id: u64,
     /// DRR deficit credit accumulated per flow (separate from flow.credit).
@@ -113,6 +116,8 @@ impl DrrScheduler {
         starvation_timeout: Duration,
         completion_bias_gate: Arc<CompletionBiasGate>,
         kv_bias: Arc<super::kv_bias::KvBiasHandle>,
+        kv_pressure: Arc<super::pressure_cap::PressureCapHandle>,
+        snapshot_rx: tokio::sync::watch::Receiver<BackendSnapshot>,
     ) -> Self {
         Self::new_inner(
             max_active_flows,
@@ -125,6 +130,8 @@ impl DrrScheduler {
             starvation_timeout,
             completion_bias_gate,
             kv_bias,
+            kv_pressure,
+            snapshot_rx,
         )
     }
 
@@ -140,6 +147,8 @@ impl DrrScheduler {
         starvation_timeout: Duration,
         completion_bias_gate: Arc<CompletionBiasGate>,
         kv_bias: Arc<super::kv_bias::KvBiasHandle>,
+        kv_pressure: Arc<super::pressure_cap::PressureCapHandle>,
+        snapshot_rx: tokio::sync::watch::Receiver<BackendSnapshot>,
     ) -> Self {
         let notify = Arc::new(tokio::sync::Notify::new());
         let state = Arc::new(SharedState {
@@ -147,6 +156,7 @@ impl DrrScheduler {
                 waiting: std::collections::HashMap::new(),
                 rr_cursor: VecDeque::new(),
                 available_permits: max_active_flows,
+                max_permits: max_active_flows,
                 next_pending_id: 0,
                 deficit: std::collections::HashMap::new(),
             }),
@@ -165,6 +175,9 @@ impl DrrScheduler {
             starvation_timeout,
             gate_clone,
             kv_bias.clone(),
+            kv_pressure,
+            max_active_flows,
+            snapshot_rx,
         ));
 
         Self {
@@ -181,6 +194,13 @@ impl DrrScheduler {
     }
 
     /// Background admission loop.
+    ///
+    /// Wakes on the completion notify and on backend snapshot changes, so a
+    /// KV-pressure drop reopens admissions without waiting for a completion.
+    /// When the snapshot channel has no live sender (e.g.
+    /// `BackendMonitor::empty()`) the loop falls back to notify-only waits
+    /// instead of busy-spinning.
+    #[allow(clippy::too_many_arguments)]
     async fn admission_loop(
         state: Arc<SharedState>,
         metrics: Arc<Metrics>,
@@ -188,21 +208,46 @@ impl DrrScheduler {
         starvation_timeout: Duration,
         gate: Arc<CompletionBiasGate>,
         kv_bias: Arc<super::kv_bias::KvBiasHandle>,
+        kv_pressure: Arc<super::pressure_cap::PressureCapHandle>,
+        max_active_flows: u32,
+        mut snapshot_rx: tokio::sync::watch::Receiver<BackendSnapshot>,
     ) {
+        let mut monitor_alive = true;
+
         loop {
-            state.notify.notified().await;
+            if monitor_alive {
+                tokio::select! {
+                    _ = state.notify.notified() => {}
+                    res = snapshot_rx.changed() => { if res.is_err() { monitor_alive = false; } }
+                }
+            } else {
+                state.notify.notified().await;
+            }
+
+            let mut last_cap = u32::MAX;
 
             loop {
-                let (has_permits, has_waiting) = {
+                let cap = kv_pressure.effective(max_active_flows);
+                if cap != last_cap {
+                    metrics.scheduler_effective_max_flows.set(cap as f64);
+                    last_cap = cap;
+                }
+                let (active, has_waiting) = {
                     let s = state.inner.lock().unwrap();
-                    (s.available_permits > 0, !s.rr_cursor.is_empty())
+                    (s.max_permits - s.available_permits, !s.rr_cursor.is_empty())
                 };
-                if !has_permits || !has_waiting {
+                if active >= cap || !has_waiting {
                     break;
                 }
 
-                let (selection, credit_accumulated) =
-                    Self::try_select(&state, &registry, &metrics, starvation_timeout, &kv_bias);
+                let (selection, credit_accumulated) = Self::try_select(
+                    &state,
+                    &registry,
+                    &metrics,
+                    starvation_timeout,
+                    &kv_bias,
+                    cap,
+                );
                 match selection {
                     None => {
                         if credit_accumulated {
@@ -259,9 +304,10 @@ impl DrrScheduler {
         metrics: &Metrics,
         starvation_timeout: Duration,
         kv_bias: &Arc<super::kv_bias::KvBiasHandle>,
+        cap: u32,
     ) -> (Option<(FlowId, Pending, f64)>, bool) {
         let mut s = state.inner.lock().unwrap();
-        if s.available_permits == 0 {
+        if s.max_permits - s.available_permits >= cap {
             return (None, false);
         }
 

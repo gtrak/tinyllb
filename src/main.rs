@@ -115,6 +115,7 @@ async fn main() {
         cfg.priority_policy.clone(),
         cfg.priorities.clone(),
         cfg.scheduler.kv_bias.clone(),
+        cfg.scheduler.kv_pressure.clone(),
     ));
 
     let state = gateway::AppState {

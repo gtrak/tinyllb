@@ -42,6 +42,7 @@ fn build_scheduler_with_mode(
         PriorityPolicy::default(),
         Priorities::default(),
         tinyllb::config::KvBias::default(),
+        tinyllb::config::KvPressure::default(),
     );
     Arc::new(scheduler)
 }
@@ -243,6 +244,7 @@ async fn kv_admission_decision_counter_increments() {
         PriorityPolicy::default(),
         Priorities::default(),
         tinyllb::config::KvBias::default(),
+        tinyllb::config::KvPressure::default(),
     ));
 
     // 1 accept
@@ -321,6 +323,7 @@ async fn kv_admission_delay_to_accept_transition() {
         PriorityPolicy::default(),
         Priorities::default(),
         tinyllb::config::KvBias::default(),
+        tinyllb::config::KvPressure::default(),
     ));
 
     // First request: accept immediately.
@@ -417,6 +420,7 @@ async fn kv_admission_hybrid_delay_timeout_rejected() {
         PriorityPolicy::default(),
         Priorities::default(),
         tinyllb::config::KvBias::default(),
+        tinyllb::config::KvPressure::default(),
     ));
 
     // The request should be rejected after max_wait (200ms), not hung.
@@ -470,6 +474,7 @@ async fn kv_admission_delayed_visible_in_queue_depth() {
         PriorityPolicy::default(),
         Priorities::default(),
         tinyllb::config::KvBias::default(),
+        tinyllb::config::KvPressure::default(),
     ));
 
     // Queue depth should be 0 before any admit.
@@ -551,6 +556,7 @@ async fn kv_admission_interactive_bypasses_delay() {
         PriorityPolicy::default(),
         Priorities::default(),
         tinyllb::config::KvBias::default(),
+        tinyllb::config::KvPressure::default(),
     ));
 
     let start = std::time::Instant::now();
@@ -606,6 +612,7 @@ async fn kv_admission_interactive_bypasses_reject() {
         PriorityPolicy::default(),
         Priorities::default(),
         tinyllb::config::KvBias::default(),
+        tinyllb::config::KvPressure::default(),
     ));
 
     let ticket = scheduler
@@ -653,6 +660,7 @@ async fn kv_admission_background_still_delays() {
         PriorityPolicy::default(),
         priorities.clone(),
         tinyllb::config::KvBias::default(),
+        tinyllb::config::KvPressure::default(),
     ));
 
     // Pin the flow to background (priority 10, source=1).
@@ -721,6 +729,7 @@ async fn kv_admission_background_still_rejects() {
         PriorityPolicy::default(),
         priorities.clone(),
         tinyllb::config::KvBias::default(),
+        tinyllb::config::KvPressure::default(),
     ));
 
     let flow_id = FlowId::new("bg");

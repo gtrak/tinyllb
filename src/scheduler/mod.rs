@@ -23,6 +23,7 @@ use crate::backend::BackendMonitor;
 use crate::config::CompletionBias;
 use crate::config::KvBias;
 use crate::config::KvPolicyConfig;
+use crate::config::KvPressure;
 use crate::config::Priorities;
 use crate::config::PriorityPolicy;
 use crate::flow::cadence::CadenceRegistry;
@@ -78,6 +79,7 @@ impl Scheduler {
         priority_policy: PriorityPolicy,
         priorities: Priorities,
         kv_bias: KvBias,
+        kv_pressure: KvPressure,
     ) -> Self {
         let notify = Arc::new(tokio::sync::Notify::new());
         let stall_rx = monitor.stall_receiver();
@@ -98,6 +100,11 @@ impl Scheduler {
             monitor.clone(),
             flow_progress.clone(),
         ));
+        let pressure_cap_handle = Arc::new(pressure_cap::PressureCapHandle::new(
+            kv_pressure,
+            monitor.clone(),
+        ));
+        let snapshot_rx = monitor.snapshot_receiver();
 
         let kv_policy = Arc::new(KvPolicy::new(
             &kv_config,
@@ -120,6 +127,8 @@ impl Scheduler {
             starvation_timeout,
             gate,
             kv_bias_handle,
+            pressure_cap_handle,
+            snapshot_rx,
         );
 
         let interactive_priority = priorities.interactive;
@@ -172,6 +181,7 @@ impl Scheduler {
             PriorityPolicy::default(),
             Priorities::default(),
             KvBias::default(),
+            KvPressure::default(),
         )
     }
 

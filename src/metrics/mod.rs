@@ -38,6 +38,8 @@ pub struct Metrics {
     // -- Scheduling family (DRR) --
     /// Per-flow credit gauge for DRR.  Labeled by `flow_id`.
     pub flow_credit: GaugeVec,
+    /// Current effective max_active_flows ceiling (pressure-capped).
+    pub scheduler_effective_max_flows: prometheus::Gauge,
 
     // -- Starvation protection --
     /// Observed starvation wait time per flow at force-admit (seconds).
@@ -158,6 +160,12 @@ impl Metrics {
             &["flow_id"],
         )
         .expect("llm_flow_credit should be creatable");
+
+        let scheduler_effective_max_flows = prometheus::Gauge::new(
+            "scheduler_effective_max_flows",
+            "Current effective max_active_flows ceiling (pressure-capped)",
+        )
+        .expect("scheduler_effective_max_flows should be creatable");
 
         let flow_starvation_seconds = GaugeVec::new(
             Opts::new(
@@ -320,6 +328,9 @@ impl Metrics {
             .register(Box::new(flow_credit.clone()))
             .expect("llm_flow_credit registration should succeed");
         registry
+            .register(Box::new(scheduler_effective_max_flows.clone()))
+            .expect("scheduler_effective_max_flows registration should succeed");
+        registry
             .register(Box::new(flow_starvation_seconds.clone()))
             .expect("llm_flow_starvation_seconds registration should succeed");
         registry
@@ -390,6 +401,7 @@ impl Metrics {
             errors_total,
             backpressure_rejections_total,
             flow_credit,
+            scheduler_effective_max_flows,
             flow_starvation_seconds,
             starvation_force_admits_total,
             request_events_total,

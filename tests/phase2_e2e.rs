@@ -137,6 +137,7 @@ fn build_e2e_proxy_with_config(
         PriorityPolicy::default(),
         Priorities::default(),
         tinyllb::config::KvBias::default(),
+        tinyllb::config::KvPressure::default(),
     ));
 
     let state = gateway::AppState {
