@@ -57,6 +57,41 @@ pub const METRIC_REQUESTS_RUNNING: &str = "vllm:num_requests_running";
 pub const METRIC_REQUESTS_WAITING: &str = "vllm:num_requests_waiting";
 
 // ---------------------------------------------------------------------------
+// llama.cpp metric name constants
+// ---------------------------------------------------------------------------
+// These are the well-known llama.cpp (`llama-server --metrics`) metric names.
+// If your llama.cpp version uses different names, update these constants and
+// recompile.
+//
+// Confirm against your llama-server's `/metrics` output:
+//   curl http://localhost:8000/metrics | grep llamacpp
+//
+// Note: llama.cpp does not expose a KV-usage metric (removed upstream in
+// llama.cpp#13660; re-add PR #24010 unmerged), so `found_usage` is always
+// false for llama.cpp backends and `kv_usage` stays at its 0.0 default.
+
+// `llamacpp:requests_processing` — requests currently being processed.
+pub const METRIC_LLAMACPP_REQUESTS_PROCESSING: &str = "llamacpp:requests_processing";
+
+// `llamacpp:requests_deferred` — requests deferred (queued) for processing.
+pub const METRIC_LLAMACPP_REQUESTS_DEFERRED: &str = "llamacpp:requests_deferred";
+
+// `llamacpp:prompt_tokens_total` — cumulative prefill tokens, excluding
+// cached tokens (see `METRIC_LLAMACPP_CACHED_TOKENS`).
+pub const METRIC_LLAMACPP_PROMPT_TOKENS: &str = "llamacpp:prompt_tokens_total";
+
+// `llamacpp:tokens_predicted_total` — cumulative generated (decode) tokens.
+pub const METRIC_LLAMACPP_PREDICTED_TOKENS: &str = "llamacpp:tokens_predicted_total";
+
+// `llamacpp:prompt_tokens_cached_total` — cumulative tokens served from the
+// prefix cache. Progress-only signal for the stall watchdog; no vLLM analog.
+pub const METRIC_LLAMACPP_CACHED_TOKENS: &str = "llamacpp:prompt_tokens_cached_total";
+
+// `llamacpp:n_decode_total` — every `llama_decode()` call, including prefill
+// batches. Progress-only signal for the stall watchdog; no vLLM analog.
+pub const METRIC_LLAMACPP_DECODE_CALLS: &str = "llamacpp:n_decode_total";
+
+// ---------------------------------------------------------------------------
 // Typed snapshot
 // ---------------------------------------------------------------------------
 
@@ -77,6 +112,14 @@ pub struct BackendSnapshot {
     pub requests_running: f64,
     /// Requests waiting for the engine (0 if unavailable).
     pub requests_waiting: f64,
+    /// Cumulative tokens served from the llama.cpp prefix cache (0 if
+    /// unavailable). Progress-only signal for the stall watchdog; no vLLM
+    /// analog.
+    pub cached_prompt_tokens: f64,
+    /// Cumulative `llama_decode()` calls, including prefill batches (0 if
+    /// unavailable). Progress-only signal for the stall watchdog; no vLLM
+    /// analog.
+    pub decode_calls: f64,
 }
 
 impl Default for BackendSnapshot {
@@ -89,6 +132,8 @@ impl Default for BackendSnapshot {
             prompt_tokens: 0.0,
             requests_running: 0.0,
             requests_waiting: 0.0,
+            cached_prompt_tokens: 0.0,
+            decode_calls: 0.0,
         }
     }
 }
@@ -112,6 +157,8 @@ pub struct ParseSnapshotResult {
     pub found_usage: bool,
     /// Whether the KV free metric was found in the body.
     pub found_free: bool,
+    /// Whether any llama.cpp (`llamacpp:*`) metric was found in the body.
+    pub found_llamacpp: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -157,6 +204,7 @@ pub fn parse_snapshot(body: &str) -> ParseSnapshotResult {
     let mut snapshot = BackendSnapshot::default();
     let mut found_usage = false;
     let mut found_free = false;
+    let mut found_llamacpp = false;
 
     for line in body.lines() {
         if let Some((name, value)) = parse_prometheus_line(line) {
@@ -184,6 +232,30 @@ pub fn parse_snapshot(body: &str) -> ParseSnapshotResult {
                 METRIC_REQUESTS_WAITING => {
                     snapshot.requests_waiting = value;
                 }
+                METRIC_LLAMACPP_REQUESTS_PROCESSING => {
+                    snapshot.requests_running = value;
+                    found_llamacpp = true;
+                }
+                METRIC_LLAMACPP_REQUESTS_DEFERRED => {
+                    snapshot.requests_waiting = value;
+                    found_llamacpp = true;
+                }
+                METRIC_LLAMACPP_PROMPT_TOKENS => {
+                    snapshot.prompt_tokens = value;
+                    found_llamacpp = true;
+                }
+                METRIC_LLAMACPP_PREDICTED_TOKENS => {
+                    snapshot.generation_tokens = value;
+                    found_llamacpp = true;
+                }
+                METRIC_LLAMACPP_CACHED_TOKENS => {
+                    snapshot.cached_prompt_tokens = value;
+                    found_llamacpp = true;
+                }
+                METRIC_LLAMACPP_DECODE_CALLS => {
+                    snapshot.decode_calls = value;
+                    found_llamacpp = true;
+                }
                 _ => {}
             }
         }
@@ -198,6 +270,7 @@ pub fn parse_snapshot(body: &str) -> ParseSnapshotResult {
         snapshot,
         found_usage,
         found_free,
+        found_llamacpp,
     }
 }
 
@@ -320,8 +393,11 @@ impl BackendMonitor {
         // neither the prefill nor decode token counters advance.
         let mut last_prompt_tokens: f64 = 0.0;
         let mut last_generation_tokens: f64 = 0.0;
+        let mut last_cached_tokens: f64 = 0.0;
+        let mut last_decode_calls: f64 = 0.0;
         let mut last_progress = std::time::Instant::now();
         let mut stalled = false;
+        let mut last_flavor: Option<&'static str> = None;
 
         loop {
             interval_timer.tick().await;
@@ -330,15 +406,37 @@ impl BackendMonitor {
                 Ok(response) => match response.text().await {
                     Ok(body) => {
                         let result = parse_snapshot(&body);
-                        // Only update if the KV usage metric was actually
-                        // present. An empty/partial scrape (e.g. only
-                        // python_gc_* lines) returns defaults — writing those
-                        // would overwrite the last good reading with zeros.
+                        // The flavor of the backend is identified per-scrape
+                        // by metric-name prefix (vllm: vs llamacpp:).
+                        let flavor = if result.found_usage {
+                            "vllm"
+                        } else if result.found_llamacpp {
+                            "llama-cpp"
+                        } else {
+                            "unknown"
+                        };
+                        // The KV gauges are vLLM-only: llama.cpp has no
+                        // KV-usage metric, so they must never be written for
+                        // a llama.cpp scrape.
                         if result.found_usage {
+                            metrics.vllm_kv_cache_usage.set(result.snapshot.kv_usage);
+                            metrics.vllm_kv_cache_free.set(result.snapshot.kv_free);
+                        }
+                        // Only update if the KV usage metric or any llama.cpp
+                        // metric was actually present. An empty/partial scrape
+                        // (e.g. only python_gc_* lines) returns defaults —
+                        // writing those would overwrite the last good reading
+                        // with zeros.
+                        if result.found_usage || result.found_llamacpp {
                             let snapshot = result.snapshot.clone();
                             let _ = tx.send(snapshot.clone());
-                            metrics.vllm_kv_cache_usage.set(snapshot.kv_usage);
-                            metrics.vllm_kv_cache_free.set(snapshot.kv_free);
+
+                            // Log when the detected backend flavor changes
+                            // between scrapes (e.g. backend swap).
+                            if last_flavor != Some(flavor) {
+                                tracing::info!(flavor, "detected backend metrics flavor");
+                                last_flavor = Some(flavor);
+                            }
 
                             // --- Inference stall watchdog ---
                             if !stall_timeout.is_zero() {
@@ -349,13 +447,21 @@ impl BackendMonitor {
                                     last_progress = std::time::Instant::now();
                                 }
 
+                                // `llamacpp:prompt_tokens_total` excludes cached
+                                // tokens, so on cache-heavy llama.cpp workloads
+                                // the cached and decode-call counters are the
+                                // missing progress signals.
                                 let progressed = snapshot.prompt_tokens != last_prompt_tokens
-                                    || snapshot.generation_tokens != last_generation_tokens;
+                                    || snapshot.generation_tokens != last_generation_tokens
+                                    || snapshot.cached_prompt_tokens != last_cached_tokens
+                                    || snapshot.decode_calls != last_decode_calls;
                                 if progressed {
                                     last_progress = std::time::Instant::now();
                                 }
                                 last_prompt_tokens = snapshot.prompt_tokens;
                                 last_generation_tokens = snapshot.generation_tokens;
+                                last_cached_tokens = snapshot.cached_prompt_tokens;
+                                last_decode_calls = snapshot.decode_calls;
 
                                 let now_stalled = snapshot.is_busy()
                                     && last_progress.elapsed() >= stall_timeout;
@@ -643,5 +749,106 @@ vllm:num_preemptions_total{engine="0",model_name="local"} 1.0
             "kv_free should be ~0.15, got {}",
             kv_free
         );
+    }
+
+    // ---- llama.cpp metric name tests ----
+
+    #[test]
+    fn parse_snapshot_realistic_llamacpp_metrics() {
+        // Body copied from a live `llama-server --metrics` /metrics scrape.
+        // The seven relevant lines: the six mapped gauges/counters plus
+        // n_tokens_max (not mapped to any snapshot field; must be ignored).
+        let body = r#"# HELP llamacpp:prompt_tokens_total Number of prompt tokens processed, excluding cached tokens
+# TYPE llamacpp:prompt_tokens_total counter
+llamacpp:prompt_tokens_total 77454
+# HELP llamacpp:prompt_tokens_cached_total Number of prompt tokens reused from the cache
+# TYPE llamacpp:prompt_tokens_cached_total counter
+llamacpp:prompt_tokens_cached_total 129725
+# HELP llamacpp:tokens_predicted_total Number of generation tokens processed
+# TYPE llamacpp:tokens_predicted_total counter
+llamacpp:tokens_predicted_total 1426
+# HELP llamacpp:n_decode_total Total number of llama_decode() calls, excluding speculative decoding and multimodal decoding
+# TYPE llamacpp:n_decode_total counter
+llamacpp:n_decode_total 424
+# HELP llamacpp:n_tokens_max Largest observed sequence length (prompt + generation)
+# TYPE llamacpp:n_tokens_max counter
+llamacpp:n_tokens_max 43372
+# HELP llamacpp:requests_processing Number of requests processing
+# TYPE llamacpp:requests_processing gauge
+llamacpp:requests_processing 3
+# HELP llamacpp:requests_deferred Number of requests deferred
+# TYPE llamacpp:requests_deferred gauge
+llamacpp:requests_deferred 0
+"#;
+        let result = parse_snapshot(body);
+        assert!(result.found_llamacpp, "found_llamacpp should be true");
+        assert!(!result.found_usage, "found_usage should be false");
+        assert_eq!(result.snapshot.requests_running, 3.0);
+        assert_eq!(result.snapshot.requests_waiting, 0.0);
+        assert_eq!(result.snapshot.prompt_tokens, 77454.0);
+        assert_eq!(result.snapshot.generation_tokens, 1426.0);
+        assert_eq!(result.snapshot.cached_prompt_tokens, 129725.0);
+        assert_eq!(result.snapshot.decode_calls, 424.0);
+        assert_eq!(result.snapshot.kv_usage, 0.0, "kv_usage should default to 0.0");
+        assert_eq!(result.snapshot.kv_free, 1.0, "kv_free should default to 1.0");
+    }
+
+    #[test]
+    fn parse_snapshot_mixed_families_last_wins() {
+        // A body containing both metric families. Both families write into
+        // the same snapshot fields (last-parsed-wins per field, matching the
+        // existing v0/v1 precedent): here the vllm request line overwrites
+        // the earlier llamacpp one, while the later llamacpp prompt line
+        // overwrites the earlier vllm one.
+        let body = "llamacpp:requests_processing 3\nvllm:num_requests_running 1\nvllm:prompt_tokens_total 100\nllamacpp:prompt_tokens_total 999\nvllm:gpu_cache_usage_perc 0.5\n";
+        let result = parse_snapshot(body);
+        assert!(result.found_usage, "found_usage should be true");
+        assert!(result.found_llamacpp, "found_llamacpp should be true");
+        assert_eq!(
+            result.snapshot.requests_running, 1.0,
+            "later vllm line should win for requests_running"
+        );
+        assert_eq!(
+            result.snapshot.prompt_tokens, 999.0,
+            "later llamacpp line should win for prompt_tokens"
+        );
+        assert_eq!(result.snapshot.kv_usage, 0.5);
+    }
+
+    #[test]
+    fn parse_snapshot_llamacpp_no_kv_metric() {
+        // llama.cpp exposes no KV-usage metric, so a pure llamacpp body must
+        // leave kv_usage at its 0.0 default and kv_free at 1.0 — no spurious
+        // KV pressure on llama.cpp backends.
+        let body = "llamacpp:requests_processing 2\nllamacpp:requests_deferred 1\nllamacpp:tokens_predicted_total 50\n";
+        let result = parse_snapshot(body);
+        assert!(!result.found_usage, "found_usage should stay false");
+        assert_eq!(result.snapshot.kv_usage, 0.0);
+        assert_eq!(result.snapshot.kv_free, 1.0);
+    }
+
+    #[test]
+    fn parse_snapshot_llamacpp_flavor_flags() {
+        // Each llamacpp metric line individually must set found_llamacpp
+        // (and never found_usage).
+        let bodies = [
+            "llamacpp:requests_processing 1\n",
+            "llamacpp:requests_deferred 2\n",
+            "llamacpp:prompt_tokens_total 10\n",
+            "llamacpp:tokens_predicted_total 20\n",
+            "llamacpp:prompt_tokens_cached_total 30\n",
+            "llamacpp:n_decode_total 40\n",
+        ];
+        for body in bodies {
+            let result = parse_snapshot(body);
+            assert!(
+                result.found_llamacpp,
+                "found_llamacpp should be set by {body:?}"
+            );
+            assert!(
+                !result.found_usage,
+                "found_usage must stay false for {body:?}"
+            );
+        }
     }
 }
