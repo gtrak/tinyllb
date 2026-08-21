@@ -128,6 +128,7 @@ async fn main() {
         request_timeout: cfg.request_timeout,
         stall_rx: monitor.stall_receiver(),
         retry_policy: cfg.retry_policy.clone(),
+        transient_retry: cfg.backend.transient_retry.clone(),
     };
 
     // Periodic flow eviction: remove idle flows to prevent unbounded
@@ -193,6 +194,7 @@ mod tests {
             request_timeout: None,
             stall_rx: tinyllb::backend::BackendMonitor::empty().stall_receiver(),
             retry_policy: config::RetryPolicy::default(),
+            transient_retry: config::TransientRetry::default(),
         };
         let app = create_router(state);
         let response = app

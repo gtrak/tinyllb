@@ -9,7 +9,7 @@ use std::sync::Arc;
 use url::Url;
 
 use self::proxy::proxy_handler;
-use crate::config::{Backpressure, Priorities, RetryPolicy};
+use crate::config::{Backpressure, Priorities, RetryPolicy, TransientRetry};
 use crate::flow::FlowRegistry;
 use crate::metrics::Metrics;
 use crate::scheduler::Scheduler;
@@ -33,6 +33,10 @@ pub struct AppState {
     /// backend streams and retry on fresh connections.
     pub stall_rx: tokio::sync::watch::Receiver<bool>,
     pub retry_policy: RetryPolicy,
+    /// Proxy-side re-forward of transient backend errors (llama.cpp
+    /// context-exceed + network errors from backend restart).
+    /// `max_attempts: 0` disables. See plan 007.
+    pub transient_retry: TransientRetry,
 }
 
 impl AppState {
@@ -59,6 +63,7 @@ impl AppState {
             request_timeout: None,
             stall_rx: crate::backend::BackendMonitor::empty().stall_receiver(),
             retry_policy: RetryPolicy::default(),
+            transient_retry: TransientRetry::default(),
         }
     }
 }
