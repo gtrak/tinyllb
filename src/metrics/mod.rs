@@ -54,6 +54,9 @@ pub struct Metrics {
     pub vllm_kv_cache_usage: prometheus::Gauge,
     /// KV cache free percentage reported by vLLM backend.
     pub vllm_kv_cache_free: prometheus::Gauge,
+    /// Latest KV usage fraction from the backend snapshot (vLLM gauge or
+    /// llama.cpp /slots-derived).
+    pub llm_backend_kv_pressure: prometheus::Gauge,
     /// 1 while the inference watchdog considers the backend deadlocked.
     pub llm_backend_stalled: prometheus::Gauge,
     /// Backend inference stalls detected by the watchdog.
@@ -192,6 +195,12 @@ impl Metrics {
         )
         .expect("vllm_kv_cache_free should be creatable");
 
+        let llm_backend_kv_pressure = prometheus::Gauge::new(
+            "llm_backend_kv_pressure",
+            "Latest KV usage fraction from the backend snapshot (vLLM gauge or llama.cpp /slots-derived)",
+        )
+        .expect("llm_backend_kv_pressure should be creatable");
+
         let llm_backend_stalled = prometheus::Gauge::new(
             "llm_backend_stalled",
             "1 while the inference watchdog considers the backend deadlocked (busy, no token progress)",
@@ -326,6 +335,9 @@ impl Metrics {
             .register(Box::new(vllm_kv_cache_free.clone()))
             .expect("vllm_kv_cache_free registration should succeed");
         registry
+            .register(Box::new(llm_backend_kv_pressure.clone()))
+            .expect("llm_backend_kv_pressure registration should succeed");
+        registry
             .register(Box::new(llm_backend_stalled.clone()))
             .expect("llm_backend_stalled registration should succeed");
         registry
@@ -383,6 +395,7 @@ impl Metrics {
             request_events_total,
             vllm_kv_cache_usage,
             vllm_kv_cache_free,
+            llm_backend_kv_pressure,
             llm_backend_stalled,
             backend_stall_events_total,
             kv_admission_decisions_total,

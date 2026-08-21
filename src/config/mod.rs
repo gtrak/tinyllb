@@ -59,6 +59,11 @@ pub struct Backend {
     /// disables.
     #[serde(default)]
     pub transient_retry: TransientRetry,
+    /// Whether the llama-server backend runs with `-kvu` (unified KV cache).
+    /// Mirrors the llama-server flag; selects the /slots pressure
+    /// denominator. Ignored for vLLM backends.
+    #[serde(default)]
+    pub kv_unified: bool,
 }
 
 impl Default for Backend {
@@ -68,6 +73,7 @@ impl Default for Backend {
             metrics_interval: Self::default_metrics_interval(),
             stall_timeout: Self::default_stall_timeout(),
             transient_retry: TransientRetry::default(),
+            kv_unified: false,
         }
     }
 }

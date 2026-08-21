@@ -77,6 +77,7 @@ pub fn load() -> anyhow::Result<Config> {
         .set_default("backpressure.max_wait", "10s")?
         .set_default("backpressure.retry_after_base", "1s")?
         .set_default("backend.metrics_interval", "1s")?
+        .set_default("backend.kv_unified", false)?
         .set_default("backend.transient_retry.max_attempts", 3u32)?
         .set_default("backend.transient_retry.backoff_start", "500ms")?
         .set_default("backend.transient_retry.backoff_max", "4s")?

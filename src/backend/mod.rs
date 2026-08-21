@@ -7,7 +7,6 @@
 //! only requires editing this file.  See comments for each constant.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use url::Url;
 
@@ -68,7 +67,9 @@ pub const METRIC_REQUESTS_WAITING: &str = "vllm:num_requests_waiting";
 //
 // Note: llama.cpp does not expose a KV-usage metric (removed upstream in
 // llama.cpp#13660; re-add PR #24010 unmerged), so `found_usage` is always
-// false for llama.cpp backends and `kv_usage` stays at its 0.0 default.
+// false for llama.cpp backends. KV pressure is instead derived from the
+// server's `/slots` endpoint when it runs with `--slots` (see
+// `parse_slots`); without it, `kv_usage` stays at its 0.0 default.
 
 // `llamacpp:requests_processing` — requests currently being processed.
 pub const METRIC_LLAMACPP_REQUESTS_PROCESSING: &str = "llamacpp:requests_processing";
@@ -275,6 +276,68 @@ pub fn parse_snapshot(body: &str) -> ParseSnapshotResult {
 }
 
 // ---------------------------------------------------------------------------
+// llama.cpp /slots parsing (KV pressure)
+// ---------------------------------------------------------------------------
+
+/// One slot's resident-KV contribution parsed from `/slots`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlotKv {
+    /// The slot's context capacity. Under `-kvu` (unified KV) this equals
+    /// the whole pool for every slot.
+    pub n_ctx: u64,
+    /// The slot's resident token count (0 when the slot has no current or
+    /// previous task, or after the server reclaims its KV).
+    pub n_prompt_tokens: u64,
+}
+
+/// Permissive wire shape for one `/slots` entry: `n_ctx` is optional so a
+/// slot missing it is skipped without failing the whole parse, and unknown
+/// fields are ignored.
+#[derive(serde::Deserialize)]
+struct SlotWire {
+    n_ctx: Option<u64>,
+    #[serde(default)]
+    n_prompt_tokens: u64,
+}
+
+/// Parse a llama-server `/slots` JSON body into per-slot KV counts.
+/// Returns `None` for malformed JSON, a non-array body, or an empty
+/// array. Slots missing `n_ctx` are skipped; a missing
+/// `n_prompt_tokens` counts as 0. Unknown fields are ignored.
+pub fn parse_slots(body: &str) -> Option<Vec<SlotKv>> {
+    let wire: Vec<SlotWire> = serde_json::from_str(body).ok()?;
+    if wire.is_empty() {
+        return None;
+    }
+    Some(
+        wire
+            .into_iter()
+            .filter_map(|slot| {
+                slot.n_ctx.map(|n_ctx| SlotKv {
+                    n_ctx,
+                    n_prompt_tokens: slot.n_prompt_tokens,
+                })
+            })
+            .collect(),
+    )
+}
+
+/// Derive pool utilization [0,1] from /slots data. `kv_unified` mirrors
+/// llama-server's `-kvu`: pool is the single slot n_ctx, not the sum.
+fn slots_kv_usage(slots: &[SlotKv], kv_unified: bool) -> Option<f64> {
+    let used: u64 = slots.iter().map(|s| s.n_prompt_tokens).sum();
+    let pool: u64 = if kv_unified {
+        slots.first()?.n_ctx
+    } else {
+        slots.iter().map(|s| s.n_ctx).sum()
+    };
+    if pool == 0 {
+        return None;
+    }
+    Some((used as f64 / pool as f64).clamp(0.0, 1.0))
+}
+
+// ---------------------------------------------------------------------------
 // BackendMonitor — periodic polling task
 // ---------------------------------------------------------------------------
 
@@ -347,11 +410,8 @@ impl BackendMonitor {
             // Interval of 0 means "disabled" — no background task.
             None
         } else {
-            let url = Self::metrics_url(&config.url);
             Some(tokio::spawn(Self::poll_loop(
-                url,
-                config.metrics_interval,
-                config.stall_timeout,
+                config.clone(),
                 tx,
                 stall_tx,
                 client,
@@ -374,17 +434,46 @@ impl BackendMonitor {
         url
     }
 
+    /// Build the `/slots` URL from the backend base URL.
+    fn slots_url(base: &Url) -> Url {
+        let mut url = base.clone();
+        url.set_path(&format!("{}/slots", url.path().trim_end_matches('/')));
+        url
+    }
+
+    /// Fetch `/slots` and derive pool utilization for a llama.cpp backend.
+    /// Returns `None` on any failure (HTTP error, non-success status,
+    /// malformed JSON, empty array, zero pool) so the caller leaves
+    /// `kv_usage` at its 0.0 default for this scrape.
+    async fn fetch_slots_kv_usage(
+        client: &reqwest::Client,
+        slots_url: &Url,
+        kv_unified: bool,
+    ) -> Option<f64> {
+        let response = client.get(slots_url.clone()).send().await.ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        let body = response.text().await.ok()?;
+        let slots = parse_slots(&body)?;
+        slots_kv_usage(&slots, kv_unified)
+    }
+
     /// Background polling loop.
     // @lat: [[backend#Inference Stall Watchdog]]
     async fn poll_loop(
-        url: Url,
-        interval: Duration,
-        stall_timeout: Duration,
+        config: BackendConfig,
         tx: tokio::sync::watch::Sender<BackendSnapshot>,
         stall_tx: tokio::sync::watch::Sender<bool>,
         client: reqwest::Client,
         metrics: Arc<Metrics>,
     ) {
+        let url = Self::metrics_url(&config.url);
+        let slots_url = Self::slots_url(&config.url);
+        let interval = config.metrics_interval;
+        let stall_timeout = config.stall_timeout;
+        let kv_unified = config.kv_unified;
+
         let mut interval_timer = tokio::time::interval(interval);
         interval_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -398,6 +487,11 @@ impl BackendMonitor {
         let mut last_progress = std::time::Instant::now();
         let mut stalled = false;
         let mut last_flavor: Option<&'static str> = None;
+        // Health of the llama.cpp `/slots` fetch: `None` = never worked,
+        // `Some(true)` = last scrape worked, `Some(false)` = worked before,
+        // now failing. Only good→bad transitions warn (never-working is the
+        // common case: server without `--slots`).
+        let mut last_slots_ok: Option<bool> = None;
 
         loop {
             interval_timer.tick().await;
@@ -405,7 +499,7 @@ impl BackendMonitor {
             match client.get(url.clone()).send().await {
                 Ok(response) => match response.text().await {
                     Ok(body) => {
-                        let result = parse_snapshot(&body);
+                        let mut result = parse_snapshot(&body);
                         // The flavor of the backend is identified per-scrape
                         // by metric-name prefix (vllm: vs llamacpp:).
                         let flavor = if result.found_usage {
@@ -422,6 +516,37 @@ impl BackendMonitor {
                             metrics.vllm_kv_cache_usage.set(result.snapshot.kv_usage);
                             metrics.vllm_kv_cache_free.set(result.snapshot.kv_free);
                         }
+                        // llama.cpp exposes no KV-usage /metrics; when the
+                        // scrape is llama.cpp, derive KV pressure from the
+                        // server's /slots endpoint (requires --slots). Any
+                        // failure leaves kv_usage at its 0.0 default for
+                        // this scrape.
+                        if result.found_llamacpp {
+                            let usage =
+                                Self::fetch_slots_kv_usage(&client, &slots_url, kv_unified).await;
+                            if let Some(kv_usage) = usage {
+                                result.snapshot.kv_usage = kv_usage;
+                                result.snapshot.kv_free = 1.0 - kv_usage;
+                            }
+                            let ok = usage.is_some();
+                            match (last_slots_ok, ok) {
+                                (Some(true), false) => {
+                                    tracing::warn!(
+                                        backend = %slots_url,
+                                        "backend /slots no longer available — kv_usage stays 0.0"
+                                    );
+                                    last_slots_ok = Some(false);
+                                }
+                                (Some(false), true) => {
+                                    tracing::info!("backend /slots recovered");
+                                    last_slots_ok = Some(true);
+                                }
+                                (None, true) => {
+                                    last_slots_ok = Some(true);
+                                }
+                                _ => {}
+                            }
+                        }
                         // Only update if the KV usage metric or any llama.cpp
                         // metric was actually present. An empty/partial scrape
                         // (e.g. only python_gc_* lines) returns defaults —
@@ -430,6 +555,11 @@ impl BackendMonitor {
                         if result.found_usage || result.found_llamacpp {
                             let snapshot = result.snapshot.clone();
                             let _ = tx.send(snapshot.clone());
+
+                            // Latest KV pressure from the snapshot, for both
+                            // flavors (vLLM gauge or llama.cpp
+                            // /slots-derived).
+                            metrics.llm_backend_kv_pressure.set(snapshot.kv_usage);
 
                             // Log when the detected backend flavor changes
                             // between scrapes (e.g. backend swap).
@@ -850,5 +980,153 @@ llamacpp:requests_deferred 0
                 "found_usage must stay false for {body:?}"
             );
         }
+    }
+
+    // ---- parse_slots tests ----
+
+    #[test]
+    fn parse_slots_realistic_kvunified() {
+        // 4-slot body in the verified llama-server /slots shape (-kvu):
+        // one busy slot with 168000 resident tokens, three idle slots —
+        // two keep residual n_prompt_tokens after completion, one has no
+        // n_prompt_tokens at all.
+        let body = r#"[
+          {
+            "id": 0,
+            "n_ctx": 340000,
+            "speculative": false,
+            "is_processing": true,
+            "id_task": 123,
+            "n_prompt_tokens": 168000,
+            "n_prompt_tokens_processed": 168000,
+            "n_prompt_tokens_cache": 0,
+            "params": { "temp": 0.8 },
+            "next_token": { "has_next_token": true, "has_new_line": false, "n_remain": 500, "n_decoded": 100 }
+          },
+          { "id": 1, "n_ctx": 340000, "speculative": false, "is_processing": false, "n_prompt_tokens": 1200 },
+          { "id": 2, "n_ctx": 340000, "speculative": false, "is_processing": false, "n_prompt_tokens": 300 },
+          { "id": 3, "n_ctx": 340000, "speculative": false, "is_processing": false }
+        ]"#;
+        let slots = parse_slots(body).expect("valid /slots body should parse");
+        assert_eq!(slots.len(), 4, "all four slots should be present");
+        assert_eq!(
+            slots[0],
+            SlotKv { n_ctx: 340000, n_prompt_tokens: 168000 }
+        );
+        assert_eq!(
+            slots[1],
+            SlotKv { n_ctx: 340000, n_prompt_tokens: 1200 }
+        );
+        assert_eq!(
+            slots[2],
+            SlotKv { n_ctx: 340000, n_prompt_tokens: 300 }
+        );
+        assert_eq!(
+            slots[3],
+            SlotKv { n_ctx: 340000, n_prompt_tokens: 0 },
+            "missing n_prompt_tokens should default to 0"
+        );
+    }
+
+    #[test]
+    fn parse_slots_empty_array() {
+        assert!(
+            parse_slots("[]").is_none(),
+            "empty array should be None"
+        );
+    }
+
+    #[test]
+    fn parse_slots_malformed_json() {
+        assert!(
+            parse_slots("{ not json").is_none(),
+            "malformed JSON should be None"
+        );
+    }
+
+    #[test]
+    fn parse_slots_non_array() {
+        assert!(
+            parse_slots(r#"{"id": 0, "n_ctx": 100}"#).is_none(),
+            "non-array body should be None"
+        );
+    }
+
+    #[test]
+    fn parse_slots_missing_n_prompt_tokens_defaults_zero() {
+        let body = r#"[{"id": 1, "n_ctx": 1000}]"#;
+        let slots = parse_slots(body).expect("should parse");
+        assert_eq!(
+            slots,
+            vec![SlotKv { n_ctx: 1000, n_prompt_tokens: 0 }]
+        );
+    }
+
+    #[test]
+    fn parse_slots_skips_slot_missing_n_ctx() {
+        let body = r#"[
+          {"id": 1},
+          {"id": 2, "n_ctx": 500, "n_prompt_tokens": 10}
+        ]"#;
+        let slots = parse_slots(body).expect("should parse");
+        assert_eq!(
+            slots,
+            vec![SlotKv { n_ctx: 500, n_prompt_tokens: 10 }],
+            "slot without n_ctx must be skipped"
+        );
+    }
+
+    // ---- slots_kv_usage tests ----
+
+    #[test]
+    fn slots_kv_usage_kvunified() {
+        // 168000/340000 from the verified /slots shape.
+        let slots = [SlotKv { n_ctx: 340000, n_prompt_tokens: 168000 }];
+        let usage = slots_kv_usage(&slots, true).expect("should derive usage");
+        assert!(
+            (usage - 168000.0 / 340000.0).abs() < 1e-9,
+            "expected ~0.494, got {usage}"
+        );
+        // The issue's 93% case: 168000/180000.
+        let slots = [SlotKv { n_ctx: 180000, n_prompt_tokens: 168000 }];
+        let usage = slots_kv_usage(&slots, true).expect("should derive usage");
+        assert!(
+            (usage - 168000.0 / 180000.0).abs() < 1e-9,
+            "expected ~0.9333, got {usage}"
+        );
+    }
+
+    #[test]
+    fn slots_kv_usage_nonunified() {
+        // Pool is the sum of n_ctx over all slots (2 x 1000 = 2000), so
+        // 800 resident tokens is 0.4 utilization.
+        let slots = [
+            SlotKv { n_ctx: 1000, n_prompt_tokens: 600 },
+            SlotKv { n_ctx: 1000, n_prompt_tokens: 200 },
+        ];
+        let usage = slots_kv_usage(&slots, false).expect("should derive usage");
+        assert!(
+            (usage - 0.4).abs() < 1e-9,
+            "800/2000 should be 0.4, got {usage}"
+        );
+    }
+
+    #[test]
+    fn slots_kv_usage_zero_pool() {
+        assert!(
+            slots_kv_usage(&[SlotKv { n_ctx: 0, n_prompt_tokens: 5 }], false).is_none(),
+            "zero pool (non-unified) should be None"
+        );
+        assert!(
+            slots_kv_usage(&[SlotKv { n_ctx: 0, n_prompt_tokens: 0 }], true).is_none(),
+            "zero pool (unified) should be None"
+        );
+    }
+
+    #[test]
+    fn slots_kv_usage_clamped() {
+        let slots = [SlotKv { n_ctx: 100, n_prompt_tokens: 250 }];
+        let usage = slots_kv_usage(&slots, false).expect("should derive usage");
+        assert_eq!(usage, 1.0, "tokens > pool must clamp to 1.0");
     }
 }
