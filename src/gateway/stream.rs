@@ -8,7 +8,10 @@ use futures::Stream;
 use prometheus::Counter;
 use tokio::sync::mpsc;
 
-use crate::gateway::retry::{bump_temperature, classify_frame, SseFrameParser};
+use crate::gateway::retry::{
+    bump_temperature, classify_frame, send_retry_request_with_error, transient_backoff,
+    SseFrameParser,
+};
 use crate::scheduler::lifecycle::LifecycleGuard;
 use crate::scheduler::QueueTicket;
 
@@ -304,6 +307,10 @@ pub fn spawn_retry_stream(
     let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(64);
     let metrics = state.metrics.clone();
     let policy = state.retry_policy.clone();
+    // Independent budget for mid-stream transient re-forwards (backend error
+    // frames + no-content EOF). Separate from the premature-stop
+    // `attempt`/`policy` budget below; a single request may use both budgets.
+    let transient_policy = state.transient_retry.clone();
     let client = state.client.clone();
     let request_timeout = state.request_timeout;
     let stall_rx = state.stall_rx.clone();
@@ -321,6 +328,9 @@ pub fn spawn_retry_stream(
         // Premature-stop retries (degenerate model output) have their own
         // budget with temperature bumping.
         let mut attempt: u32 = 0;
+        // Independent transient re-forward attempt counter (see
+        // `transient_policy` above). Not shared with `attempt`.
+        let mut transient_attempt: u32 = 0;
         let can_retry = forwarded_value.is_some() && policy.enabled && policy.max_retries > 0;
         let fwd_value = forwarded_value;
 
@@ -380,6 +390,52 @@ pub fn spawn_retry_stream(
                         }
                         if cls.has_tool_calls {
                             saw_tool_calls = true;
+                        }
+
+                        // Mid-stream error frame (e.g. llama.cpp KV-exhaustion /
+                        // context-shift error event). If nothing substantive has
+                        // been forwarded yet and a transient budget remains,
+                        // discard it and re-forward the original request (same
+                        // body — no temperature bump). Otherwise fall through;
+                        // the frame is forwarded by the non-terminal-delta
+                        // branch below and the stream then terminates.
+                        if cls.is_error
+                            && !saw_content
+                            && !saw_tool_calls
+                            && transient_policy.max_attempts > 0
+                            && transient_attempt < transient_policy.max_attempts
+                        {
+                            metrics.backend_retries_total.inc();
+                            transient_attempt += 1;
+                            tracing::warn!(
+                                transient_retry_attempt = transient_attempt,
+                                "mid-stream backend error frame — re-forwarding original request"
+                            );
+                            tokio::time::sleep(transient_backoff(transient_attempt, &transient_policy)).await;
+                            let send = send_retry_request_with_error(
+                                &client,
+                                &method,
+                                &backend_url,
+                                &headers,
+                                forwarded_body.clone(),
+                                request_timeout,
+                            )
+                            .await;
+                            match send {
+                                Ok(r) if r.status().is_success() => {
+                                    inner = r.bytes_stream();
+                                    continue 'retry; // fresh parser/flags (saw_content resets)
+                                }
+                                _ => {
+                                    metrics.backend_retry_exhausted_total.inc();
+                                    // Forward the error frame (current behavior)
+                                    // then abort.
+                                    if tx.send(Ok(Bytes::from(frame))).await.is_err() {
+                                        return;
+                                    }
+                                    break 'retry;
+                                }
+                            }
                         }
 
                         if let Some(ref _fr) = cls.finish_reason {
@@ -536,14 +592,47 @@ pub fn spawn_retry_stream(
                         tracing::warn!(
                             "stream ended without terminal frame after partial content/tool_calls — aborting body to avoid duplication"
                         );
+                    } else if transient_policy.max_attempts > 0
+                        && transient_attempt < transient_policy.max_attempts
+                    {
+                        // No content delivered — a transport failure (e.g.
+                        // backend connection reset mid-stream from a llama.cpp
+                        // restart). Re-forward the original request rather
+                        // than aborting.
+                        metrics.backend_retries_total.inc();
+                        transient_attempt += 1;
+                        tracing::warn!(
+                            transient_retry_attempt = transient_attempt,
+                            "mid-stream transport failure (no content yet) — re-forwarding original request"
+                        );
+                        tokio::time::sleep(transient_backoff(transient_attempt, &transient_policy)).await;
+                        let send = send_retry_request_with_error(
+                            &client,
+                            &method,
+                            &backend_url,
+                            &headers,
+                            forwarded_body.clone(),
+                            request_timeout,
+                        )
+                        .await;
+                        match send {
+                            Ok(r) if r.status().is_success() => {
+                                inner = r.bytes_stream();
+                                continue 'retry;
+                            }
+                            _ => {
+                                metrics.backend_retry_exhausted_total.inc();
+                                // fall through to break 'retry — abort
+                                // (client retries)
+                            }
+                        }
                     } else {
-                        // Nothing substantive was delivered. No in-proxy
-                        // transport retry — an abrupt termination is a
-                        // transport failure the client retries with
-                        // exponential backoff.
                         tracing::warn!(
                             "stream ended without terminal frame — aborting body, client will retry"
                         );
+                        if transient_policy.max_attempts > 0 {
+                            metrics.backend_retry_exhausted_total.inc();
+                        }
                     }
                 }
             }

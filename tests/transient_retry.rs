@@ -11,12 +11,13 @@ use axum::response::Response;
 use axum::routing::post;
 use axum::Router;
 use bytes::Bytes;
+use futures::StreamExt;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tower::ServiceExt;
 
-use tinyllb::config::{BackpressureMode, TransientRetry};
+use tinyllb::config::{BackpressureMode, RetryPolicy, TransientRetry};
 use tinyllb::flow::FlowRegistry;
 use tinyllb::gateway;
 use tinyllb::metrics;
@@ -647,4 +648,337 @@ async fn vllm_shaped_4xx_regression() {
     );
     assert_eq!(state_metrics.backend_retries_total.get() as u64, 0);
     assert_eq!(state_metrics.backend_retry_exhausted_total.get() as u64, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Mid-stream transient re-forward tests (plan 007, task 05b)
+//
+// These exercise the mid-stream integration points in `spawn_retry_stream`:
+// (A) a mid-stream backend error frame before any content is discarded and
+// the original request re-forwarded, and (B) a mid-stream transport failure
+// (EOF with no content) re-forwards the original request. The mid-stream
+// transient budget (`transient_retry`) is independent from the premature-stop
+// budget (`retry_policy`).
+// ---------------------------------------------------------------------------
+
+/// A llama.cpp mid-stream error event (top-level `error` object, no
+/// choices/finish_reason/content) delivered inside a 200 SSE stream.
+const MIDSTREAM_ERROR_SSE: &str =
+    "data: {\"error\":{\"type\":\"exceed_context_size_error\",\"n_prompt_tokens\":100,\"n_ctx\":262144}}\n\n";
+
+/// Same harness as `build_proxy_app` but with an explicit (enabled)
+/// `retry_policy` so streaming chat requests route through
+/// `spawn_retry_stream` — required to exercise the mid-stream transient
+/// re-forward code path.
+fn build_proxy_app_streaming(
+    backend_url: &str,
+    transient_retry: TransientRetry,
+    retry_policy: RetryPolicy,
+) -> (Router, Arc<tinyllb::metrics::Metrics>) {
+    let metrics = metrics::create_metrics();
+    let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
+    let scheduler = scheduler::Scheduler::new_with_defaults(
+        4,
+        metrics.clone(),
+        flow_registry.clone(),
+        BackpressureMode::Blocking,
+        100,
+        std::time::Duration::from_secs(10),
+        std::time::Duration::from_secs(1),
+    );
+    let state = gateway::AppState {
+        transient_retry,
+        retry_policy,
+        ..gateway::AppState::test_default(
+            gateway::build_client(),
+            Arc::new(url::Url::parse(backend_url).expect("valid backend URL")),
+            metrics.clone(),
+            Arc::new(scheduler),
+            flow_registry,
+        )
+    };
+
+    let gateway_router = gateway::create_router().with_state(state.clone());
+    let app = Router::new().merge(gateway_router).with_state(state);
+
+    (app, metrics)
+}
+
+fn enabled_retry_policy() -> RetryPolicy {
+    RetryPolicy {
+        enabled: true,
+        max_retries: 2,
+        temperature_step: 0.3,
+        max_temperature: 1.5,
+        default_temperature: 0.0,
+    }
+}
+
+/// Consume a response body stream, returning `(concatenated ok data, aborted)`
+/// where `aborted` is true if the stream terminated with an error. Unlike
+/// `axum::body::to_bytes` (which discards partial data on error), this
+/// preserves the data delivered before the abort so tests can assert on it.
+async fn collect_stream_with_abort(resp: Response<Body>) -> (String, bool) {
+    let mut stream = resp.into_body().into_data_stream();
+    let mut data: Vec<u8> = Vec::new();
+    let mut aborted = false;
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            Ok(b) => data.extend_from_slice(&b),
+            Err(_) => {
+                aborted = true;
+                break;
+            }
+        }
+    }
+    (String::from_utf8_lossy(&data).into_owned(), aborted)
+}
+
+/// 8. A mid-stream backend error frame (llama.cpp KV-exhaustion-style error
+/// event) arrives before any content is forwarded and a transient budget
+/// remains: the frame is discarded and the original request is re-forwarded
+/// (same body — no temperature bump). The client receives a clean
+/// content-bearing SSE stream with a single terminal [DONE], and no error
+/// frame leaks to the client.
+#[tokio::test]
+async fn midstream_error_frame_no_content_reforward() {
+    let call_count = Arc::new(AtomicU32::new(0));
+    let error_b = MIDSTREAM_ERROR_SSE.to_string();
+    let sse_b = sse_stream_body();
+
+    let cc = call_count.clone();
+    let handler = move |_req: Request<Body>| {
+        let cc = cc.clone();
+        let error_b = error_b.clone();
+        let sse_b = sse_b.clone();
+        async move {
+            let n = cc.fetch_add(1, Ordering::SeqCst);
+            let body = if n == 0 { error_b } else { sse_b };
+            let mut resp = Response::new(Body::from(body));
+            resp.headers_mut().insert(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("text/event-stream"),
+            );
+            resp
+        }
+    };
+
+    let backend_app = Router::new().route("/v1/chat/completions", post(handler));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, backend_app).await.unwrap(); });
+
+    let backend_url = format!("http://{}/", addr);
+    let (app, state_metrics) =
+        build_proxy_app_streaming(&backend_url, fast_transient_policy(2), enabled_retry_policy());
+
+    let resp = post_chat(&app, STREAM_CHAT_BODY).await;
+    assert_eq!(resp.status(), 200);
+
+    let body_bytes = collect_body_bytes(resp).await;
+    let body_str = String::from_utf8_lossy(&body_bytes);
+    assert!(
+        body_str.contains("hello"),
+        "client should receive the re-forwarded stream content"
+    );
+    assert!(
+        !body_str.contains("exceed_context_size_error"),
+        "discarded error frame must not leak to the client"
+    );
+
+    let payloads = parse_sse_data_payloads(&body_bytes);
+    let done_count = payloads.iter().filter(|p| *p == "[DONE]").count();
+    assert_eq!(done_count, 1, "exactly one terminating [DONE] frame");
+
+    assert_eq!(
+        call_count.load(Ordering::SeqCst),
+        2,
+        "backend should be called twice (initial + 1 re-forward)"
+    );
+    assert_eq!(state_metrics.backend_retries_total.get() as u64, 1);
+    assert_eq!(state_metrics.backend_retry_exhausted_total.get() as u64, 0);
+}
+
+/// 9. Mid-stream transport failure: the first response is a 200 SSE stream
+/// that ends immediately (EOF before any content — the backend dropped the
+/// connection, e.g. a llama.cpp restart). With a transient budget remaining
+/// the gateway re-forwards the original request; the client receives the
+/// clean re-forwarded SSE stream.
+#[tokio::test]
+async fn midstream_connection_reset_no_content_reforward() {
+    let call_count = Arc::new(AtomicU32::new(0));
+    let sse_b = sse_stream_body();
+
+    let cc = call_count.clone();
+    let handler = move |_req: Request<Body>| {
+        let cc = cc.clone();
+        let sse_b = sse_b.clone();
+        async move {
+            let n = cc.fetch_add(1, Ordering::SeqCst);
+            // Call 1: empty SSE body (connection died before any content).
+            let body = if n == 0 { String::new() } else { sse_b };
+            let mut resp = Response::new(Body::from(body));
+            resp.headers_mut().insert(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("text/event-stream"),
+            );
+            resp
+        }
+    };
+
+    let backend_app = Router::new().route("/v1/chat/completions", post(handler));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, backend_app).await.unwrap(); });
+
+    let backend_url = format!("http://{}/", addr);
+    let (app, state_metrics) =
+        build_proxy_app_streaming(&backend_url, fast_transient_policy(2), enabled_retry_policy());
+
+    let resp = post_chat(&app, STREAM_CHAT_BODY).await;
+    assert_eq!(resp.status(), 200);
+
+    let body_bytes = collect_body_bytes(resp).await;
+    let body_str = String::from_utf8_lossy(&body_bytes);
+    assert!(
+        body_str.contains("hello"),
+        "client should receive the re-forwarded stream content"
+    );
+
+    let payloads = parse_sse_data_payloads(&body_bytes);
+    let done_count = payloads.iter().filter(|p| *p == "[DONE]").count();
+    assert_eq!(done_count, 1, "exactly one terminating [DONE] frame");
+
+    assert_eq!(
+        call_count.load(Ordering::SeqCst),
+        2,
+        "backend should be called twice (initial + 1 re-forward)"
+    );
+    assert_eq!(state_metrics.backend_retries_total.get() as u64, 1);
+    assert_eq!(state_metrics.backend_retry_exhausted_total.get() as u64, 0);
+}
+
+/// 10. A mid-stream error frame arrives AFTER content was already forwarded:
+/// re-forwarding would duplicate content, so the frame is NOT discarded —
+/// it is forwarded (current behavior) and the stream then aborts (no
+/// terminal frame). Zero re-forwards.
+#[tokio::test]
+async fn midstream_error_after_content_aborts() {
+    let call_count = Arc::new(AtomicU32::new(0));
+    let body_b: String = [
+        "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+        MIDSTREAM_ERROR_SSE,
+    ]
+    .concat();
+
+    let cc = call_count.clone();
+    let handler = move |_req: Request<Body>| {
+        let cc = cc.clone();
+        let body_b = body_b.clone();
+        async move {
+            let _ = cc.fetch_add(1, Ordering::SeqCst);
+            let mut resp = Response::new(Body::from(body_b));
+            resp.headers_mut().insert(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("text/event-stream"),
+            );
+            resp
+        }
+    };
+
+    let backend_app = Router::new().route("/v1/chat/completions", post(handler));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, backend_app).await.unwrap(); });
+
+    let backend_url = format!("http://{}/", addr);
+    let (app, state_metrics) =
+        build_proxy_app_streaming(&backend_url, fast_transient_policy(2), enabled_retry_policy());
+
+    let resp = post_chat(&app, STREAM_CHAT_BODY).await;
+    assert_eq!(resp.status(), 200);
+
+    let (ok_str, aborted) = collect_stream_with_abort(resp).await;
+    assert!(
+        ok_str.contains("partial"),
+        "content delta must be delivered before the abort"
+    );
+    assert!(
+        aborted,
+        "stream must abort after the error frame (no terminal frame)"
+    );
+
+    assert_eq!(
+        call_count.load(Ordering::SeqCst),
+        1,
+        "content already forwarded — no re-forward (avoid duplication)"
+    );
+    assert_eq!(
+        state_metrics.backend_retries_total.get() as u64,
+        0,
+        "no re-forward once content has been forwarded"
+    );
+}
+
+/// 11. The stub always returns a mid-stream error frame then closes. With
+/// `max_attempts = 2` the transient budget is exhausted: the final error
+/// frame is forwarded (current behavior) and the stream aborts. Two
+/// re-forwards were issued and the exhausted counter increments once.
+#[tokio::test]
+async fn midstream_transient_exhaustion() {
+    let call_count = Arc::new(AtomicU32::new(0));
+    let error_b = MIDSTREAM_ERROR_SSE.to_string();
+
+    let cc = call_count.clone();
+    let handler = move |_req: Request<Body>| {
+        let cc = cc.clone();
+        let error_b = error_b.clone();
+        async move {
+            let _ = cc.fetch_add(1, Ordering::SeqCst);
+            let mut resp = Response::new(Body::from(error_b));
+            resp.headers_mut().insert(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("text/event-stream"),
+            );
+            resp
+        }
+    };
+
+    let backend_app = Router::new().route("/v1/chat/completions", post(handler));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, backend_app).await.unwrap(); });
+
+    let backend_url = format!("http://{}/", addr);
+    let (app, state_metrics) =
+        build_proxy_app_streaming(&backend_url, fast_transient_policy(2), enabled_retry_policy());
+
+    let resp = post_chat(&app, STREAM_CHAT_BODY).await;
+    assert_eq!(resp.status(), 200);
+
+    let (ok_str, aborted) = collect_stream_with_abort(resp).await;
+    assert!(
+        aborted,
+        "stream must abort after the transient budget is exhausted"
+    );
+    assert!(
+        ok_str.contains("exceed_context_size_error"),
+        "final error frame is forwarded before the abort"
+    );
+
+    assert_eq!(
+        call_count.load(Ordering::SeqCst),
+        3,
+        "backend should be called 3 times (initial + 2 re-forwards)"
+    );
+    assert_eq!(
+        state_metrics.backend_retries_total.get() as u64,
+        2,
+        "re-forward budget is max_attempts"
+    );
+    assert_eq!(
+        state_metrics.backend_retry_exhausted_total.get() as u64,
+        1,
+        "exhausted transient budget must increment backend_retry_exhausted_total"
+    );
 }
