@@ -12,12 +12,16 @@ use uuid::Uuid;
 use crate::flow::identify;
 use crate::gateway::error::ProxyError;
 use crate::gateway::stream::{MetricStream, RequestActiveGuard, send_retry_request};
+use crate::metrics::Metrics;
 use crate::scheduler::lifecycle::LifecycleGuard;
 use crate::scheduler::mode_label;
 
 use super::AppState;
 
-use crate::gateway::retry::{is_premature_stop, bump_temperature};
+use crate::gateway::retry::{
+    bump_temperature, classify_llamacpp_error, is_premature_stop, is_transient_network_error,
+    send_retry_request_with_error, transient_backoff, LlamacppErrorClass,
+};
 
 /// Maximum allowed request body size (32 MiB).
 const MAX_BODY_SIZE: u64 = 32 * 1024 * 1024;
@@ -217,6 +221,142 @@ async fn collect_response_body(
         tracing::error!(error = %e, label, "failed to read backend response body");
         ProxyError::Network(e)
     })
+}
+
+/// Build the client-facing error response for a backend error status:
+/// count 5xx errors, mark the lifecycle as completed (charges full estimated
+/// cost with 0 delivered tokens), and echo the backend body verbatim with
+/// filtered headers.
+fn build_error_response(
+    status: axum::http::StatusCode,
+    body_bytes: Bytes,
+    response_headers: &HeaderMap,
+    request_id: &str,
+    lifecycle: &LifecycleGuard,
+    metrics: &Metrics,
+) -> Response {
+    // Count 5xx errors (not 4xx — those are client errors).
+    if status.is_server_error() {
+        metrics.errors_total.inc();
+    }
+    // Backend completed (even with error status) — mark as completed
+    // with 0 delivered tokens (charges full estimated cost).
+    lifecycle.mark_completed();
+    let mut resp = Response::new(Body::from(body_bytes.to_vec()));
+    *resp.status_mut() = status;
+    *resp.headers_mut() = filter_response_headers(response_headers);
+    // Echo X-Request-ID back in response.
+    resp.headers_mut().insert(
+        axum::http::HeaderName::from_static("x-request-id"),
+        axum::http::HeaderValue::from_str(request_id).expect("valid UUID header value"),
+    );
+    resp
+}
+
+/// Outcome of the transient re-forward loop.
+enum TransientRetryOutcome {
+    /// A re-forwarded attempt returned a success status; the caller
+    /// re-derives status/headers and hands this response to the normal
+    /// dispatch. The lifecycle guard is returned unmarked so the normal
+    /// success path owns its completion.
+    Success {
+        response: reqwest::Response,
+        lifecycle: LifecycleGuard,
+    },
+    /// The final backend error (permanent, non-llama.cpp, or attempts
+    /// exhausted); return this pre-built response to the client verbatim.
+    /// The lifecycle guard was marked completed here and drops with the
+    /// `request_completed` event.
+    FinalResponse(Response),
+    /// A non-retryable or exhausted network/timeout failure. The lifecycle
+    /// guard drops as cancelled (credit restored, like the non-retried
+    /// network-error path).
+    Failed(ProxyError),
+}
+
+/// Re-forward the request to the backend until an attempt succeeds, a
+/// permanent (or non-llama.cpp) error is observed, or
+/// `state.transient_retry.max_attempts` is exhausted. Each attempt sleeps
+/// bounded exponential backoff first and re-sends the identical `body`
+/// (no temperature bump). Takes the lifecycle guard by value (it is `Send`
+/// but not `Sync`, so it cannot be borrowed across the awaits): the guard
+/// is returned on success and dropped on the final outcomes — marked
+/// completed for a final error response, cancelled for a network failure,
+/// mirroring the non-retried paths. Non-final attempts never mark the
+/// lifecycle completed. The admission ticket stays held by the caller
+/// across the loop — like the premature-stop retry, this bypasses the
+/// scheduler.
+async fn transient_retry(
+    state: &AppState,
+    method: &axum::http::Method,
+    backend_url: &url::Url,
+    headers: &HeaderMap,
+    body: Bytes,
+    request_id: &str,
+    lifecycle: LifecycleGuard,
+) -> TransientRetryOutcome {
+    let policy = &state.transient_retry;
+    let mut attempt: u32 = 0;
+    loop {
+        attempt += 1;
+        tokio::time::sleep(transient_backoff(attempt, policy)).await;
+        state.metrics.backend_retries_total.inc();
+        match send_retry_request_with_error(
+            &state.client,
+            method,
+            backend_url,
+            headers,
+            body.clone(),
+            state.request_timeout,
+        )
+        .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                return TransientRetryOutcome::Success {
+                    response: resp,
+                    lifecycle,
+                };
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                let response_headers = resp.headers().clone();
+                let body_bytes = match collect_response_body(resp, "error-response").await {
+                    Ok(b) => b,
+                    Err(e) => return TransientRetryOutcome::Failed(e),
+                };
+                match classify_llamacpp_error(&body_bytes) {
+                    // Still transient with attempts remaining: back off and
+                    // re-forward.
+                    LlamacppErrorClass::Transient if attempt < policy.max_attempts => continue,
+                    // Permanent, non-llama.cpp, or transient but exhausted:
+                    // return the error verbatim (marks lifecycle completed).
+                    _ => {
+                        return TransientRetryOutcome::FinalResponse(build_error_response(
+                            status,
+                            body_bytes,
+                            &response_headers,
+                            request_id,
+                            &lifecycle,
+                            &state.metrics,
+                        ));
+                    }
+                }
+            }
+            Err(ProxyError::Timeout) => return TransientRetryOutcome::Failed(ProxyError::Timeout),
+            Err(ProxyError::Network(e))
+                if is_transient_network_error(&e) && attempt < policy.max_attempts =>
+            {
+                continue;
+            }
+            Err(ProxyError::Network(e)) => {
+                if is_transient_network_error(&e) {
+                    state.metrics.backend_retry_exhausted_total.inc();
+                }
+                return TransientRetryOutcome::Failed(ProxyError::Network(e));
+            }
+            Err(e) => return TransientRetryOutcome::Failed(e),
+        }
+    }
 }
 
 /// Parse `usage.completion_tokens` from a JSON response body (best-effort).
@@ -421,7 +561,7 @@ pub async fn proxy_handler(
     // Create LifecycleGuard BEFORE send so connect-phase timeouts are covered.
     // If send() or the entire request times out, the guard drops as cancelled
     // (emits request_cancelled, restores credit, releases slot).
-    let lifecycle = LifecycleGuard::new(
+    let mut lifecycle = LifecycleGuard::new(
         flow_id.clone(),
         work_unit as i64,
         state.scheduler.clone(),
@@ -473,8 +613,38 @@ pub async fn proxy_handler(
     .instrument(bf_span.clone())
     .await;
 
-    let response = match response {
+    let mut response = match response {
         Ok(r) => r,
+        Err(ProxyError::Network(e))
+            if is_transient_network_error(&e) && state.transient_retry.max_attempts > 0 =>
+        {
+            // Transient network failure before any response bytes (backend
+            // restarting or briefly unreachable): re-forward the identical
+            // body with backoff. Admission slot and lifecycle guard stay
+            // held across the loop (like the premature-stop retry, this
+            // bypasses the scheduler).
+            match transient_retry(
+                &state,
+                &method,
+                &backend_url,
+                &headers,
+                forwarded_body.clone(),
+                &request_id,
+                lifecycle,
+            )
+            .await
+            {
+                TransientRetryOutcome::Success {
+                    response: r,
+                    lifecycle: guard,
+                } => {
+                    lifecycle = guard;
+                    r
+                }
+                TransientRetryOutcome::FinalResponse(resp) => return Ok(resp),
+                TransientRetryOutcome::Failed(e) => return Err(e),
+            }
+        }
         Err(ProxyError::Network(e)) => {
             // Guard drops as cancelled.
             return Err(ProxyError::Network(e));
@@ -486,39 +656,79 @@ pub async fn proxy_handler(
         Err(e) => return Err(e),
     };
 
-    let status = response.status();
+    let mut status = response.status();
     let forward_duration_ms = forward_start.elapsed().as_millis();
     bf_span.record("status", status.as_u16());
     bf_span.record("duration_ms", forward_duration_ms);
-    let response_headers = response.headers().clone();
+    let mut response_headers = response.headers().clone();
     let content_type = response_headers
         .get(axum::http::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
         .unwrap_or_default();
 
-    let is_sse = content_type.starts_with("text/event-stream");
+    let mut is_sse = content_type.starts_with("text/event-stream");
 
-    // If the backend returned an error status (4xx/5xx), collect the body and
-    // return it verbatim with filtered headers.
+    // If the backend returned an error status (4xx/5xx), collect the body;
+    // transient llama.cpp intake errors are re-forwarded, everything else is
+    // returned verbatim with filtered headers.
     if status.is_client_error() || status.is_server_error() {
-        // Count 5xx errors (not 4xx — those are client errors).
-        if status.is_server_error() {
-            state.metrics.errors_total.inc();
-        }
         let body_bytes = collect_response_body(response, "error-response").await?;
-        // Backend completed (even with error status) — mark as completed
-        // with 0 delivered tokens (charges full estimated cost).
-        lifecycle.mark_completed();
-        let mut resp = Response::new(Body::from(body_bytes.to_vec()));
-        *resp.status_mut() = status;
-        *resp.headers_mut() = filter_response_headers(&response_headers);
-        // Echo X-Request-ID back in response.
-        resp.headers_mut().insert(
-            axum::http::HeaderName::from_static("x-request-id"),
-            axum::http::HeaderValue::from_str(&request_id).expect("valid UUID header value"),
-        );
-        return Ok(resp);
+        if classify_llamacpp_error(&body_bytes) == LlamacppErrorClass::Transient
+            && state.transient_retry.max_attempts > 0
+        {
+            // Transient llama.cpp intake error (prompt fits slot capacity
+            // once the backend's transient state clears): re-forward the
+            // identical body. Admission slot and lifecycle guard stay held
+            // across the loop; non-final attempts never mark the lifecycle
+            // completed.
+            match transient_retry(
+                &state,
+                &method,
+                &backend_url,
+                &headers,
+                forwarded_body.clone(),
+                &request_id,
+                lifecycle,
+            )
+            .await
+            {
+                TransientRetryOutcome::Success {
+                    response: retry_resp,
+                    lifecycle: guard,
+                } => {
+                    // Success: re-bind the guard, re-derive from the retried
+                    // response, and fall through to the normal dispatch
+                    // below (a transient-retried success is just a normal
+                    // success).
+                    lifecycle = guard;
+                    response = retry_resp;
+                    status = response.status();
+                    response_headers = response.headers().clone();
+                    is_sse = response_headers
+                        .get(axum::http::header::CONTENT_TYPE)
+                        .and_then(|v| v.to_str().ok())
+                        .map(|s| s.to_string())
+                        .unwrap_or_default()
+                        .starts_with("text/event-stream");
+                    bf_span.record("status", status.as_u16());
+                }
+                TransientRetryOutcome::FinalResponse(resp) => return Ok(resp),
+                TransientRetryOutcome::Failed(e) => return Err(e),
+            }
+        } else {
+            // Permanent / non-llama.cpp / retry disabled: count 5xx errors,
+            // mark the lifecycle completed, and return the backend body
+            // verbatim.
+            return Ok(build_error_response(
+                status,
+                body_bytes,
+                &response_headers,
+                &request_id,
+                &lifecycle,
+                &state.metrics,
+            ));
+        }
     }
 
     // Streaming path: if SSE or body wanted streaming, use MetricStream.
