@@ -68,14 +68,23 @@ Or any OpenAI-compatible backend — e.g. llama.cpp's `llama-server` with
 metrics enabled:
 
 ```bash
-llama-server --model model.gguf --metrics --port 8000
+llama-server --model model.gguf --metrics --slots --port 8000
 ```
 
 The proxy auto-detects the backend flavor (vLLM vs llama.cpp) from the
-metric-name prefix on each `/metrics` scrape. Two llama.cpp notes:
+metric-name prefix on each `/metrics` scrape. llama.cpp notes:
 
-- `kv_policy` (admission) and `kv_bias` (selection) are **inert**: llama.cpp
-  exposes no KV-usage metric, so the monitor always reports zero KV pressure.
+- `--metrics` feeds the stall watchdog; `--slots` adds a live KV-pressure
+  signal: the proxy polls `/slots` and derives `kv_usage` from the slots'
+  resident tokens, which makes `kv_policy` (admission), `kv_bias` (selection),
+  and the `kv_pressure` cap active on that backend. Without `--slots`,
+  `kv_usage` stays 0.0 and those features remain inert.
+- Set `backend.kv_unified: true` when llama-server runs with `-kvu` (unified
+  KV pool) so the pressure denominator is the single shared pool, not the sum
+  of per-slot `n_ctx`.
+- `scheduler.kv_pressure` (disabled by default) maps KV pressure to a dynamic
+  `max_active_flows` ceiling via a threshold ladder — a soft cap: it holds new
+  admits and never preempts in-flight flows.
 - Align `scheduler.max_active_flows` with llama-server's `--parallel N` so
   the proxy admits no more concurrent flows than slots the backend can run.
 

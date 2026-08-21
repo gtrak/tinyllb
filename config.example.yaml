@@ -30,6 +30,15 @@ scheduler:
     enabled: true             # KV-cache-aware selection bias among eligible waiting flows
     bias_full_at: 0.9         # KV fraction at which the bias fully dominates selection
     pressure_below: 0.5       # KV fraction below which the bias is off (pure DRR fairness)
+  kv_pressure:                # KV-pressure-driven dynamic concurrency cap
+    enabled: false            # soft cap: holds new admits, never preempts in-flight flows
+    thresholds:               # KV fraction >= at -> cap to max_flows (min over matched,
+      - at: 0.50              #   clamped by max_active_flows)
+        max_flows: 3
+      - at: 0.80
+        max_flows: 2
+      - at: 0.95
+        max_flows: 1
 
 flows:
   default_weight: 1           # default DRR weight per flow

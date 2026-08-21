@@ -159,6 +159,7 @@ Operational and configurational boundaries that shape the design space.
 - `Retry-After` on KV-gate rejections (reject band, hybrid/failfast modes only) is computed via `fail_fast_retry_after` — the same formula as delay-timeout. In blocking mode the reject band produces no 429: requests are held in the delay band
 - `Retry-After` on delay-timeout is computed from the delayed-request count relative to the configured maximum
 - The policy operates on a single aggregate KV-usage value — per-segment or per-key granularity is not available
+- The aggregate KV-usage value is flavor-dependent: on vLLM it comes from the backend's KV-usage gauge; on llama.cpp it is derived from the server's `/slots` endpoint (requires `--slots`), so the gate is no longer inert on that backend when `/slots` is available — when `/slots` is unavailable `kv_usage` stays at 0.0 and the gate behaves as before (see [[backend#Backend KV-Cache Monitor]])
 - At exactly the delay threshold value, the request is admitted (not delayed). At exactly the reject threshold value, the request is delayed (not rejected). Strict inequality governs both comparisons
 - Underflow may wrap silently if decrement operations exceed increment operations on the delayed count
 
@@ -176,6 +177,7 @@ Admission gating is necessary because KV-cache exhaustion degrades all concurren
 
 Related concepts and source locations for KV-cache admission.
 - [[backend#Backend KV-Cache Monitor]] — provides KV-cache usage snapshots consumed by admission decisions
+- [[scheduler_policies#KV-Pressure Concurrency Cap]] — dynamic concurrency cap consuming the same aggregate KV-usage signal
 - [[metrics#Metrics Registry]] — receives admission decision records
 - [[admission#Backpressure and Admission Rejection]] — defines rejection semantics and `Retry-After` computation
 - [[scheduler#Scheduler Facade and Policy Selection]] — consumes the delayed-count for queue-depth queries

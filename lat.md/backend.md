@@ -11,10 +11,12 @@ The monitor parses raw Prometheus metrics into typed resource observations and p
 - Exposes the latest observation to multiple concurrent readers, always returning the most recent value including after channel closure.
 - Blocks callers until an observation satisfies an arbitrary condition, without distinguishing predicate-satisfied from channel-closed.
 - Publishes metric-name constants so callers can validate their own deployments.
+- For llama.cpp backends, which expose no KV-usage metric, derives KV pressure by additionally polling the server's `/slots` endpoint: usage = Σ per-slot resident tokens ÷ pool, where the pool is the single slot `n_ctx` when `backend.kv_unified` (mirroring llama-server's `-kvu`) and the sum of per-slot `n_ctx` otherwise.
+- Clones the snapshot watch receiver so consumers (e.g. the DRR admission loop) can wake on snapshot changes.
 
 ## Non-goals
 
-The monitor itself makes no admission or scheduling decisions; its only influence on scheduling is the stall signal, which downstream layers consume to reject new admissions and abort in-flight streams (see [[backend#Inference Stall Watchdog]]).
+The monitor makes no admission or scheduling decisions; it influences them only via its published observations (KV pressure consumed by admission and scheduler policies) and the stall signal (see [[backend#Inference Stall Watchdog]]).
 
 - Does not make admission or scheduling decisions directly; it only publishes observations and a stall signal.
 - Does not aggregate metrics across multiple backends.
@@ -24,14 +26,15 @@ The monitor itself makes no admission or scheduling decisions; its only influenc
 
 ## Interface
 
-The monitor exposes five contractual surfaces: parsing with presence tracking, observation publication, conditional blocking, stall-signal publication, and construction.
+The monitor exposes six contractual surfaces: parsing with presence tracking, observation publication, conditional blocking, stall-signal publication, snapshot-receiver cloning, and construction.
 
 - **Parsing**: Accepts raw Prometheus text bodies and returns a typed observation containing KV cache utilization, KV cache availability, cumulative preemption count, cumulative prompt-token and generation-token counters, engine running-request and waiting-request counts, and boolean flags indicating whether utilization and availability were present. Unknown lines are silently ignored.
 - **Observation publication**: Publishes the latest parsed observation on a watch channel. The snapshot accessor always returns the latest value, including after channel closure where the last published value is retained. Multiple readers observe concurrently without coordination.
 - **Conditional blocking**: Callers suspend until an observation satisfies a caller-supplied predicate. Terminates when the predicate is satisfied or the channel is closed; the caller cannot distinguish which caused termination.
 - **Stall signal**: `stall_receiver()` returns a `tokio::sync::watch::Receiver<bool>` that reads `true` while the inference watchdog considers the engine deadlocked; see [[backend#Inference Stall Watchdog]].
+- **Snapshot receiver**: `snapshot_receiver()` returns a clone of the snapshot watch receiver; consumers can select on its `changed()` (the DRR admission loop wakes on KV-pressure changes this way). When the monitor has no live sender (e.g. `BackendMonitor::empty()`), `changed()` returns an error immediately so callers fall back to other wake sources.
 - **Construction**: Three constructors exist. The empty constructor yields a static default observation with no background task. The receiver constructor wraps an existing watch receiver. The standard constructor returns the monitor alongside an optional background task handle; a missing handle indicates monitoring is disabled.
-- **Metrics reporting**: Each poll whose scrape contains a vLLM KV-usage metric writes utilization and availability into external Prometheus gauges. Each poll whose scrape contains the KV-usage metric or any llama.cpp metric publishes a snapshot and runs the stall watchdog (flavor-aware publish gate). A successful scrape with neither family publishes nothing and writes no gauges.
+- **Metrics reporting**: Each poll whose scrape contains a vLLM KV-usage metric writes utilization and availability into external Prometheus gauges. Each poll whose scrape contains the KV-usage metric or any llama.cpp metric publishes a snapshot, writes the `llm_backend_kv_pressure` gauge from the published snapshot (vLLM gauge or llama.cpp `/slots`-derived), and runs the stall watchdog (flavor-aware publish gate). On llama.cpp scrapes the monitor additionally fetches `{base}/slots` to derive KV pressure before publishing. A successful scrape with neither family publishes nothing and writes no gauges.
 
 ## Invariants
 
@@ -42,6 +45,8 @@ Published observations maintain mathematical consistency under defined condition
 - The default observation always represents zero resource pressure: utilization = 0, availability = 1.0, preemptions = 0, and all token counters and request counts = 0.
 - Monitoring errors never produce new observations; the last known observation is preserved.
 - Both utilization name variants (v0 and v1) map to the same semantic field; the last-parsed value prevails.
+- **llama.cpp KV pressure is /slots-derived**: on llama.cpp scrapes, `kv_usage` is set from the `/slots` fetch when it succeeds — Σ per-slot `n_prompt_tokens` ÷ pool, clamped to `[0,1]`, with `kv_free = 1.0 − kv_usage` — and stays at its 0.0/1.0 defaults for the scrape on any failure (endpoint absent, HTTP error, malformed JSON, empty array, zero pool), so downstream KV-aware consumers stay inert at zero pressure.
+- **/slots health logs on transitions only**: a working→failing `/slots` transition logs a warning and a failing→working transition logs recovery; a server that never worked (the common case without `--slots`) is never warned about.
 
 ## Constraints
 
@@ -52,6 +57,8 @@ The monitor operates within the limits of the Prometheus scraping model and HTTP
 - Polling cadence is fixed per configuration; adaptive intervals are not supported.
 - A zero polling interval disables monitoring entirely, leaving the monitor in static-default mode.
 - Metric values are not range-checked; values outside `[0..1]` are accepted without validation.
+- The llama.cpp pressure source requires llama-server to be started with `--slots`; endpoint absence is tolerated — `kv_usage` stays 0.0, downstream KV-aware features remain inert, and a working→failing transition logs one warning.
+- The `backend.kv_unified` flag must mirror llama-server's `-kvu`: under a unified pool every slot reports the full pool as its `n_ctx`, so summing per-slot `n_ctx` as the denominator would understate pressure by the parallelism factor. Ignored for vLLM backends.
 
 ## Rationale
 
@@ -72,6 +79,8 @@ Concepts and source files related to the backend KV-cache monitor.
 - Source: `[[src/backend/mod.rs]]`
 - Concept: The vLLM backend metrics endpoint providing Prometheus-format data scraped by this monitor
 - Concept: `[[admission#KV-Cache-Aware Admission Gate]]`
+- Concept: `[[scheduler_policies#KV-Cache-Aware Selection Bias]]` — selection bias consuming the same pressure signal
+- Concept: `[[scheduler_policies#KV-Pressure Concurrency Cap]]` — dynamic concurrency cap consuming the derived `kv_usage`
 
 # Backend Metrics Parsing
 
@@ -158,7 +167,7 @@ The parser guarantees deterministic derivation, precedence, and flavor rules acr
 - **Dual usage names unify**: Both v0 and v1 usage metric names write to the same usage quantity in the snapshot. No distinction is preserved about which engine variant supplied the value.
 - **Last occurrence wins across families**: When multiple lines map to the same snapshot field — including both a vLLM and a llama.cpp line for the same field (e.g. `vllm:prompt_tokens_total` and `llamacpp:prompt_tokens_total`) — the last parsed value overwrites the field. Earlier occurrences are discarded without indication.
 - **Flavor is per-scrape**: The backend flavor is identified on every scrape from the metric-name prefixes present in the body (`vllm:` vs `llamacpp:`); a scrape containing neither family yields `found_usage` and `found_llamacpp` both false. The monitor logs when the detected flavor changes between scrapes (e.g. a backend swap).
-- **KV gauges are vLLM-only**: llama.cpp exposes no KV-usage metric, so `kv_usage` stays at its 0.0 default and `kv_free` at its 1.0 default on llama.cpp scrapes; no spurious KV pressure is ever derived, and `kv_policy`/`kv_bias` are gracefully inert on llama.cpp backends.
+- **KV gauges are vLLM-only in /metrics**: llama.cpp exposes no KV-usage metric in `/metrics`, so the vLLM KV gauges are never written for llama.cpp scrapes; the monitor instead derives `kv_usage` (with `kv_free = 1.0 − kv_usage`) from the server's `/slots` endpoint when available (see [[backend#Backend KV-Cache Monitor]]), and retains the 0.0/1.0 defaults when `/slots` fails, so `kv_policy`/`kv_bias` stay inert at zero pressure.
 - **Flavor-aware publish gate**: A scrape publishes a snapshot only when `found_usage || found_llamacpp`; a scrape with neither family publishes nothing and writes no KV gauges, so partial scrapes never overwrite the last good reading with zeros.
 - **Preemption truncation**: Preemption values are truncated toward zero. Fractional preemption values from the backend produce integer counts in the snapshot. llama.cpp exposes no preemption counter, so preemptions stays zero on llama.cpp backends.
 - **Disabled monitor baseline**: A disabled monitor — constructed via the disabled constructor or a zero-interval polling constructor — always returns the default snapshot: zero usage, one free, and zero token counters and request counts.

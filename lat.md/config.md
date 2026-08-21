@@ -29,11 +29,12 @@ The configuration surface presents contractual guarantees about what values are 
 
 **Configuration components**
 
-- **Backend specification** requires an absolute URL with scheme and a metrics poll interval; defaults are `http://localhost:8000` and `1s`.
+- **Backend specification** requires an absolute URL with scheme and a metrics poll interval; defaults are `http://localhost:8000` and `1s`. It also declares `kv_unified` (default `false`), which mirrors llama-server's `-kvu` flag and selects the `/slots` pressure denominator for llama.cpp backends (ignored for vLLM).
 - **Scheduling discipline** is fixed to deficit round robin (DRR); the discipline is not configurable — the configuration surface exposes no scheduling-algorithm choice.
 - **Scheduler limits** declare `max_active_flows` (default `4`) and `starvation_timeout` (default `300s`).
 - **Completion bias** controls admission gating for new flows: `enabled` (default `true`), `target_active_flows` (default `0`, meaning "use `max_active_flows`"), and `predictive_admit` (default `false`).
 - **KV-cache-aware selection bias** controls scheduler selection reordering under pressure: `enabled` (default `true`), `bias_full_at` (default `0.9`, pressure at which footprint fully dominates selection), and `pressure_below` (default `0.5`, pressure below which the bias is inactive and selection is purely fair). Never rejects. See [[scheduler_policies#KV-Cache-Aware Selection Bias]].
+- **KV-pressure concurrency cap** declares a dynamic `max_active_flows` ceiling under KV pressure: `enabled` (default `false`) and a `thresholds` ladder of `{ at, max_flows }` pairs — an entry matches when pressure >= `at`, and the effective cap is the minimum of `max_flows` over all matched entries, clamped by `max_active_flows`. Soft cap: holds new admits, never preempts. Disabled by default (zero behavioral change). See [[scheduler_policies#KV-Pressure Concurrency Cap]].
 - **Flow defaults** declare `default_weight` (default `1.0`) and `default_priority` (default `50`).
 - **Priority classes** declare `interactive` (default `100`), `agent` (default `50`), and `background` (default `10`).
 - **Backpressure** declares a mode (`blocking`, `failfast`, `hybrid`; default `blocking`), `max_queue_depth` (default `100`), `max_wait` (default `10s`), `retry_after_base` (default `1s`), and a nested `kv_policy` sub-policy (documented below). Nesting the KV gate under backpressure makes it structurally inherit the hold-vs-reject contract from `mode` by construction rather than by parameter threading.
@@ -79,6 +80,7 @@ These limitations are inherent to the configuration model.
 - When backpressure mode is `blocking`, no positive-threshold constraints apply; zero values for queue depth and wait time are valid.
 - When `backpressure.kv_policy.enabled` is `true`, thresholds must satisfy: `reject_threshold` in `(0, 1]`, `delay_threshold` in `[0, 1]`, and `delay_threshold` strictly less than `reject_threshold`. When `enabled` is `false`, these thresholds are not validated.
 - A top-level `kv_policy:` key is rejected at load with a migration message: the KV policy now lives under `backpressure.kv_policy`. This guard exists so the removed top-level key is never silently ignored.
+- When `scheduler.kv_pressure.enabled` is `true`, `thresholds` must be non-empty, every `at` must be in `[0, 1]` and strictly ascending, and every `max_flows` must be in `[1, max_active_flows]`. When `enabled` is `false`, the ladder is not validated.
 - When `retry_policy.enabled` is `true`, `max_retries` must be > 0, `temperature_step` must be > 0.0, `max_temperature` must be >= `default_temperature`, and `max_temperature` must be <= 2.0. When `enabled` is `false`, these fields are not validated.
 - When `backend.transient_retry.max_attempts` is greater than zero, `backoff_start` must be strictly positive and `backoff_max` must be >= `backoff_start`. When `max_attempts` is zero, these fields are not validated.
 - `agentic_confirmed_threshold` must be strictly greater than `agentic_suspected_threshold`, and `agentic_suspected_threshold` must be at least 1. These constraints are validated regardless of the `enabled` flag.
@@ -124,6 +126,8 @@ This section lists related concepts and source references for the configuration 
 - [[src/config/mod.rs#Metrics]] — metrics endpoint configuration
 - [[src/config/mod.rs#Server]] — server bind address configuration
 - [[src/config/mod.rs#KvPolicyConfig]] — KV-cache admission policy configuration
+- [[src/config/mod.rs#KvPressure]] — KV-pressure concurrency cap configuration (threshold ladder)
+- [[scheduler_policies#KV-Pressure Concurrency Cap]] — dynamic cap behavior governed by the kv_pressure ladder
 - [[src/config/mod.rs#RetryPolicy]] — premature-stop retry policy configuration
 - [[src/config/mod.rs#TransientRetry]] — transient backend-error re-forward policy configuration
 - [[src/config/mod.rs#PriorityPolicy]] — priority heuristic policy configuration

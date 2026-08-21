@@ -322,6 +322,84 @@ Cross-concept links and source references for the KV-cache-aware selection bias.
 - [[scheduler_policies#KV-Cache-Aware Selection Bias]] — configuration
 - [[src/scheduler/kv_bias.rs#KvBiasHandle]] — bias implementation
 - [[src/scheduler/priority.rs]] — `FlowCandidate`, `select_best`, `cmp_fair`
+- [[scheduler_policies#KV-Pressure Concurrency Cap]] — dynamic cap on the same pressure signal
+
+# KV-Pressure Concurrency Cap
+
+Maps the backend's KV pressure to an effective `max_active_flows` ceiling so the scheduler admits fewer concurrent flows under KV pressure. Soft cap: it holds new admits, never preempts in-flight flows. Disabled by default.
+
+## Purpose
+
+Shrink active concurrency as KV pressure rises, so in-flight work gets more KV budget to finish without anything being aborted.
+
+- Maps the backend's global KV pressure — snapshot `kv_usage` from [[backend#Backend KV-Cache Monitor]] — to an effective active-flow ceiling.
+- DRR's admission loop grants permits only while `active < effective cap`; the same check bounds the starvation force-admit path.
+- In-flight requests are never aborted; when the cap drops below the active count, the system drains to the cap as requests complete.
+- The cap is evaluated once per admission round, mirroring the pressure read in [[scheduler_policies#KV-Cache-Aware Selection Bias]].
+- Exposes a `scheduler_effective_max_flows` gauge (see [[metrics#Metric Family Contracts]]).
+
+## Non-goals
+
+This cap is not an admission-control mechanism.
+
+- Does not reject, delay, or 429 any request (contrast [[admission#KV-Cache-Aware Admission Gate]]); requests simply wait in the DRR waiting set while the cap binds.
+- Does not preempt or abort in-flight flows — it only lowers the ceiling for new admits.
+- Is not a replacement for the KV admission gate: the gate holds/rejects on pressure bands; the cap only bounds concurrency.
+- Does not change the configured `max_active_flows`; the effective cap never exceeds it.
+
+## Interface
+
+The handle ([`PressureCapHandle`](src/scheduler/pressure_cap.rs)) is constructed in [`Scheduler::new`](src/scheduler/mod.rs) from the `KvPressure` config ([[src/config/mod.rs#KvPressure]]) and the backend monitor (used only as a pressure source), then passed into the DRR admission loop.
+
+- `pressure() -> f64` reads the latest backend snapshot's `kv_usage`, clamped to `[0,1]` (0.0 when no snapshot is available).
+- `effective_max(max_active_flows, pressure) -> u32` — pure: `min(max_active_flows, min over thresholds with pressure >= at of max_flows)`; returns `max_active_flows` when disabled or no threshold matches.
+- `effective(max_active_flows) -> u32` — convenience: reads live pressure and returns the effective cap.
+- DRR permit condition becomes `active < effective_cap`, replacing the static `available_permits > 0` gate; the same check guards `try_select`'s early return, which also covers the starvation force-admit path.
+- Wake sources: the admission loop's outer wait selects on the completion notify **and** the monitor snapshot `changed()` (from `BackendMonitor::snapshot_receiver()`), so a pressure *drop* reopens admissions within one `metrics_interval` without a completion; a pressure *rise* stops new admits on the next tick. A closed snapshot channel (e.g. `BackendMonitor::empty()` in tests) falls back to notify-only waits instead of busy-spinning.
+- Gauge: `scheduler_effective_max_flows` is updated when the effective cap changes across admission rounds (see [[metrics#Metric Family Contracts]]).
+
+## Invariants
+
+The cap bounds new admits only; it never mutates permit accounting or in-flight state.
+
+- **Disabled ⇒ identical behavior:** when `enabled` is false (or the ladder is empty), the effective cap is always `max_active_flows` and admission behavior is unchanged.
+- **In-flight never aborted:** the cap only limits new permit grants; active flows keep their permits until ticket release.
+- **Cap never exceeds `max_active_flows`:** every ladder rung is clamped by `max_active_flows` in `effective_max`.
+- **Evaluated once per admission round:** the cap is re-read at each round; no mid-round re-evaluation.
+- **Force-admit also bounded:** the starvation force-admit path passes through `try_select`'s `active < cap` check, so it cannot exceed the effective cap.
+- **Drain to cap:** when the cap drops below the active count, active flows only decrease, as permits are released on completion.
+
+## Constraints
+
+The cap's responsiveness and accuracy are bounded by the monitor's scrape model.
+
+- Pressure staleness is bounded by one `backend.metrics_interval` scrape; cap changes take effect within ~one interval in both directions.
+- The llama.cpp pressure source requires llama-server to run with `--slots` (see [[backend#Backend KV-Cache Monitor]]); without it `kv_usage` stays 0.0 and the cap is inert.
+- `backend.kv_unified` must mirror llama-server's `-kvu` flag; under a unified pool every slot reports the full pool as its `n_ctx`, so using Σ `n_ctx` as the denominator would mis-scale (understate) pressure by the parallelism factor.
+- The pressure source is the same snapshot `kv_usage` shared by [[admission#KV-Cache-Aware Admission Gate]] and [[scheduler_policies#KV-Cache-Aware Selection Bias]] — one scrape feeds all three consumers.
+
+## Rationale
+
+Reducing concurrency under pressure lets in-flight flows finish without exhausting the KV pool, instead of holding a near-full slot while new work queues behind it.
+
+- A soft cap (no preemption) was chosen because llama.cpp has no KV preemption or session resume; aborting a long request would discard its entire KV investment.
+- A threshold ladder, rather than a continuous curve, gives operators explicit concurrency bands at known pressure levels.
+- The min-over-matched-thresholds rule makes the ladder monotone: a higher pressure band can never raise the cap relative to a lower one.
+- Reusing the monitor snapshot and its `changed()` wake lets a pressure drop reopen admissions within one scrape interval, without needing a completion to unblock the loop.
+- Disabled by default: existing deployments see zero behavioral change until a ladder is explicitly configured.
+
+## Related
+
+Cross-concept links and source references for the KV-pressure concurrency cap.
+
+- [[admission#KV-Cache-Aware Admission Gate]] — complementary hold/reject gate consuming the same pressure source
+- [[scheduler_policies#KV-Cache-Aware Selection Bias]] — selection reordering under the same pressure signal
+- [[scheduler#Deficit Round Robin Discipline]] — DRR admission loop where the cap is enforced
+- [[backend#Backend KV-Cache Monitor]] — pressure source (snapshot `kv_usage`, `/slots` derivation)
+- [[metrics#Metric Family Contracts]] — `scheduler_effective_max_flows` gauge
+- [[src/scheduler/pressure_cap.rs#PressureCapHandle]] — cap implementation
+- [[src/config/mod.rs#KvPressure]] — cap configuration and threshold ladder
+
 
 # Request Lifecycle and Credit Restoration
 

@@ -36,7 +36,7 @@ The public contract consists of a metrics value with exposed collectors, multipl
 
 - Each exposed collector is a live metric whose name and label dimensions are fixed for the lifetime of the value.
 - The metrics value exposes its own registry as a public surface; external consumers read directly from it.
-- The collector set includes queue, throughput, backend, backpressure, scheduling, starvation, lifecycle, KV-cache, priority-heuristic, premature-stop retry, backend retry, and backend-stall families.
+- The collector set includes queue, throughput, backend, backpressure, scheduling, starvation, lifecycle, KV-cache, KV pressure, priority-heuristic, premature-stop retry, backend retry, and backend-stall families.
 
 **Construction paths.**
 
@@ -50,10 +50,10 @@ The public contract consists of a metrics value with exposed collectors, multipl
 - **Throughput family**: cumulative token generation count and approximate tokens-per-second rate.
 - **Backend family**: active request depth and server-error count (5xx and network errors only; 4xx client errors excluded).
 - **Backpressure family**: rejection counts categorized by backpressure mode.
-- **Scheduling family**: per-flow scheduling credit (labeled by flow identity).
+- **Scheduling family**: per-flow scheduling credit (labeled by flow identity) and `scheduler_effective_max_flows` (the pressure-capped effective active-flow ceiling).
 - **Starvation family**: per-flow starvation-wait observation (labeled by flow identity) and total forced-admission count.
 - **Lifecycle family**: request-event counter (labeled by event type: request_started, token_received, request_completed, request_cancelled).
-- **KV-cache family**: cache usage percentage, free percentage, and admission-decision count (labeled by decision: accept, delay, reject).
+- **KV-cache family**: cache usage percentage, free percentage, and admission-decision count (labeled by decision: accept, delay, reject); plus `llm_backend_kv_pressure`, the flavor-agnostic latest snapshot KV-usage fraction (vLLM gauge or llama.cpp `/slots`-derived).
 - **Backend stall family**: `llm_backend_stalled` gauge (1 while the inference watchdog considers the backend deadlocked) and `tinyllb_backend_stall_events_total` counter of watchdog-detected stalls; stall semantics documented in [[backend#Inference Stall Watchdog]].
 - **Premature-stop retry family**: premature stop detection counter, retry requests issued counter, and degenerate-turn-forwarded counter. In the streaming path, the exhausted counter is also incremented when a retry HTTP failure forces fail-open.
 - **Backend retry family**: `tinyllb_backend_retries_total` counter of transient backend-error re-forwards issued and `tinyllb_backend_retry_exhausted_total` counter of exhausted retry budgets; semantics documented in [[gateway#Transient Backend-Error Re-forward]].
@@ -140,6 +140,7 @@ Cross-concept links and source locations for the metrics registry and its consum
 - [[admission#Backpressure and Admission Rejection]] — backpressure policy whose rejection counts are recorded here
 - [[admission#KV-Cache-Aware Admission Gate]] — cache management whose utilization and admission decisions are exposed here
 - [[scheduler#Scheduler Facade and Policy Selection]] — scheduling logic whose fairness is measured by queue, starvation, and credit metrics
+- [[scheduler_policies#KV-Pressure Concurrency Cap]] — dynamic cap whose ceiling is exposed via `scheduler_effective_max_flows`
 - [[flow#Flow Registry and State]] — flow identity tracking whose queue depth and wait-time are measured here
 
 # Prometheus Export Endpoint
@@ -237,7 +238,7 @@ Metrics families provide a structured, cross-task view of system health and perf
 - Queue family tracks per-flow wait depth, latency, and active concurrency.
 - Throughput family tracks cumulative token output and approximate instantaneous rate.
 - All collectors share one registry, making every metric family available to every task without additional wiring.
-- Additional metric families beyond the three primary groups reside in the same registry (backpressure, scheduling, starvation protection, request lifecycle, KV cache, priority heuristic, premature-stop retry, backend retry, and backend stall).
+- Additional metric families beyond the three primary groups reside in the same registry (backpressure, scheduling, starvation protection, request lifecycle, KV cache, KV pressure/dynamic cap, priority heuristic, premature-stop retry, backend retry, and backend stall).
 - Priority heuristic family tracks per-flow priority class, cadence state-machine state, priority source events, and inter-request gap distribution for turn-boundary classification diagnostics.
 - Premature-stop retry family tracks premature-stop detections, retry attempts issued, and degenerate turns forwarded after retries are exhausted.
 - Backend stall family tracks the watchdog's deadlocked-engine gauge and the count of detected stall events; see [[backend#Inference Stall Watchdog]].
@@ -311,6 +312,11 @@ The interface provides construction surfaces, a scrape endpoint, and metric fami
 - `tinyllb_backend_retries_total` — Monotonically increasing counter of transient backend-error re-forwards issued by the gateway; incremented once per re-forward attempt.
 - `tinyllb_backend_retry_exhausted_total` — Monotonically increasing counter of requests whose transient retry budget was exhausted: the final error is still transient after all attempts, or the final network failure is transient. Permanent and non-llama.cpp errors are never counted here. See [[gateway#Transient Backend-Error Re-forward]].
 
+**KV pressure / dynamic cap family.**
+
+- `llm_backend_kv_pressure` — Gauge of the latest KV usage fraction from the backend snapshot (vLLM KV gauge or llama.cpp `/slots`-derived); written on every published scrape, for both flavors. See [[backend#Backend KV-Cache Monitor]] for the derivation.
+- `scheduler_effective_max_flows` — Gauge of the effective, pressure-capped `max_active_flows` ceiling; updated by the DRR admission loop whenever the effective cap changes across admission rounds. See [[scheduler_policies#KV-Pressure Concurrency Cap]].
+
 ## Invariants
 
 The following statements hold regardless of implementation details.
@@ -320,7 +326,7 @@ The following statements hold regardless of implementation details.
 - `vllm_requests_active` equals dispatched requests minus completed requests; its value reflects in-flight backend requests.
 - `vllm_errors_total` excludes client errors (4xx); only server errors and network failures contribute.
 - `llm_queue_depth` equals requests admitted to the scheduler minus requests granted admission; it reflects pending demand per flow.
-- `llm_active_flows` is bounded above by the scheduler's admission capacity, because each active flow consumes one admission slot.
+- `llm_active_flows` is bounded above by the scheduler's admission capacity, because each active flow consumes one admission slot. The pressure-capped effective ceiling only bounds *new* admits: `llm_active_flows` may transiently exceed `scheduler_effective_max_flows` after the cap drops and then drain to it as flows complete.
 - `llm_tokens_per_second` is derived from `llm_tokens_generated_total` at periodic intervals; it approximates instantaneous throughput, not an exact rate.
 
 ## Constraints
