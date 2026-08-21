@@ -1,4 +1,5 @@
-use crate::config::RetryPolicy;
+use crate::config::{RetryPolicy, TransientRetry};
+use crate::gateway::error::ProxyError;
 use serde_json::Value;
 
 // ---------------------------------------------------------------------------
@@ -298,6 +299,145 @@ impl SseFrameParser {
         }
 
         None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// llama.cpp intake error classification (plan 007, task 04)
+// ---------------------------------------------------------------------------
+
+/// Classification of a backend error body for transient re-forwarding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlamacppErrorClass {
+    /// The body is not a recognizable llama.cpp intake error (vLLM-shaped
+    /// error, malformed JSON, or missing the token counts). Never retried.
+    NotLlamacpp,
+    /// llama.cpp `exceed_context_size_error` with
+    /// `n_prompt_tokens >= n_ctx` — the prompt cannot fit slot capacity;
+    /// permanent, passes through unchanged.
+    Permanent,
+    /// llama.cpp `exceed_context_size_error` with
+    /// `n_prompt_tokens < n_ctx` — the prompt fits slot capacity once the
+    /// backend's transient state (e.g. restart) clears; safe to re-forward
+    /// the identical body.
+    Transient,
+}
+
+/// Classify a backend error body for transient re-forwarding.
+///
+/// Only llama.cpp's `error.type == "exceed_context_size_error"` (with both
+/// `n_prompt_tokens` and `n_ctx` present as integers) is classified; the
+/// `type` field is the reliable discriminator (the message string is never
+/// matched). Everything else — including malformed JSON — is
+/// [`LlamacppErrorClass::NotLlamacpp`].
+pub fn classify_llamacpp_error(body: &[u8]) -> LlamacppErrorClass {
+    let value = match serde_json::from_slice::<Value>(body) {
+        Ok(v) => v,
+        Err(_) => return LlamacppErrorClass::NotLlamacpp,
+    };
+    let error = match value.get("error").and_then(|e| e.as_object()) {
+        Some(e) => e,
+        None => return LlamacppErrorClass::NotLlamacpp,
+    };
+    // The `type` field is the reliable discriminator.
+    if error.get("type").and_then(|t| t.as_str()) != Some("exceed_context_size_error") {
+        return LlamacppErrorClass::NotLlamacpp;
+    }
+    match (
+        error.get("n_prompt_tokens").and_then(|v| v.as_i64()),
+        error.get("n_ctx").and_then(|v| v.as_i64()),
+    ) {
+        (Some(prompt_tokens), Some(ctx)) => {
+            if prompt_tokens < ctx {
+                LlamacppErrorClass::Transient
+            } else {
+                LlamacppErrorClass::Permanent
+            }
+        }
+        // Missing or non-integer counts: unclassifiable.
+        _ => LlamacppErrorClass::NotLlamacpp,
+    }
+}
+
+/// Returns `true` for network failures that are expected to clear on their
+/// own while the request is still re-forwardable — i.e. the backend is
+/// restarting or briefly unreachable under live traffic:
+///
+/// - connect-phase failures (connection refused, DNS, connect timeout),
+/// - a connection that died mid-flight, surfaced in the error's source
+///   chain as an io error: reset / aborted / refused / broken pipe /
+///   unexpected EOF.
+///
+/// Conservative: request-build, redirect, and body/decode errors are never
+/// transient, and response-phase timeouts are not network errors at all.
+pub fn is_transient_network_error(e: &reqwest::Error) -> bool {
+    // Connect-phase failure (refused, DNS, connect timeout).
+    if e.is_connect() {
+        return true;
+    }
+    // Walk the source chain for an io::Error with a "the connection died"
+    // kind (reqwest/hyper surface connection-level failures this way).
+    let mut source: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(e);
+    while let Some(s) = source {
+        if let Some(io_err) = s.downcast_ref::<std::io::Error>() {
+            if matches!(
+                io_err.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::UnexpectedEof
+            ) {
+                return true;
+            }
+        }
+        source = s.source();
+    }
+    false
+}
+
+/// Bounded exponential backoff for a 1-based transient re-forward attempt:
+/// `min(backoff_start * 2^(attempt-1), backoff_max)`.
+pub fn transient_backoff(attempt: u32, policy: &TransientRetry) -> std::time::Duration {
+    let mut delay = policy.backoff_start;
+    for _ in 0..attempt.saturating_sub(1) {
+        delay = delay.saturating_mul(2);
+        if delay >= policy.backoff_max {
+            return policy.backoff_max;
+        }
+    }
+    delay
+}
+
+/// Re-issue a request to the backend, propagating the send error.
+///
+/// Behaves like the premature-stop reissue helper (clones headers, strips
+/// `Content-Length` so the transport recomputes it from the body, applies
+/// the optional per-attempt timeout), but returns the actual
+/// [`reqwest::Error`] — or [`ProxyError::Timeout`] on attempt timeout — so
+/// the caller can classify transient network failures.
+pub async fn send_retry_request_with_error(
+    client: &reqwest::Client,
+    method: &axum::http::Method,
+    backend_url: &url::Url,
+    headers: &axum::http::HeaderMap,
+    body: bytes::Bytes,
+    request_timeout: Option<std::time::Duration>,
+) -> Result<reqwest::Response, ProxyError> {
+    let mut rh = headers.clone();
+    rh.remove(axum::http::header::CONTENT_LENGTH);
+    let mut rb = client
+        .request(method.clone(), backend_url.clone())
+        .body(body);
+    for (n, v) in rh.iter() {
+        rb = rb.header(n, v);
+    }
+    match request_timeout {
+        Some(t) => match tokio::time::timeout(t, rb.send()).await {
+            Ok(x) => x.map_err(ProxyError::Network),
+            Err(_) => Err(ProxyError::Timeout),
+        },
+        None => rb.send().await.map_err(ProxyError::Network),
     }
 }
 
@@ -790,5 +930,113 @@ mod tests {
         // Must not panic; temperature becomes null (or finite), other fields preserved.
         let out = bump_temperature(&body, 1, &policy);
         assert_eq!(out["messages"], body["messages"]);
+    }
+
+    // ---- classify_llamacpp_error tests ----
+
+    fn ctx_error_body(prompt: i64, ctx: i64) -> Vec<u8> {
+        serde_json::json!({
+            "error": {
+                "code": 400,
+                "type": "exceed_context_size_error",
+                "message": "Prompt is too long",
+                "n_prompt_tokens": prompt,
+                "n_ctx": ctx
+            }
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    #[test]
+    fn classify_llamacpp_transient_when_prompt_fits() {
+        assert_eq!(
+            classify_llamacpp_error(&ctx_error_body(100_000, 262_144)),
+            LlamacppErrorClass::Transient
+        );
+    }
+
+    #[test]
+    fn classify_llamacpp_permanent_when_prompt_exceeds() {
+        assert_eq!(
+            classify_llamacpp_error(&ctx_error_body(300_000, 262_144)),
+            LlamacppErrorClass::Permanent
+        );
+    }
+
+    #[test]
+    fn classify_llamacpp_permanent_when_prompt_equals_ctx() {
+        assert_eq!(
+            classify_llamacpp_error(&ctx_error_body(262_144, 262_144)),
+            LlamacppErrorClass::Permanent
+        );
+    }
+
+    #[test]
+    fn classify_llamacpp_other_type_is_not_llamacpp() {
+        let body = br#"{"error":{"type":"some_other_error","message":"bad"}}"#;
+        assert_eq!(classify_llamacpp_error(body), LlamacppErrorClass::NotLlamacpp);
+    }
+
+    #[test]
+    fn classify_llamacpp_malformed_json_is_not_llamacpp() {
+        assert_eq!(classify_llamacpp_error(b"not json"), LlamacppErrorClass::NotLlamacpp);
+        assert_eq!(classify_llamacpp_error(b""), LlamacppErrorClass::NotLlamacpp);
+    }
+
+    #[test]
+    fn classify_llamacpp_missing_counts_is_not_llamacpp() {
+        let body =
+            br#"{"error":{"code":400,"type":"exceed_context_size_error","message":"x"}}"#;
+        assert_eq!(classify_llamacpp_error(body), LlamacppErrorClass::NotLlamacpp);
+    }
+
+    // ---- transient_backoff tests ----
+
+    #[test]
+    fn transient_backoff_exponential_and_capped() {
+        let policy = TransientRetry {
+            max_attempts: 5,
+            backoff_start: std::time::Duration::from_millis(100),
+            backoff_max: std::time::Duration::from_millis(350),
+        };
+        assert_eq!(transient_backoff(1, &policy), std::time::Duration::from_millis(100));
+        assert_eq!(transient_backoff(2, &policy), std::time::Duration::from_millis(200));
+        assert_eq!(transient_backoff(3, &policy), std::time::Duration::from_millis(350));
+        assert_eq!(transient_backoff(10, &policy), std::time::Duration::from_millis(350));
+    }
+
+    // ---- is_transient_network_error tests ----
+
+    #[tokio::test]
+    async fn transient_network_error_connection_refused_is_transient() {
+        // Bind and drop a listener to obtain a closed local port.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let err = reqwest::Client::new()
+            .get(format!("http://{}/", addr))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(
+            is_transient_network_error(&err),
+            "connection refused should be transient (got: {})",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn non_network_error_is_not_transient() {
+        // Unsupported scheme: a request-build error, never transient.
+        let err = reqwest::Client::new()
+            .get("ftp://127.0.0.1:1/")
+            .send()
+            .await
+            .unwrap_err();
+        assert!(
+            !is_transient_network_error(&err),
+            "request-build error should not be transient"
+        );
     }
 }
