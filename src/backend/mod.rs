@@ -199,7 +199,7 @@ fn parse_prometheus_line(line: &str) -> Option<(&str, f64)> {
 ///
 /// Used by the BackendMonitor poll loop and by integration tests
 /// that want to verify the live backend's /metrics output.
-// @lat: [[backend#vLLM Metrics Parsing]]
+// @lat: [[backend#Backend Metrics Parsing]]
 pub fn parse_snapshot(body: &str) -> ParseSnapshotResult {
     let mut snapshot = BackendSnapshot::default();
     let mut found_usage = false;

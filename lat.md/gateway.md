@@ -44,7 +44,7 @@ The gateway module exposes the application state struct, a router factory, clien
 
 - The `error` sub-module defines gateway-specific error types used by proxy handlers.
 - The `proxy` sub-module contains the unified request proxying logic shared across all routes.
-- The `retry` sub-module contains premature-stop detection, request temperature bumping, and SSE frame classification/parsing used by the retry paths ([[gateway#Premature-Stop Retry]]).
+- The `retry` sub-module contains premature-stop detection, request temperature bumping, SSE frame classification/parsing used by the retry paths ([[gateway#Premature-Stop Retry]]), and transient backend-error classification used by the re-forward path ([[gateway#Transient Backend-Error Re-forward]]).
 - The `stream` sub-module defines streaming support for SSE-based response forwarding.
 
 ## Invariants
@@ -240,11 +240,11 @@ Operational boundaries limit what the proxy can do and how callers must behave.
 **Scheduling.**
 
 - Requests without an explicit `max_tokens` field default to 1024 tokens for work-unit calculation.
-- The proxy retries premature-stop (degenerate empty-finish) requests internally ([[gateway#Premature-Stop Retry]]); transport failures (connection drops, abrupt termination) are surfaced to the client as an errored body so the client auto-retries with its own backoff.
+- The proxy retries premature-stop (degenerate empty-finish) requests internally ([[gateway#Premature-Stop Retry]]); pre-response transient network failures (backend restart) are re-forwarded with backoff ([[gateway#Transient Backend-Error Re-forward]]); mid-stream transport failures (connection drops, abrupt termination) are surfaced to the client as an errored body so the client auto-retries with its own backoff.
 
 **Error Passthrough.**
 
-- Backend error bodies and status codes are returned to callers unmodified; the proxy does not distinguish among backend error types.
+- Backend error bodies and status codes are returned to callers unmodified, except that transient backend errors are re-forwarded before surfacing ([[gateway#Transient Backend-Error Re-forward]]); permanent and non-llama.cpp errors always pass through unchanged.
 
 ## Rationale
 
@@ -547,6 +547,45 @@ Source files and cross-concept links for the premature-stop retry subsystem.
 - [[src/gateway/stream.rs#send_retry_request]] — shared retry request reissue helper.
 - [[config#Configuration Contract]] — retry policy configuration surface.
 - [[metrics#Metric Family Contracts]] — premature-stop counters.
+
+# Transient Backend-Error Re-forward
+
+The gateway re-forwards transient backend errors — llama.cpp intake context errors where the prompt fits slot capacity, and network failures from backend restarts — with bounded exponential backoff.
+
+## Purpose
+
+Transient re-forward turns backend restarts and llama.cpp's intake-time context rejections into invisible blips that would otherwise kill the caller's request with a hard 400 or 502.
+
+- **Two transient kinds.** (1) llama.cpp intake `exceed_context_size_error` (HTTP 400) with `n_prompt_tokens < n_ctx` — the prompt fits slot capacity once the backend's transient state (e.g. a fresh start) clears; classified by the `error.type` field (never the message string) in [[src/gateway/retry.rs#classify_llamacpp_error]]. (2) Network errors during backend contact — connect-phase failures (refused, DNS, connect timeout) and mid-flight connection death (reset, aborted, refused, broken pipe, unexpected EOF) from a backend restart; classified by walking the error's source chain for an io error of a "connection died" kind.
+- **Permanent passthrough.** `exceed_context_size_error` with `n_prompt_tokens >= n_ctx` is permanent — the prompt cannot fit slot capacity — and passes through to the client unchanged, as do all non-llama.cpp errors, timeouts, and request-build failures.
+- **Bounded re-forward.** The policy is `backend.transient_retry` (`max_attempts` default `3`, `backoff_start` default `500ms`, `backoff_max` default `4s`); `max_attempts: 0` disables re-forward entirely with zero behavioral change versus the pre-feature proxy ([[config#Configuration Contract]]). Each attempt first sleeps bounded exponential backoff (`min(backoff_start * 2^(attempt-1), backoff_max)`) and then re-sends the *identical* forwarded body — no temperature bump, in deliberate contrast to [[gateway#Premature-Stop Retry]].
+- **Dispatch coverage.** On success, the re-forwarded response re-enters the normal dispatch, so both streaming and non-streaming intake are covered — these errors arrive pre-stream, before any response content is forwarded. The admission slot and lifecycle guard stay held across the loop (scheduler bypass, like premature-stop retry); non-final attempts never mark the lifecycle completed.
+- **Exhaustion.** Every re-forward attempt increments `tinyllb_backend_retries_total`. When the attempt budget is exhausted and the final outcome is still transient, `tinyllb_backend_retry_exhausted_total` is incremented and the final error (or network failure) is returned to the client; permanent and non-llama.cpp errors are never counted as exhausted ([[metrics#Metric Family Contracts]]).
+- **Deferred: mid-stream re-forward.** Re-forward of post-200 SSE error events or a mid-stream connection reset after content has begun flowing is future work, not implemented. Current behavior in that window: the transport path aborts the body so the client retries on its own backoff — not transparent, but it recovers. The no-content-yet window is narrow because intake errors and restart-time connection failures are observed before streaming begins.
+
+## Invariants
+
+Re-forward is bounded, body-faithful, and never alters an error that is not transient.
+
+- Retries occur only on the two transient kinds; permanent context errors, non-llama.cpp errors, and timeouts are never re-forwarded and always pass through verbatim.
+- The re-forwarded body is byte-identical to the original forwarded body — no temperature bump or any other rewrite.
+- Total backend attempts are bounded by `max_attempts` (each counted attempt sleeps backoff first); the backoff delay is capped at `backoff_max`.
+- A success on any attempt produces exactly one client-facing response, dispatched through the normal streaming/non-streaming paths.
+- With `max_attempts: 0`, no re-forward occurs and request handling is unchanged from the pre-feature behavior.
+
+## Related
+
+Source files and cross-concept links for the transient re-forward subsystem.
+
+- [[src/gateway/proxy.rs]] — re-forward loop and dispatch re-entry in the proxy handler.
+- [[src/gateway/retry.rs#classify_llamacpp_error]] — llama.cpp intake error classification (permanent vs transient).
+- [[src/gateway/retry.rs#is_transient_network_error]] — transient network-failure classifier.
+- [[src/gateway/retry.rs#transient_backoff]] — bounded exponential backoff schedule.
+- [[gateway#Premature-Stop Retry]] — sibling retry concept (degenerate completions; temperature-bumped).
+- [[gateway#Reverse Proxy Request Handling]] — the handler the re-forward loop is embedded in.
+- [[backend#Backend Metrics Parsing]] — backend flavor identification that motivates dual-family support.
+- [[config#Configuration Contract]] — `backend.transient_retry` configuration surface.
+- [[metrics#Metric Family Contracts]] — retry counters.
 
 # Turn-Boundary Detection
 

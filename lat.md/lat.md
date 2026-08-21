@@ -3,7 +3,7 @@ This directory defines the high-level concepts, business logic, and architecture
 - [[admission]] — Scheduler admission gates: backpressure, KV-cache-aware admission, per-flow token progress
 - [[api]] — Admin control-plane HTTP API: router assembly, flow registration, queue status
 - [[app]] — Binary composition: crate module declarations, application startup, token rate gauge task
-- [[backend]] — vLLM backend monitoring: KV-cache monitor and metrics parsing
+- [[backend]] — backend monitoring (vLLM + llama.cpp): KV-cache monitor, dual-family metrics parsing, and stall watchdog
 - [[config]] — Configuration contract, loading, and validation
 - [[flow]] — Flow identity, registry and state, and request flow identification
 - [[gateway]] — Reverse proxy: application state, request handling, streaming passthrough, error model

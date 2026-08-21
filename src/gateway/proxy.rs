@@ -286,6 +286,7 @@ enum TransientRetryOutcome {
 /// lifecycle completed. The admission ticket stays held by the caller
 /// across the loop — like the premature-stop retry, this bypasses the
 /// scheduler.
+// @lat: [[gateway#Transient Backend-Error Re-forward]]
 async fn transient_retry(
     state: &AppState,
     method: &axum::http::Method,

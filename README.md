@@ -40,6 +40,11 @@ backend URL.
 - **Transport retry** — a stream that ends without a terminal frame is
   treated as a transport failure: the body is aborted so the client's normal
   retry logic re-sends the request.
+- **Transient backend-error re-forward** — pre-response transient errors are
+  re-sent with bounded exponential backoff (`backend.transient_retry`;
+  `max_attempts: 0` disables): llama.cpp intake `exceed_context_size_error`
+  where the prompt fits slot capacity, and network failures from a backend
+  restart. Permanent errors pass through unchanged.
 - **Premature-stop retry** — degenerate `finish_reason: "stop"` chat
   responses (no content, no tool calls) are re-sent with bumped temperature;
   see [Premature-Stop Retry](#premature-stop-retry).
@@ -58,6 +63,21 @@ backend URL.
 ```bash
 vllm serve meta-llama/Llama-3.2-1B-Instruct --port 8000
 ```
+
+Or any OpenAI-compatible backend — e.g. llama.cpp's `llama-server` with
+metrics enabled:
+
+```bash
+llama-server --model model.gguf --metrics --port 8000
+```
+
+The proxy auto-detects the backend flavor (vLLM vs llama.cpp) from the
+metric-name prefix on each `/metrics` scrape. Two llama.cpp notes:
+
+- `kv_policy` (admission) and `kv_bias` (selection) are **inert**: llama.cpp
+  exposes no KV-usage metric, so the monitor always reports zero KV pressure.
+- Align `scheduler.max_active_flows` with llama-server's `--parallel N` so
+  the proxy admits no more concurrent flows than slots the backend can run.
 
 ### 2. Start the proxy
 
@@ -139,6 +159,9 @@ overridden via environment variables (see below).
 | `backend.url` | `http://localhost:8000` | Backend vLLM URL |
 | `backend.metrics_interval` | `1s` | Interval for polling vLLM `/metrics` |
 | `backend.stall_timeout` | `30s` | Inference-stall watchdog window; `0` disables |
+| `backend.transient_retry.max_attempts` | `3` | Transient-error re-forward attempts; `0` disables |
+| `backend.transient_retry.backoff_start` | `500ms` | First backoff delay between re-forwards |
+| `backend.transient_retry.backoff_max` | `4s` | Cap on the exponential backoff delay |
 | `scheduler.max_active_flows` | `4` | Max concurrent flows admitted |
 | `scheduler.starvation_timeout` | `300s` | Force-admit a flow after this idle time |
 | `scheduler.completion_bias.enabled` | `true` | Defer new-flow admission while active flows exceed target |

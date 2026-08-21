@@ -330,6 +330,7 @@ pub enum LlamacppErrorClass {
 /// `type` field is the reliable discriminator (the message string is never
 /// matched). Everything else — including malformed JSON — is
 /// [`LlamacppErrorClass::NotLlamacpp`].
+// @lat: [[gateway#Transient Backend-Error Re-forward]]
 pub fn classify_llamacpp_error(body: &[u8]) -> LlamacppErrorClass {
     let value = match serde_json::from_slice::<Value>(body) {
         Ok(v) => v,

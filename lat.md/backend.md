@@ -31,7 +31,7 @@ The monitor exposes five contractual surfaces: parsing with presence tracking, o
 - **Conditional blocking**: Callers suspend until an observation satisfies a caller-supplied predicate. Terminates when the predicate is satisfied or the channel is closed; the caller cannot distinguish which caused termination.
 - **Stall signal**: `stall_receiver()` returns a `tokio::sync::watch::Receiver<bool>` that reads `true` while the inference watchdog considers the engine deadlocked; see [[backend#Inference Stall Watchdog]].
 - **Construction**: Three constructors exist. The empty constructor yields a static default observation with no background task. The receiver constructor wraps an existing watch receiver. The standard constructor returns the monitor alongside an optional background task handle; a missing handle indicates monitoring is disabled.
-- **Metrics reporting**: Each poll that finds the KV-usage metric in the scrape writes utilization and availability into external Prometheus gauges and runs the stall watchdog. A successful scrape that lacks the usage metric publishes nothing and writes no gauges.
+- **Metrics reporting**: Each poll whose scrape contains a vLLM KV-usage metric writes utilization and availability into external Prometheus gauges. Each poll whose scrape contains the KV-usage metric or any llama.cpp metric publishes a snapshot and runs the stall watchdog (flavor-aware publish gate). A successful scrape with neither family publishes nothing and writes no gauges.
 
 ## Invariants
 
@@ -73,18 +73,19 @@ Concepts and source files related to the backend KV-cache monitor.
 - Concept: The vLLM backend metrics endpoint providing Prometheus-format data scraped by this monitor
 - Concept: `[[admission#KV-Cache-Aware Admission Gate]]`
 
-# vLLM Metrics Parsing
+# Backend Metrics Parsing
 
-The parser converts Prometheus text-format metrics from the vLLM backend into typed, concurrent snapshots of KV-cache state with last-value semantics.
+The parser converts Prometheus text-format metrics from either a vLLM or a llama.cpp backend into a typed, concurrent snapshot of engine state, with last-value semantics across both metric families.
 
 ## Purpose
 
-The parser maps known vLLM metric names to structured fields, derives missing values where safe, and exposes the result to concurrent consumers.
+The parser maps known vLLM and llama.cpp metric names to structured fields, derives missing values where safe, and exposes the result to concurrent consumers.
 
-- Parses Prometheus text-format metrics from the vLLM backend into a typed snapshot of KV-cache state.
-- Maps known vLLM metric names to structured fields with per-metric presence tracking.
+- Parses Prometheus text-format metrics from the vLLM (`vllm:*`) or llama.cpp (`llamacpp:*`) backend into a typed snapshot of engine state.
+- Maps known metric names from both families to structured fields with per-metric presence tracking; both families write into the same fields, so a mixed body resolves per field by last-parsed-wins.
 - Derives the free-fraction value from usage when the free gauge is absent and usage is less than one.
 - Exposes parsed snapshots to concurrent consumers with last-value semantics.
+- Reports the per-scrape backend flavor: `found_usage` (a vLLM KV-usage gauge was present), `found_free`, and `found_llamacpp` (any `llamacpp:*` metric was present).
 
 ## Non-goals
 
@@ -99,7 +100,9 @@ The parser focuses on typed observation, not lifecycle management or schema evol
 
 The concept exposes four contract surfaces: metric-name constants, typed snapshots, parse results, and a concurrent monitor handle.
 
-- **Metric name constants**: Eight string constants declare the metric identifiers that the parser recognizes. Callers may depend on these for instrumentation or configuration alignment.
+- **Metric name constants**: Fourteen string constants declare the metric identifiers that the parser recognizes — eight vLLM (`vllm:*`) and six llama.cpp (`llamacpp:*`). Callers may depend on these for instrumentation or configuration alignment.
+
+vLLM family:
 
 - **Usage gauge (v0)** — the v0 engine KV cache usage fraction.
 - **Usage gauge (v1)** — the v1 engine KV cache usage fraction.
@@ -110,18 +113,30 @@ The concept exposes four contract surfaces: metric-name constants, typed snapsho
 - **Requests running gauge** — requests currently scheduled on the engine.
 - **Requests waiting gauge** — requests queued for the engine.
 
+llama.cpp family:
+
+- **Requests processing gauge** — requests currently being processed (maps to the running-request field).
+- **Requests deferred gauge** — requests deferred/queued for processing (maps to the waiting-request field).
+- **Prompt tokens counter** — cumulative prefill tokens, excluding tokens served from the prefix cache.
+- **Tokens predicted counter** — cumulative generated (decode) tokens.
+- **Cached prompt tokens counter** — cumulative tokens served from the prefix cache; progress-only signal for the stall watchdog, no vLLM analog.
+- **Decode calls counter** — cumulative `llama_decode()` calls, including prefill batches; progress-only signal for the stall watchdog, no vLLM analog.
+
 - **Typed snapshot**: The snapshot is a value type representing backend state at a single point in time. It is cloneable for independent concurrent access.
 
-- Carries seven quantities: KV usage fraction, KV free fraction, cumulative preemptions, cumulative prompt tokens, cumulative generation tokens, running request count, and waiting request count.
+- Carries nine quantities: KV usage fraction, KV free fraction, cumulative preemptions, cumulative prompt tokens, cumulative generation tokens, running request count, waiting request count, cumulative cached prompt tokens, and cumulative decode calls.
 - The default snapshot represents a zero-load baseline: usage is zero, free is one, and all other quantities are zero.
+- `cached_prompt_tokens` and `decode_calls` are llama.cpp-only progress signals: vLLM backends never populate them, so they stay at their zero default on vLLM backends.
 - `is_busy()` reports whether the engine has queued or running work: true when either the running or waiting request count is positive.
 
-- **Parse result contract**: Every parse operation yields a snapshot with boolean flags for the usage and free gauges. The result is cloneable and defaults to the zero-load baseline.
+- **Parse result contract**: Every parse operation yields a snapshot with boolean flags for the usage gauge, the free gauge, and the llama.cpp flavor. The result is cloneable and defaults to the zero-load baseline.
 
 - Accepts any string and returns a fully populated result with a snapshot and presence flags.
 - Unknown or unrecognized metric names are silently ignored; no error is produced.
 - Malformed lines (missing name boundary, non-numeric value) are silently skipped.
 - A flag value of `true` means the corresponding metric was present in the input; `false` means it was absent.
+- `found_usage` is true iff a vLLM KV-usage gauge (v0 or v1 name) was present; llama.cpp backends expose no KV metric, so it stays false for them.
+- `found_llamacpp` is true iff any `llamacpp:*` metric was present; it is the flavor signal feeding the flavor-aware publish gate.
 - No flag exists for the preemption gauge; callers infer preemption presence from the snapshot value and default semantics.
 
 - **Monitor constructor contract**: The monitor provides concurrent read access to the latest snapshot. The handle is cloneable for independent reads.
@@ -137,12 +152,15 @@ The concept exposes four contract surfaces: metric-name constants, typed snapsho
 
 ## Invariants
 
-The parser guarantees deterministic derivation and precedence rules across all parse operations.
+The parser guarantees deterministic derivation, precedence, and flavor rules across all parse operations.
 
 - **kv_free derivation**: When the usage gauge is present, the free gauge is absent, and usage is strictly less than one, the free fraction is derived as `1.0 - usage`. If usage is one or greater, derivation is skipped and free remains at its previous value.
 - **Dual usage names unify**: Both v0 and v1 usage metric names write to the same usage quantity in the snapshot. No distinction is preserved about which engine variant supplied the value.
-- **Last occurrence wins**: When multiple lines match the same metric constant, the last parsed value overwrites the field. Earlier occurrences are discarded without indication.
-- **Preemption truncation**: Preemption values are truncated toward zero. Fractional preemption values from the backend produce integer counts in the snapshot.
+- **Last occurrence wins across families**: When multiple lines map to the same snapshot field — including both a vLLM and a llama.cpp line for the same field (e.g. `vllm:prompt_tokens_total` and `llamacpp:prompt_tokens_total`) — the last parsed value overwrites the field. Earlier occurrences are discarded without indication.
+- **Flavor is per-scrape**: The backend flavor is identified on every scrape from the metric-name prefixes present in the body (`vllm:` vs `llamacpp:`); a scrape containing neither family yields `found_usage` and `found_llamacpp` both false. The monitor logs when the detected flavor changes between scrapes (e.g. a backend swap).
+- **KV gauges are vLLM-only**: llama.cpp exposes no KV-usage metric, so `kv_usage` stays at its 0.0 default and `kv_free` at its 1.0 default on llama.cpp scrapes; no spurious KV pressure is ever derived, and `kv_policy`/`kv_bias` are gracefully inert on llama.cpp backends.
+- **Flavor-aware publish gate**: A scrape publishes a snapshot only when `found_usage || found_llamacpp`; a scrape with neither family publishes nothing and writes no KV gauges, so partial scrapes never overwrite the last good reading with zeros.
+- **Preemption truncation**: Preemption values are truncated toward zero. Fractional preemption values from the backend produce integer counts in the snapshot. llama.cpp exposes no preemption counter, so preemptions stays zero on llama.cpp backends.
 - **Disabled monitor baseline**: A disabled monitor — constructed via the disabled constructor or a zero-interval polling constructor — always returns the default snapshot: zero usage, one free, and zero token counters and request counts.
 - **Default preemptions is zero**: When the preemption metric is absent from the input, the preemptions field remains at zero. This is indistinguishable from a backend reporting zero preemptions.
 
@@ -161,11 +179,11 @@ The parser and monitor impose boundaries on acceptable input and runtime behavio
 
 Design choices prioritize correct derivation and concurrent access over exhaustive tracking.
 
-Boolean flags exist only for usage and free because these gauges interact via derivation logic: callers need to distinguish "usage present, free derived" from "both present independently." Preemptions has no derivation counterpart and defaults to zero, so a presence flag adds no decision value. The latest-value read never returns a sentinel because the watch channel always yields the last written value. The predicate-gated block returns unit because the caller's predicate is the sole truth source. Clone on the snapshot and handle types is necessary for last-value broadcast semantics: each concurrent consumer must own an independent copy.
+Boolean flags exist for usage, free, and the llama.cpp flavor because these interact with derivation and publish-gate logic: callers need to distinguish "usage present, free derived" from "both present independently," and the monitor must know whether a scrape carries any recognized backend family before publishing. Preemptions has no derivation counterpart and defaults to zero, so a presence flag adds no decision value. The latest-value read never returns a sentinel because the watch channel always yields the last written value. The predicate-gated block returns unit because the caller's predicate is the sole truth source. Clone on the snapshot and handle types is necessary for last-value broadcast semantics: each concurrent consumer must own an independent copy.
 
 ## Related
 
-Concepts and source files related to parsing and monitoring of vLLM backend metrics.
+Concepts and source files related to parsing and monitoring of backend (vLLM and llama.cpp) metrics.
 
 - Source: `[[src/backend/mod.rs#BackendSnapshot]]`
 - Source: `[[src/backend/mod.rs#parse_snapshot]]`
@@ -182,8 +200,8 @@ The watchdog inside the monitor polling loop detects backend inference stalls an
 The watchdog turns "engine busy but making no token progress" into an actionable signal for the admission and streaming layers.
 
 - `stall_receiver()` (src/backend/mod.rs:259-261) returns a `tokio::sync::watch::Receiver<bool>` that reads `true` while the watchdog considers the engine deadlocked; the scheduler and streaming tasks select on this signal.
-- The watchdog runs inside the polling loop (src/backend/mod.rs:326-389) and is evaluated only on polls whose scrape contains the KV-usage metric.
-- A stall is declared when the engine reports running or waiting requests (`is_busy()`, src/backend/mod.rs:98-100) and neither the prompt-token nor generation-token counters advance for `backend.stall_timeout` (default 30 seconds; a zero timeout disables the watchdog).
+- The watchdog runs inside the polling loop (src/backend/mod.rs:326-389) and is evaluated only on polls whose scrape contains the KV-usage metric or any llama.cpp metric (the flavor-aware publish gate, [[backend#Backend Metrics Parsing]]).
+- A stall is declared when the engine reports running or waiting requests (`is_busy()`, src/backend/mod.rs:98-100) and none of the four progress counters — prompt tokens, generation tokens, cached prompt tokens, or decode calls — advances for `backend.stall_timeout` (default 30 seconds; a zero timeout disables the watchdog). The four-counter check (not just prompt + generation tokens) is required because `llamacpp:prompt_tokens_total` excludes cached tokens: on cache-heavy llama.cpp workloads, prefill is served from the prefix cache and only the cached-token and decode-call counters advance, so a two-counter check would misclassify live progress as a stall.
 - On a newly detected stall the watchdog sets the stall signal to `true`, logs a warning, and increments `tinyllb_backend_stall_events_total`; on recovery it sets the signal back to `false` and logs the clearance. `llm_backend_stalled` is set to 1 while stalled and 0 otherwise (see [[metrics#Metric Family Contracts]]).
 - While the engine is idle (no running or waiting requests), the watchdog resets its progress timer so an idle gap is never inherited as a stall by later work.
 - While the stall signal is `true`, the scheduler rejects new admissions with 429 and a 5-second `Retry-After` (src/scheduler/mod.rs:242-247).
@@ -195,7 +213,8 @@ Cross-references to related concepts and source locations for the inference stal
 
 - [[src/backend/mod.rs]] — Watchdog implementation inside the monitor polling loop
 - [[src/backend/mod.rs#BackendMonitor#stall_receiver]] — Stall signal accessor
-- [[config#Configuration Contract]] — `backend.stall_timeout` configuration
+- [[config#Configuration Contract]] — `backend.stall_timeout` and `backend.transient_retry` configuration
 - [[metrics#Metric Family Contracts]] — Stall gauge and event counter
 - [[scheduler#Scheduler Facade and Policy Selection]] — Admission gate consuming the stall signal
 - [[gateway#Premature-Stop Retry]] — Retry behavior for aborted streams
+- [[gateway#Transient Backend-Error Re-forward]] — Proxy-side re-forward of transient backend errors (a second recovery path for the same backend outages)

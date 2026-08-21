@@ -12,3 +12,4 @@ Historical implementation plans. Plans marked superseded/archived/deleted are ke
 | 004-interactive-priority-heuristic | Interactive-vs-batch priority heuristic | Implemented, superseded by 006 | Classification logic and config schema changed in plan 006. See `004/PLAN.md` supersession note. |
 | 005-premature-stop-retry | Premature-stop retry | Implemented | `src/gateway/retry.rs`, `retry_policy` config, `tinyllb_premature_stop_*` metrics. Note: plan diverged from code (see 005/PLAN.md banner). |
 | 006-turn-boundary-priority | Turn-boundary priority state machine | Implemented | Cadence state machine in `src/flow/cadence.rs`; KV-cache-aware selection bias. Plan written while WFQ still existed — scheduler snippets are historical. |
+| 007-llamacpp-backend | llama.cpp backend support | Implemented | Monitor dual-family parsing + transient re-forward; mid-stream re-forward deferred as future work. |

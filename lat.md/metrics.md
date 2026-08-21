@@ -36,7 +36,7 @@ The public contract consists of a metrics value with exposed collectors, multipl
 
 - Each exposed collector is a live metric whose name and label dimensions are fixed for the lifetime of the value.
 - The metrics value exposes its own registry as a public surface; external consumers read directly from it.
-- The collector set includes queue, throughput, backend, backpressure, scheduling, starvation, lifecycle, KV-cache, priority-heuristic, premature-stop retry, and backend-stall families.
+- The collector set includes queue, throughput, backend, backpressure, scheduling, starvation, lifecycle, KV-cache, priority-heuristic, premature-stop retry, backend retry, and backend-stall families.
 
 **Construction paths.**
 
@@ -56,6 +56,7 @@ The public contract consists of a metrics value with exposed collectors, multipl
 - **KV-cache family**: cache usage percentage, free percentage, and admission-decision count (labeled by decision: accept, delay, reject).
 - **Backend stall family**: `llm_backend_stalled` gauge (1 while the inference watchdog considers the backend deadlocked) and `tinyllb_backend_stall_events_total` counter of watchdog-detected stalls; stall semantics documented in [[backend#Inference Stall Watchdog]].
 - **Premature-stop retry family**: premature stop detection counter, retry requests issued counter, and degenerate-turn-forwarded counter. In the streaming path, the exhausted counter is also incremented when a retry HTTP failure forces fail-open.
+- **Backend retry family**: `tinyllb_backend_retries_total` counter of transient backend-error re-forwards issued and `tinyllb_backend_retry_exhausted_total` counter of exhausted retry budgets; semantics documented in [[gateway#Transient Backend-Error Re-forward]].
 
 **Exposition endpoint.**
 
@@ -236,7 +237,7 @@ Metrics families provide a structured, cross-task view of system health and perf
 - Queue family tracks per-flow wait depth, latency, and active concurrency.
 - Throughput family tracks cumulative token output and approximate instantaneous rate.
 - All collectors share one registry, making every metric family available to every task without additional wiring.
-- Additional metric families beyond the three primary groups reside in the same registry (backpressure, scheduling, starvation protection, request lifecycle, KV cache, priority heuristic, premature-stop retry, and backend stall).
+- Additional metric families beyond the three primary groups reside in the same registry (backpressure, scheduling, starvation protection, request lifecycle, KV cache, priority heuristic, premature-stop retry, backend retry, and backend stall).
 - Priority heuristic family tracks per-flow priority class, cadence state-machine state, priority source events, and inter-request gap distribution for turn-boundary classification diagnostics.
 - Premature-stop retry family tracks premature-stop detections, retry attempts issued, and degenerate turns forwarded after retries are exhausted.
 - Backend stall family tracks the watchdog's deadlocked-engine gauge and the count of detected stall events; see [[backend#Inference Stall Watchdog]].
@@ -304,6 +305,11 @@ The interface provides construction surfaces, a scrape endpoint, and metric fami
 - `tinyllb_premature_stop_detected_total` — Premature stops detected (one per failed attempt).
 - `tinyllb_premature_stop_retries_total` — Retry requests issued after a premature stop.
 - `tinyllb_premature_stop_exhausted_total` — Degenerate turns forwarded after all retries exhausted. In the streaming path, this is also incremented when a retry HTTP failure forces fail-open.
+
+**Backend retry family.**
+
+- `tinyllb_backend_retries_total` — Monotonically increasing counter of transient backend-error re-forwards issued by the gateway; incremented once per re-forward attempt.
+- `tinyllb_backend_retry_exhausted_total` — Monotonically increasing counter of requests whose transient retry budget was exhausted: the final error is still transient after all attempts, or the final network failure is transient. Permanent and non-llama.cpp errors are never counted here. See [[gateway#Transient Backend-Error Re-forward]].
 
 ## Invariants
 

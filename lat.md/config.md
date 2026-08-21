@@ -41,6 +41,7 @@ The configuration surface presents contractual guarantees about what values are 
 - **Server** declares the listener bind address (default `0.0.0.0:8080`).
 - **KV-cache policy** is nested under backpressure as `backpressure.kv_policy` (not a top-level key), so the gate inherits the hold-vs-reject contract from `backpressure.mode` by construction. It declares `enabled` (default `false`), `reject_threshold` (default `0.95`), `delay_threshold` (default `0.80`), and `bypass_interactive` (default `true`). A legacy top-level `kv_policy:` key is rejected at load with a migration message instructing operators to nest it under `backpressure.kv_policy`.
 - **Retry policy** declares premature-stop retry settings: `enabled` (default `false`), `max_retries` (default `2`), `temperature_step` (default `0.3`), `max_temperature` (default `1.5`), and `default_temperature` (default `0.0`). When enabled, degenerate `/v1/chat/completions` responses are retried with bumped temperature.
+- **Transient retry** is nested under backend as `backend.transient_retry` and declares proxy-side re-forward of transient backend errors (llama.cpp intake context errors where the prompt fits slot capacity; network failures from backend restart): `max_attempts` (default `3`; `0` disables re-forward with zero behavioral change), `backoff_start` (default `500ms`), and `backoff_max` (default `4s`). Each re-forward attempt first sleeps bounded exponential backoff between `backoff_start` and `backoff_max`. See [[gateway#Transient Backend-Error Re-forward]].
 - **Priority policy** declares turn-boundary state-machine heuristic settings: `enabled` (default `true`), `idle_gap_threshold` (default `30s`), `agentic_suspected_threshold` (default `5`), and `agentic_confirmed_threshold` (default `12`). When enabled, the scheduler classifies flows by turn-boundary idles versus continuous activity and adjusts priority automatically. See [[scheduler#Scheduler Facade and Policy Selection]].
 
 **Duration representation**
@@ -79,6 +80,7 @@ These limitations are inherent to the configuration model.
 - When `backpressure.kv_policy.enabled` is `true`, thresholds must satisfy: `reject_threshold` in `(0, 1]`, `delay_threshold` in `[0, 1]`, and `delay_threshold` strictly less than `reject_threshold`. When `enabled` is `false`, these thresholds are not validated.
 - A top-level `kv_policy:` key is rejected at load with a migration message: the KV policy now lives under `backpressure.kv_policy`. This guard exists so the removed top-level key is never silently ignored.
 - When `retry_policy.enabled` is `true`, `max_retries` must be > 0, `temperature_step` must be > 0.0, `max_temperature` must be >= `default_temperature`, and `max_temperature` must be <= 2.0. When `enabled` is `false`, these fields are not validated.
+- When `backend.transient_retry.max_attempts` is greater than zero, `backoff_start` must be strictly positive and `backoff_max` must be >= `backoff_start`. When `max_attempts` is zero, these fields are not validated.
 - `agentic_confirmed_threshold` must be strictly greater than `agentic_suspected_threshold`, and `agentic_suspected_threshold` must be at least 1. These constraints are validated regardless of the `enabled` flag.
 
 **Input format**
@@ -123,6 +125,7 @@ This section lists related concepts and source references for the configuration 
 - [[src/config/mod.rs#Server]] — server bind address configuration
 - [[src/config/mod.rs#KvPolicyConfig]] — KV-cache admission policy configuration
 - [[src/config/mod.rs#RetryPolicy]] — premature-stop retry policy configuration
+- [[src/config/mod.rs#TransientRetry]] — transient backend-error re-forward policy configuration
 - [[src/config/mod.rs#PriorityPolicy]] — priority heuristic policy configuration
 - [[src/config/loader.rs]] — layered resolution and validation
 
