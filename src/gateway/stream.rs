@@ -399,6 +399,7 @@ pub fn spawn_retry_stream(
                         // body — no temperature bump). Otherwise fall through;
                         // the frame is forwarded by the non-terminal-delta
                         // branch below and the stream then terminates.
+                        // @lat: [[gateway#Transient Backend-Error Re-forward]]
                         if cls.is_error
                             && !saw_content
                             && !saw_tool_calls

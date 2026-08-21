@@ -240,7 +240,7 @@ Operational boundaries limit what the proxy can do and how callers must behave.
 **Scheduling.**
 
 - Requests without an explicit `max_tokens` field default to 1024 tokens for work-unit calculation.
-- The proxy retries premature-stop (degenerate empty-finish) requests internally ([[gateway#Premature-Stop Retry]]); pre-response transient network failures (backend restart) are re-forwarded with backoff ([[gateway#Transient Backend-Error Re-forward]]); mid-stream transport failures (connection drops, abrupt termination) are surfaced to the client as an errored body so the client auto-retries with its own backoff.
+- The proxy retries premature-stop (degenerate empty-finish) requests internally ([[gateway#Premature-Stop Retry]]); pre-response transient network failures (backend restart) are re-forwarded with backoff ([[gateway#Transient Backend-Error Re-forward]]); mid-stream transient failures before any content has been forwarded (an SSE error frame or a connection reset) are re-forwarded transparently with backoff, while mid-stream failures after content has flowed are surfaced as an errored body so the client auto-retries, avoiding token duplication.
 
 **Error Passthrough.**
 
@@ -561,7 +561,7 @@ Transient re-forward turns backend restarts and llama.cpp's intake-time context 
 - **Bounded re-forward.** The policy is `backend.transient_retry` (`max_attempts` default `3`, `backoff_start` default `500ms`, `backoff_max` default `4s`); `max_attempts: 0` disables re-forward entirely with zero behavioral change versus the pre-feature proxy ([[config#Configuration Contract]]). Each attempt first sleeps bounded exponential backoff (`min(backoff_start * 2^(attempt-1), backoff_max)`) and then re-sends the *identical* forwarded body — no temperature bump, in deliberate contrast to [[gateway#Premature-Stop Retry]].
 - **Dispatch coverage.** On success, the re-forwarded response re-enters the normal dispatch, so both streaming and non-streaming intake are covered — these errors arrive pre-stream, before any response content is forwarded. The admission slot and lifecycle guard stay held across the loop (scheduler bypass, like premature-stop retry); non-final attempts never mark the lifecycle completed.
 - **Exhaustion.** Every re-forward attempt increments `tinyllb_backend_retries_total`. When the attempt budget is exhausted and the final outcome is still transient, `tinyllb_backend_retry_exhausted_total` is incremented and the final error (or network failure) is returned to the client; permanent and non-llama.cpp errors are never counted as exhausted ([[metrics#Metric Family Contracts]]).
-- **Deferred: mid-stream re-forward.** Re-forward of post-200 SSE error events or a mid-stream connection reset after content has begun flowing is future work, not implemented. Current behavior in that window: the transport path aborts the body so the client retries on its own backoff — not transparent, but it recovers. The no-content-yet window is narrow because intake errors and restart-time connection failures are observed before streaming begins.
+- **Mid-stream re-forward (implemented).** Mid-stream transient failures before any content has been forwarded — a post-200 SSE error event (llama.cpp KV-exhaustion / context-shift) or a transport failure / connection reset (EOF with no content, e.g. a backend restart mid-generation) — are re-forwarded transparently in [[src/gateway/stream.rs#spawn_retry_stream]]: the error frame or dead stream is discarded, the original request is re-sent with bounded backoff, and the inner stream is swapped. When content or tool_calls were already forwarded, the stream instead aborts with an errored body so the client retries — intentional, because re-forwarding would duplicate tokens, not a deferred gap. This path uses the `transient_retry` budget (independent from premature-stop retry) and counts `tinyllb_backend_retries_total` per attempt and `tinyllb_backend_retry_exhausted_total` when the transient budget runs out.
 
 ## Invariants
 
@@ -578,6 +578,7 @@ Re-forward is bounded, body-faithful, and never alters an error that is not tran
 Source files and cross-concept links for the transient re-forward subsystem.
 
 - [[src/gateway/proxy.rs]] — re-forward loop and dispatch re-entry in the proxy handler.
+- [[src/gateway/stream.rs#spawn_retry_stream]] — mid-stream transient re-forward (no-content-yet SSE error frames and transport failures).
 - [[src/gateway/retry.rs#classify_llamacpp_error]] — llama.cpp intake error classification (permanent vs transient).
 - [[src/gateway/retry.rs#is_transient_network_error]] — transient network-failure classifier.
 - [[src/gateway/retry.rs#transient_backoff]] — bounded exponential backoff schedule.
