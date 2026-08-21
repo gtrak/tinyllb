@@ -136,3 +136,74 @@ impl KvBiasHandle {
         best.map(|(c, _)| c.flow_id.clone())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::flow::FlowId;
+    use std::time::{Duration, Instant};
+
+    fn handle(config: KvBias) -> KvBiasHandle {
+        KvBiasHandle::new(
+            config,
+            Arc::new(BackendMonitor::empty()),
+            Arc::new(FlowProgressTracker::new()),
+        )
+    }
+
+    fn candidate(flow: &str, footprint: f64, enqueued_at: Instant) -> FlowCandidate {
+        FlowCandidate {
+            flow_id: FlowId::new(flow),
+            priority: 50,
+            enqueued_at,
+            base_score: 0.0,
+            kv_footprint: footprint,
+        }
+    }
+
+    /// Disabled bias: the effective weight is 0 at any pressure, so
+    /// selection falls back to pure fairness — the earlier-enqueued
+    /// 0-footprint flow beats the 1000-footprint flow even at maximum
+    /// pressure. Pinned at the `select` level because `bias_weight` is a
+    /// pure pressure mapping and the `enabled` gate lives in `select`.
+    #[test]
+    fn bias_weight_disabled_zero() {
+        let h = handle(KvBias {
+            enabled: false,
+            ..KvBias::default()
+        });
+        let t0 = Instant::now();
+        let cands = vec![
+            candidate("small", 0.0, t0),
+            candidate("large", 1000.0, t0 + Duration::from_millis(1)),
+        ];
+        for pressure in [0.0, 0.5, 0.95] {
+            assert_eq!(
+                h.select(&cands, pressure),
+                Some(FlowId::new("small")),
+                "disabled bias must pick the pure-fairness winner at pressure {pressure}"
+            );
+        }
+    }
+
+    /// At full bias strength (pressure >= bias_full_at) the
+    /// larger-footprint flow wins regardless of enqueue order.
+    #[test]
+    fn select_high_pressure_prefers_footprint() {
+        let h = handle(KvBias::default());
+        let t0 = Instant::now();
+        // Fairness alone would pick "small" (earlier enqueue, equal
+        // priority and base score); the full-strength bias must override it.
+        let cands = vec![
+            candidate("small", 0.0, t0),
+            candidate("large", 1000.0, t0 + Duration::from_millis(1)),
+        ];
+        assert_eq!(h.select(&cands, 0.95), Some(FlowId::new("large")));
+        // Reversed enqueue order: "large" still wins.
+        let cands = vec![
+            candidate("large", 1000.0, t0),
+            candidate("small", 0.0, t0 + Duration::from_millis(1)),
+        ];
+        assert_eq!(h.select(&cands, 0.95), Some(FlowId::new("large")));
+    }
+}
