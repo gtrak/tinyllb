@@ -108,6 +108,9 @@ pub struct FrameClassification {
     pub is_done: bool,
     /// Top-level `usage` object present and non-null.
     pub has_usage: bool,
+    /// Top-level `error` object present (a mid-stream error event, not a
+    /// choice). Set for llama.cpp error frames (`{"error":{...}}`).
+    pub is_error: bool,
 }
 
 /// Best-effort parse one SSE event frame (raw bytes).
@@ -121,6 +124,7 @@ pub fn classify_frame(frame: &[u8]) -> FrameClassification {
         finish_reason: None,
         is_done: false,
         has_usage: false,
+        is_error: false,
     };
 
     // Split on newlines to find `data:` lines.
@@ -138,6 +142,11 @@ pub fn classify_frame(frame: &[u8]) -> FrameClassification {
             Ok(v) => v,
             Err(_) => continue,
         };
+
+        // Top-level `error` object (a mid-stream error event, not a choice).
+        if json_val.get("error").is_some() {
+            result.is_error = true;
+        }
 
         // Inspect choices[0].delta
         if let Some(choices) = json_val.get("choices").and_then(|c| c.as_array()) {
@@ -808,6 +817,22 @@ mod tests {
         let frame = b"data: {\"usage\":null}\n\n";
         let result = classify_frame(frame);
         assert!(!result.has_usage);
+    }
+
+    #[test]
+    fn classify_frame_detects_error() {
+        let frame = b"data: {\"error\":{\"type\":\"exceed_context_size_error\",\"n_prompt_tokens\":100,\"n_ctx\":262144}}\n\n";
+        let result = classify_frame(frame);
+        assert!(result.is_error);
+        assert!(!result.has_content);
+    }
+
+    #[test]
+    fn classify_frame_error_vs_content() {
+        let frame = b"data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n";
+        let result = classify_frame(frame);
+        assert!(!result.is_error);
+        assert!(result.has_content);
     }
 
     // ---- SseFrameParser tests ----
