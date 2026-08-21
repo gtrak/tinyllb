@@ -67,6 +67,7 @@ pub fn load() -> anyhow::Result<Config> {
         .set_default("backend.url", "http://localhost:8000")?
         .set_default("scheduler.max_active_flows", 4u32)?
         .set_default("scheduler.starvation_timeout", "300s")?
+        .set_default("scheduler.kv_pressure.enabled", false)?
         .set_default("flows.default_weight", 1.0f64)?
         .set_default("flows.default_priority", 50u32)?
         .set_default("priorities.interactive", 100u32)?
@@ -188,6 +189,38 @@ fn validate(cfg: &Config) -> anyhow::Result<()> {
         }
     }
 
+    // Validate KV-pressure concurrency cap constraints.
+    let kp = &cfg.scheduler.kv_pressure;
+    if kp.enabled {
+        if kp.thresholds.is_empty() {
+            return Err(anyhow::anyhow!(
+                "kv_pressure.thresholds must not be empty when kv_pressure is enabled"
+            ));
+        }
+        if kp.thresholds.iter().any(|t| t.at < 0.0 || t.at > 1.0) {
+            return Err(anyhow::anyhow!(
+                "kv_pressure.thresholds[].at must be in [0, 1]"
+            ));
+        }
+        if kp
+            .thresholds
+            .windows(2)
+            .any(|w| w[1].at <= w[0].at)
+        {
+            return Err(anyhow::anyhow!(
+                "kv_pressure.thresholds must be strictly ascending by 'at'"
+            ));
+        }
+        if kp
+            .thresholds
+            .iter()
+            .any(|t| t.max_flows < 1 || t.max_flows > cfg.scheduler.max_active_flows)
+        {
+            return Err(anyhow::anyhow!(
+                "kv_pressure.thresholds[].max_flows must be in [1, max_active_flows]"
+            ));
+        }
+    }
     // Validate retry policy constraints.
     let rp = &cfg.retry_policy;
     if rp.enabled {

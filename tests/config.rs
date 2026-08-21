@@ -267,3 +267,231 @@ kv_policy:
         "error should explain the migration: {err}"
     );
 }
+
+#[test]
+#[serial_test::serial]
+fn kv_pressure_defaults_to_disabled_empty_thresholds() {
+    let tmp = "/tmp/test_config_kv_pressure_defaults.yaml";
+    std::fs::write(
+        tmp,
+        r#"
+backend:
+  url: http://localhost:9999
+"#,
+    )
+    .expect("write temp yaml");
+
+    let vars = no_env_overrides(&[("CONFIG_PATH", tmp)]);
+    let cfg = with_env(&vars, || {
+        config::load().expect("should load minimal config")
+    });
+    std::fs::remove_file(tmp).ok();
+
+    assert!(!cfg.scheduler.kv_pressure.enabled);
+    assert!(cfg.scheduler.kv_pressure.thresholds.is_empty());
+}
+
+#[test]
+#[serial_test::serial]
+fn kv_pressure_full_ladder_parses() {
+    let tmp = "/tmp/test_config_kv_pressure_ladder.yaml";
+    std::fs::write(
+        tmp,
+        r#"
+backend:
+  url: http://localhost:8000
+scheduler:
+  max_active_flows: 4
+  kv_pressure:
+    enabled: true
+    thresholds:
+      - at: 0.5
+        max_flows: 3
+      - at: 0.8
+        max_flows: 2
+      - at: 0.95
+        max_flows: 1
+"#,
+    )
+    .expect("write temp yaml");
+
+    let vars = no_env_overrides(&[("CONFIG_PATH", tmp)]);
+    let cfg = with_env(&vars, || {
+        config::load().expect("should load kv_pressure ladder")
+    });
+    std::fs::remove_file(tmp).ok();
+
+    assert!(cfg.scheduler.kv_pressure.enabled);
+    assert_eq!(
+        cfg.scheduler.kv_pressure.thresholds,
+        vec![
+            config::KvPressureThreshold {
+                at: 0.5,
+                max_flows: 3,
+            },
+            config::KvPressureThreshold {
+                at: 0.8,
+                max_flows: 2,
+            },
+            config::KvPressureThreshold {
+                at: 0.95,
+                max_flows: 1,
+            },
+        ]
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn kv_pressure_enabled_empty_thresholds_errors() {
+    let tmp = "/tmp/test_config_kv_pressure_empty.yaml";
+    std::fs::write(
+        tmp,
+        r#"
+backend:
+  url: http://localhost:8000
+scheduler:
+  max_active_flows: 4
+  kv_pressure:
+    enabled: true
+    thresholds: []
+"#,
+    )
+    .expect("write temp yaml");
+
+    let vars = no_env_overrides(&[("CONFIG_PATH", tmp)]);
+    let result = with_env(&vars, config::load);
+    std::fs::remove_file(tmp).ok();
+
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("kv_pressure.thresholds must not be empty"),
+        "error should mention empty thresholds: {err}"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn kv_pressure_unsorted_thresholds_error() {
+    let tmp = "/tmp/test_config_kv_pressure_unsorted.yaml";
+    std::fs::write(
+        tmp,
+        r#"
+backend:
+  url: http://localhost:8000
+scheduler:
+  max_active_flows: 4
+  kv_pressure:
+    enabled: true
+    thresholds:
+      - at: 0.8
+        max_flows: 2
+      - at: 0.5
+        max_flows: 3
+"#,
+    )
+    .expect("write temp yaml");
+
+    let vars = no_env_overrides(&[("CONFIG_PATH", tmp)]);
+    let result = with_env(&vars, config::load);
+    std::fs::remove_file(tmp).ok();
+
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("strictly ascending"),
+        "error should mention ordering: {err}"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn kv_pressure_at_out_of_range_errors() {
+    let tmp = "/tmp/test_config_kv_pressure_at_range.yaml";
+    std::fs::write(
+        tmp,
+        r#"
+backend:
+  url: http://localhost:8000
+scheduler:
+  max_active_flows: 4
+  kv_pressure:
+    enabled: true
+    thresholds:
+      - at: 1.5
+        max_flows: 2
+"#,
+    )
+    .expect("write temp yaml");
+
+    let vars = no_env_overrides(&[("CONFIG_PATH", tmp)]);
+    let result = with_env(&vars, config::load);
+    std::fs::remove_file(tmp).ok();
+
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("at must be in [0, 1]"),
+        "error should mention at range: {err}"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn kv_pressure_max_flows_zero_errors() {
+    let tmp = "/tmp/test_config_kv_pressure_zero_flows.yaml";
+    std::fs::write(
+        tmp,
+        r#"
+backend:
+  url: http://localhost:8000
+scheduler:
+  max_active_flows: 4
+  kv_pressure:
+    enabled: true
+    thresholds:
+      - at: 0.5
+        max_flows: 0
+"#,
+    )
+    .expect("write temp yaml");
+
+    let vars = no_env_overrides(&[("CONFIG_PATH", tmp)]);
+    let result = with_env(&vars, config::load);
+    std::fs::remove_file(tmp).ok();
+
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("max_flows must be in [1, max_active_flows]"),
+        "error should mention max_flows range: {err}"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn kv_pressure_max_flows_exceeds_max_active_flows_errors() {
+    let tmp = "/tmp/test_config_kv_pressure_too_many_flows.yaml";
+    std::fs::write(
+        tmp,
+        r#"
+backend:
+  url: http://localhost:8000
+scheduler:
+  max_active_flows: 4
+  kv_pressure:
+    enabled: true
+    thresholds:
+      - at: 0.5
+        max_flows: 8
+"#,
+    )
+    .expect("write temp yaml");
+
+    let vars = no_env_overrides(&[("CONFIG_PATH", tmp)]);
+    let result = with_env(&vars, config::load);
+    std::fs::remove_file(tmp).ok();
+
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("max_flows must be in [1, max_active_flows]"),
+        "error should mention max_flows range: {err}"
+    );
+}

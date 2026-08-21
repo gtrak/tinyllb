@@ -288,6 +288,8 @@ pub struct Scheduler {
     pub completion_bias: CompletionBias,
     #[serde(default)]
     pub kv_bias: KvBias,
+    #[serde(default)]
+    pub kv_pressure: KvPressure,
 }
 
 impl Scheduler {
@@ -307,6 +309,7 @@ impl Default for Scheduler {
             starvation_timeout: Self::default_starvation_timeout(),
             completion_bias: CompletionBias::default(),
             kv_bias: KvBias::default(),
+            kv_pressure: KvPressure::default(),
         }
     }
 }
@@ -357,6 +360,39 @@ impl Default for KvBias {
             pressure_below: Self::default_pressure_below(),
         }
     }
+}
+
+/// KV-pressure-driven dynamic concurrency cap.
+///
+/// Maps backend KV pressure to an effective `max_active_flows` ceiling.
+/// For each threshold with `pressure >= at`, the effective cap is the
+/// minimum of `max_flows` across all matched thresholds (and
+/// `max_active_flows` itself). Disabled by default: when disabled or
+/// `thresholds` is empty, the cap is always `max_active_flows` (no
+/// behavioral change).
+#[derive(
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize
+)]
+pub struct KvPressure {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Ladder of (pressure, max_flows) pairs. `at` in [0,1]; matched
+    /// when `pressure >= at`. Must be strictly ascending by `at`.
+    #[serde(default)]
+    pub thresholds: Vec<KvPressureThreshold>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct KvPressureThreshold {
+    /// Pressure level (KV usage fraction) at which this entry activates.
+    pub at: f64,
+    /// Active-flow ceiling while this entry is the most stringent match.
+    pub max_flows: u32,
 }
 
 /// Completion bias configuration.

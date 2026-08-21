@@ -5,6 +5,7 @@ mod flow_progress;
 mod kv_admission;
 mod kv_bias;
 pub mod lifecycle;
+mod pressure_cap;
 mod priority;
 mod starvation;
 pub mod ticket;
@@ -16,6 +17,7 @@ pub use ticket::{make_ticket, QueueTicket};
 pub use kv_admission::KvPolicy;
 pub use kv_bias::KvBiasHandle;
 pub use lifecycle::AccountingReport;
+pub use pressure_cap::PressureCapHandle;
 
 use crate::backend::BackendMonitor;
 use crate::config::CompletionBias;
