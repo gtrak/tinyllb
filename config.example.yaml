@@ -9,6 +9,14 @@ backend:
   url: http://localhost:8000
   metrics_interval: 1s        # how often to poll vLLM /metrics (feeds KV policy + stall watchdog)
   stall_timeout: 30s          # inference-stall watchdog window; 0 disables
+  # Proxy-side re-forward of transient llama.cpp context errors
+  # (intake 400 where prompt fits the slot, or mid-stream KV exhaustion
+  # before any content is forwarded). Bounded exponential backoff.
+  # max_attempts: 0 disables (zero behavioral change).
+  transient_retry:
+    max_attempts: 3
+    backoff_start: 500ms
+    backoff_max: 4s
 
 scheduler:
   max_active_flows: 4

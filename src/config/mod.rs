@@ -55,6 +55,10 @@ pub struct Backend {
     /// 0 disables the watchdog.
     #[serde(default = "Backend::default_stall_timeout", with = "loader::humantime_serde")]
     pub stall_timeout: Duration,
+    /// Proxy-side re-forward of transient backend errors. `max_attempts: 0`
+    /// disables.
+    #[serde(default)]
+    pub transient_retry: TransientRetry,
 }
 
 impl Default for Backend {
@@ -63,6 +67,7 @@ impl Default for Backend {
             url: Url::parse("http://localhost:8000").unwrap(),
             metrics_interval: Self::default_metrics_interval(),
             stall_timeout: Self::default_stall_timeout(),
+            transient_retry: TransientRetry::default(),
         }
     }
 }
@@ -74,6 +79,45 @@ impl Backend {
 
     fn default_stall_timeout() -> Duration {
         Duration::from_secs(30)
+    }
+}
+
+/// Proxy-side re-forward of transient backend errors (llama.cpp
+/// context-exceed where prompt fits slot capacity; network errors from
+/// backend restart; mid-stream KV exhaustion before any content forwarded).
+/// Bounded exponential backoff. `max_attempts: 0` disables (zero behavioral
+/// change). See plan 007.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TransientRetry {
+    #[serde(default = "TransientRetry::default_max_attempts")]
+    pub max_attempts: u32,
+    #[serde(default = "TransientRetry::default_backoff_start", with = "loader::humantime_serde")]
+    pub backoff_start: Duration,
+    #[serde(default = "TransientRetry::default_backoff_max", with = "loader::humantime_serde")]
+    pub backoff_max: Duration,
+}
+
+impl TransientRetry {
+    fn default_max_attempts() -> u32 {
+        3
+    }
+
+    fn default_backoff_start() -> Duration {
+        Duration::from_millis(500)
+    }
+
+    fn default_backoff_max() -> Duration {
+        Duration::from_secs(4)
+    }
+}
+
+impl Default for TransientRetry {
+    fn default() -> Self {
+        Self {
+            max_attempts: Self::default_max_attempts(),
+            backoff_start: Self::default_backoff_start(),
+            backoff_max: Self::default_backoff_max(),
+        }
     }
 }
 

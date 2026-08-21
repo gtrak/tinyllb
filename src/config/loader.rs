@@ -77,6 +77,9 @@ pub fn load() -> anyhow::Result<Config> {
         .set_default("backpressure.max_wait", "10s")?
         .set_default("backpressure.retry_after_base", "1s")?
         .set_default("backend.metrics_interval", "1s")?
+        .set_default("backend.transient_retry.max_attempts", 3u32)?
+        .set_default("backend.transient_retry.backoff_start", "500ms")?
+        .set_default("backend.transient_retry.backoff_max", "4s")?
         .set_default("metrics.endpoint", "/metrics")?
         .set_default("server.bind", "0.0.0.0:8080")?
         .set_default("backpressure.kv_policy.enabled", false)?
@@ -205,6 +208,21 @@ fn validate(cfg: &Config) -> anyhow::Result<()> {
         if rp.max_temperature > 2.0 {
             return Err(anyhow::anyhow!(
                 "retry_policy.max_temperature must be <= 2.0 (OpenAI-compatible range)"
+            ));
+        }
+    }
+
+    // Validate transient-retry backoff constraints.
+    let tr = &cfg.backend.transient_retry;
+    if tr.max_attempts > 0 {
+        if tr.backoff_start.is_zero() {
+            return Err(anyhow::anyhow!(
+                "backend.transient_retry.backoff_start must be > 0s"
+            ));
+        }
+        if tr.backoff_max < tr.backoff_start {
+            return Err(anyhow::anyhow!(
+                "backend.transient_retry.backoff_max must be >= backoff_start"
             ));
         }
     }
