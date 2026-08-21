@@ -1,4 +1,4 @@
-# 04 — Gateway: intake-error transient re-forward
+# 04 — Gateway: intake-error / network-error transient re-forward
 
 - **Complexity:** S
 - **Timebox:** 60 min
@@ -6,20 +6,30 @@
 
 ## Objective
 
-When the backend returns an intake error that is *transient* (llama.cpp
-`exceed_context_size_error` with `n_prompt_tokens < n_ctx`), re-forward the
-original request body with bounded exponential backoff before returning the
-error to the client. Permanent errors (`n_prompt_tokens >= n_ctx`) pass
-through unchanged. This covers both streaming and non-streaming intake
-errors because they both arrive as an initial non-2xx status in the same
-error block.
+Re-forward the original request body with bounded exponential backoff for
+**transient** failures of two kinds, both of which occur before any client
+bytes are sent (so re-forwarding is safe):
+
+1. **llama.cpp intake context-exceed** — HTTP 400 with
+   `type == "exceed_context_size_error"` and `n_prompt_tokens < n_ctx`
+   (transient; `>= n_ctx` is permanent and passes through unchanged).
+2. **Network errors** — "connection reset by server", connection refused,
+   broken pipe, etc. observed when llama.cpp is restarted (or briefly
+   unreachable) under live traffic. Today these become `ProxyError::Network`
+   → 502 Bad Gateway. With transient retry, the proxy waits out the backend
+   restart and re-forwards, returning 502 only after the budget is
+   exhausted.
+
+This covers both streaming and non-streaming intake errors because they
+both arrive as an initial non-2xx status (or a send error) in the same code
+path.
 
 ## Files
 
 | File | Change |
 |------|--------|
-| `src/gateway/proxy.rs` | In the error block (~:504-522, the `if status.is_client_error() || status.is_server_error()` branch), add transient detection + bounded re-forward before the verbatim-return. On a successful retry (2xx), re-dispatch the retry response through the normal streaming/non-streaming paths instead of returning. |
-| `src/gateway/retry.rs` | Add a `classify_llamacpp_error(body: &[u8]) -> LlamacppErrorClass` helper + a small `LlamacppErrorClass` enum (`Permanent`, `Transient`, `NotLlamacpp`) used by 04 and 05. Reuses nothing else. |
+| `src/gateway/proxy.rs` | In the error block (~:504-522, the `if status.is_client_error() || status.is_server_error()` branch) AND the send-error path (~:470-487, the `Err(...)` arms of the initial `send`), add transient detection + bounded re-forward before the verbatim-return / 502. On a successful retry (2xx), re-dispatch the retry response through the normal streaming/non-streaming paths instead of returning. |
+| `src/gateway/retry.rs` | Add a `classify_llamacpp_error(body: &[u8]) -> LlamacppErrorClass` helper + a small `LlamacppErrorClass` enum (`Permanent`, `Transient`, `NotLlamacpp`) used by 04 and 05. Also add a `is_transient_network_error(&reqwest::Error) -> bool` predicate (connection reset / connection refused / broken pipe / connect errors) used by 04's send-error path. Reuses nothing else. |
 
 ## Context (verified facts — do not re-derive)
 
@@ -67,51 +77,64 @@ error block.
        // and both n_prompt_tokens and n_ctx are present ints, classify;
        // else NotLlamacpp. Tolerate malformed JSON → NotLlamacpp.
    }
+   pub fn is_transient_network_error(e: &reqwest::Error) -> bool {
+       // true for: connection reset / connection refused / broken pipe /
+       // connect-timeout / hyper connection errors. Use reqwest's
+       // is_connect(), is_timeout() (connect-phase), and the underlying
+       // io::ErrorKind where reachable. Be conservative: do NOT retry
+       // request-build errors or body-parse errors.
+   }
    ```
-   Unit-test the three branches.
+   Unit-test all branches.
 2. Add `transient_retry: TransientRetry` to `AppState` (`src/gateway/mod.rs`),
    wire it in `src/main.rs` (`transient_retry: cfg.backend.transient_retry.clone()`)
    and `AppState::test_default` (`transient_retry:
    TransientRetry::default()`).
-3. In `src/gateway/proxy.rs` error block, restructure so transient errors are
-   retried and, on success, the retry response is dispatched normally:
-   - Compute `class = classify_llamacpp_error(&body_bytes)` *after*
-     collecting the error body.
-   - If `class == Permanent` → keep the existing verbatim return (no retry).
-   - If `class == Transient && state.transient_retry.max_attempts > 0`:
-     run a bounded loop:
-     ```rust
-     for attempt in 1..=state.transient_retry.max_attempts {
-         state.metrics.backend_retries_total.inc();
-         sleep(backoff(attempt, &state.transient_retry)).await;
-         let send = send_retry_request(&state.client, &method,
-             &backend_url, &headers, forwarded_body.clone(),
-             state.request_timeout).await;
-         match send {
-             Ok(resp) if resp.status().is_success() => {
-                 // Re-dispatch this response: re-read status/headers/
-                 // content_type/is_sse and fall through to the normal
-                 // streaming/non-streaming dispatch below. Easiest:
-                 // assign `response = resp`, re-derive `status`,
-                 // `response_headers`, `content_type`, `is_sse`, and
-                 // `break` out of the retry loop into the existing
-                 // dispatch (529+ streaming, 584+ non-streaming).
-                 // DO NOT return from inside the loop on success.
-             }
-             Ok(resp) => {
-                 // Another error (maybe 400 again). Reclassify; if
-                 // Permanent, break with this response as the final
-                 // verbatim error; if still Transient and attempts
-                 // remain, continue; if exhausted, break.
-                 ...
-             }
-             Err(_) => break, // network error: keep the last error response
-         }
-     }
-     // If we exit the loop without a success, the last error response is
-     // forwarded verbatim (the existing path) and
-     // backend_retry_exhausted_total increments.
-     ```
+3. In `src/gateway/proxy.rs`, handle BOTH transient failure kinds in one
+   bounded re-forward loop. Two entry points feed the same loop:
+   - **Send-error path** (~:470-487): today the `Err(ProxyError::Network(e))`
+     arm returns 502 immediately. When `is_transient_network_error(&e)` and
+     `state.transient_retry.max_attempts > 0`, enter the re-forward loop
+     instead of returning.
+   - **Error-block path** (~:504-522): compute
+     `class = classify_llamacpp_error(&body_bytes)` after collecting the
+     error body. `Permanent` → verbatim return (no retry). `Transient` and
+     `max_attempts > 0` → enter the re-forward loop. `NotLlamacpp` →
+     verbatim return (existing behavior; vLLM-shaped 4xx untouched).
+   The shared re-forward loop:
+   ```rust
+   for attempt in 1..=state.transient_retry.max_attempts {
+       state.metrics.backend_retries_total.inc();
+       sleep(backoff(attempt, &state.transient_retry)).await;
+       let send = send_retry_request(&state.client, &method,
+           &backend_url, &headers, forwarded_body.clone(),
+           state.request_timeout).await;
+       match send {
+           Ok(resp) if resp.status().is_success() => {
+               // Re-dispatch this response: re-read status/headers/
+               // content_type/is_sse and fall through to the normal
+               // streaming/non-streaming dispatch below. Easiest:
+               // assign `response = resp`, re-derive `status`,
+               // `response_headers`, `content_type`, `is_sse`, and
+               // `break` out of the retry loop into the existing
+               // dispatch (529+ streaming, 584+ non-streaming).
+               // DO NOT return from inside the loop on success.
+           }
+           Ok(resp) => {
+               // Another error (maybe 400 again). Reclassify; if
+               // Permanent, break with this response as the final
+               // verbatim error; if still Transient and attempts
+               // remain, continue; if exhausted, break.
+               ...
+           }
+           Err(e) if is_transient_network_error(&e) && attempts_remain => continue,
+           Err(_) => break, // non-transient network error: keep the 502
+       }
+   }
+   // If we exit the loop without a success, the last error response is
+   // forwarded verbatim (or 502 for a send error) and
+   // backend_retry_exhausted_total increments.
+   ```
    - `backoff(attempt, policy)`: exponential,
      `min(backoff_start * 2^(attempt-1), backoff_max)`, capped.
    - **Critical structural note:** the error block currently `return`s. To
@@ -154,6 +177,10 @@ error block.
     max_attempts`).
   - **Disabled:** `max_attempts: 0` → transient 400 passes through with
     `backend_retries_total == 0`.
+  - **Network error (backend restart):** stub returns a connection-reset
+    error on the first send, then a 200 on retry. Assert the client
+    receives the 200 body and `backend_retries_total == 1`. (Use a stub
+    that drops/returns an error for attempt 1.)
   - **Streaming transient:** a streaming request (`stream:true`) getting
     a transient intake 400, then a 200 SSE stream on retry. Assert the
     client receives the SSE stream and `backend_retries_total == 1`.

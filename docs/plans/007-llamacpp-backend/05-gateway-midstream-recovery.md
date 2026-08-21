@@ -1,4 +1,4 @@
-# 05 — Gateway: mid-stream error re-forward
+# 05 — Gateway: mid-stream error / connection-reset re-forward
 
 - **Complexity:** S
 - **Timebox:** 50 min
@@ -6,11 +6,14 @@
 
 ## Objective
 
-Handle the rarer transient case: a mid-stream SSE error event from
-llama.cpp (unified-KV exhaustion while all slots are busy) when **no content
-frames have been forwarded to the client yet**. Re-forward the original
-request with bounded backoff. If content was already forwarded, keep the
-current abort-body behavior (re-forwarding would duplicate tokens — the
+Handle the rarer transient cases that occur **after** the stream has started:
+(1) a mid-stream SSE error event from llama.cpp (unified-KV exhaustion while
+all slots are busy), and (2) a mid-stream **connection reset** (the backend
+restarts mid-generation — the user observed "connection reset by server"
+when restarting llama.cpp under live traffic). In both cases, re-forward the
+original request with bounded backoff **only when no content frames have
+been forwarded to the client yet**. If content was already forwarded, keep
+the current abort-body behavior (re-forwarding would duplicate tokens — the
 client's retry remains the recovery).
 
 ## Files
@@ -36,10 +39,11 @@ client's retry remains the recovery).
   another transient type). The stream then terminates (no `[DONE]`).
 - Today, a stream that "ends without a terminal frame is treated as a
   transport failure" (transport-retry behavior) — the body is aborted so
-  the client retries on fresh connections. That path already handles the
-  "content was forwarded" case acceptably. This task adds the *better*
-  path for the no-content-yet case: proxy-side re-forward, which is
-  transparent to the client.
+  the client retries on fresh connections. **This is exactly the path a
+  mid-stream connection reset (backend restart) hits.** That path already
+  handles the "content was forwarded" case acceptably. This task adds the
+  *better* path for the no-content-yet case: proxy-side re-forward, which
+  is transparent to the client.
 
 ## Steps
 
@@ -51,14 +55,18 @@ client's retry remains the recovery).
    the frame's `data:` payload bytes — the helper from task 04 already
    takes `&[u8]` and tolerates non-error JSON by returning
    `NotLlamacpp`).
-3. Decision logic, integrated into the existing retry loop:
-   - **Transient error frame AND `!saw_content && !saw_tool_calls` AND
-     attempts remain** → discard the error frame, drop the inner backend
-     stream, increment `backend_retries_total`, sleep backoff, re-send via
-     `send_retry_request` (same body — no temperature bump), swap the inner
-     stream to the retry response, reset the per-attempt frame flags,
-     `attempt += 1`. Continue. (This mirrors the premature-stop retry's
-     discard-and-retry exactly.)
+3. Decision logic, integrated into the existing retry loop (applies to both
+   SSE error frames and transport failures / connection resets):
+   - **Transient error frame OR transport failure (connection reset) AND
+    `!saw_content && !saw_tool_calls` AND attempts remain** → discard the
+    error frame / drop the dead inner stream, increment
+    `backend_retries_total`, sleep backoff, re-send via
+    `send_retry_request` (same body — no temperature bump), swap the inner
+    stream to the retry response, reset the per-attempt frame flags,
+    `attempt += 1`. Continue. (This mirrors the premature-stop retry's
+    discard-and-retry exactly.) The connection-reset case is the same
+    code path — a transport failure with no content yet is re-forwarded
+    rather than aborted.
    - **Transient error frame AND content/tool_calls already forwarded** →
      do NOT re-forward (would duplicate). Fall through to the existing
      abort-body / transport-failure behavior (end the stream so the client
@@ -91,6 +99,10 @@ client's retry remains the recovery).
     normal SSE stream on retry. Assert the client receives a clean,
     content-bearing stream with a single terminal `[DONE]`, and
     `backend_retries_total == 1`.
+  - **Mid-stream connection reset (backend restart), no content yet →
+    re-forward → success:** stub streams nothing then drops the connection
+    (simulating a mid-generation backend restart). Assert a clean
+    content-bearing stream on retry and `backend_retries_total == 1`.
   - **Mid-stream transient after content → abort (no duplication):** stub
     streams content deltas, then a transient error frame. Assert the
     stream terminates (client gets the partial content and must retry),

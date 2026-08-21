@@ -61,12 +61,11 @@ broken. No preemption counter exists on llama.cpp; `preemptions` stays 0
 
 ### 2. Transient-failure re-forward (gateway)
 
-Source analysis (`server-context.cpp:3137`, `:4307`, `:4406`,
-`server-common.cpp:51`) established the failure modes:
+Two transient failure kinds, both handled by one bounded re-forward loop:
 
-- **Intake context-exceed** (`ERROR_TYPE_EXCEED_CONTEXT_SIZE`): fires when
-  `prompt_tokens >= slot.n_ctx`. Returns HTTP 400 with structured JSON
-  `{"error":{"code":400,"type":"exceed_context_size_error","message":"...",
+- **llama.cpp intake context-exceed** (`ERROR_TYPE_EXCEED_CONTEXT_SIZE`):
+  fires when `prompt_tokens >= slot.n_ctx`. Returns HTTP 400 with structured
+  JSON `{"error":{"code":400,"type":"exceed_context_size_error","message":"...",
   "n_prompt_tokens":N,"n_ctx":M}}`. Delivered **before any SSE bytes** (the
   server waits for the first task result before committing to a 200 stream),
   so it is safe to re-forward — the request body is untouched and no client
@@ -75,12 +74,19 @@ Source analysis (`server-context.cpp:3137`, `:4307`, `:4406`,
   and **transient** when `n_prompt_tokens < n_ctx` (defensive — covers future
   llama.cpp behavior changes and unified-KV crowding).
 
-- **Mid-stream KV exhaustion**: under `-kvu`, when decode can't find free KV
-  space and all slots are busy (it only purges *idle* slots, never busy ones),
-  in-flight requests error mid-stream via an SSE error event. If no content
-  frames were forwarded yet, re-forwarding is safe; if content was already
-  forwarded, re-forward would duplicate tokens, so the current abort-body +
-  client-retry behavior is kept.
+- **Network errors (backend restart):** "connection reset by server",
+  connection refused, broken pipe — observed when llama.cpp is restarted
+  under live traffic. Today these become `ProxyError::Network` → 502. With
+  transient retry, the proxy waits out the restart and re-forwards,
+  returning 502 only after the budget is exhausted.
+
+- **Mid-stream KV exhaustion / connection reset**: under `-kvu`, when decode
+  can't find free KV space and all slots are busy (it only purges *idle*
+  slots, never busy ones), in-flight requests error mid-stream via an SSE
+  error event; a backend restart mid-generation produces a connection reset.
+  If no content frames were forwarded yet, re-forwarding is safe; if content
+  was already forwarded, re-forward would duplicate tokens, so the current
+  abort-body + client-retry behavior is kept.
 
 **Decisions (locked with user):**
 - Permanent intake context-exceed (`n_prompt_tokens >= n_ctx`) → **pass the
