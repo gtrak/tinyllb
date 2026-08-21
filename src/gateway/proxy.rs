@@ -328,8 +328,23 @@ async fn transient_retry(
                     // Still transient with attempts remaining: back off and
                     // re-forward.
                     LlamacppErrorClass::Transient if attempt < policy.max_attempts => continue,
-                    // Permanent, non-llama.cpp, or transient but exhausted:
+                    // Transient but budget exhausted: the last error is still
+                    // transient after all retries — count as exhausted, then
                     // return the error verbatim (marks lifecycle completed).
+                    LlamacppErrorClass::Transient => {
+                        state.metrics.backend_retry_exhausted_total.inc();
+                        return TransientRetryOutcome::FinalResponse(build_error_response(
+                            status,
+                            body_bytes,
+                            &response_headers,
+                            request_id,
+                            &lifecycle,
+                            &state.metrics,
+                        ));
+                    }
+                    // Permanent (n_prompt_tokens >= n_ctx) or non-llama.cpp:
+                    // return verbatim, NOT exhausted (no budget burned on a
+                    // still-transient final error).
                     _ => {
                         return TransientRetryOutcome::FinalResponse(build_error_response(
                             status,
