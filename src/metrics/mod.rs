@@ -74,6 +74,10 @@ pub struct Metrics {
     pub premature_stop_detected_total: prometheus::Counter,
     pub premature_stop_retries_total: prometheus::Counter,
     pub premature_stop_exhausted_total: prometheus::Counter,
+
+    // -- Transient backend retry family --
+    pub backend_retries_total: prometheus::Counter,
+    pub backend_retry_exhausted_total: prometheus::Counter,
 }
 
 impl Default for Metrics {
@@ -265,6 +269,19 @@ impl Metrics {
         )
         .expect("premature_stop_exhausted_total should be creatable");
 
+        // -- Transient backend retry family --
+        let backend_retries_total = prometheus::Counter::new(
+            "tinyllb_backend_retries_total",
+            "Proxy-side re-forwards of transient backend errors (llama.cpp context-exceed where prompt fits slot capacity, or network errors from backend restart, or mid-stream KV exhaustion before any content forwarded)",
+        )
+        .expect("tinyllb_backend_retries_total should be creatable");
+
+        let backend_retry_exhausted_total = prometheus::Counter::new(
+            "tinyllb_backend_retry_exhausted_total",
+            "Transient backend retries exhausted (last error response forwarded to client)",
+        )
+        .expect("tinyllb_backend_retry_exhausted_total should be creatable");
+
         // Register all collectors with the registry.
         registry
             .register(Box::new(queue_depth.clone()))
@@ -341,6 +358,13 @@ impl Metrics {
         registry
             .register(Box::new(premature_stop_exhausted_total.clone()))
             .expect("premature_stop_exhausted_total registration should succeed");
+        // Register transient backend retry metrics.
+        registry
+            .register(Box::new(backend_retries_total.clone()))
+            .expect("backend_retries_total registration should succeed");
+        registry
+            .register(Box::new(backend_retry_exhausted_total.clone()))
+            .expect("backend_retry_exhausted_total registration should succeed");
 
 
         Metrics {
@@ -369,6 +393,8 @@ impl Metrics {
             premature_stop_detected_total,
             premature_stop_retries_total,
             premature_stop_exhausted_total,
+            backend_retries_total,
+            backend_retry_exhausted_total,
         }
     }
 }
