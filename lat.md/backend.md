@@ -45,7 +45,7 @@ Published observations maintain mathematical consistency under defined condition
 - The default observation always represents zero resource pressure: utilization = 0, availability = 1.0, preemptions = 0, and all token counters and request counts = 0.
 - Monitoring errors never produce new observations; the last known observation is preserved.
 - Both utilization name variants (v0 and v1) map to the same semantic field; the last-parsed value prevails.
-- **llama.cpp KV pressure is /slots-derived**: on llama.cpp scrapes, `kv_usage` is set from the `/slots` fetch when it succeeds — Σ per-slot `n_prompt_tokens` ÷ pool, clamped to `[0,1]`, with `kv_free = 1.0 − kv_usage` — and stays at its 0.0/1.0 defaults for the scrape on any failure (endpoint absent, HTTP error, malformed JSON, empty array, zero pool), so downstream KV-aware consumers stay inert at zero pressure.
+- **llama.cpp KV pressure is /slots-derived**: on llama.cpp scrapes, `kv_usage` is set from the `/slots` fetch when it succeeds — Σ per-slot `n_prompt_tokens` ÷ pool, clamped to `[0,1]`, with `kv_free = 1.0 − kv_usage` — and stays at its 0.0/1.0 defaults for the scrape on any failure (endpoint absent, HTTP error, malformed JSON, empty array, zero pool), so downstream KV-aware consumers stay inert at zero pressure. The same `/slots` fetch also records the slot count as `slot_count` (`Some(len)` on success, `None` on failure), which the gateway reads for `id_slot` session pinning ([[gateway#Session Slot Pinning]]).
 - **/slots health logs on transitions only**: a working→failing `/slots` transition logs a warning and a failing→working transition logs recovery; a server that never worked (the common case without `--slots`) is never warned about.
 
 ## Constraints
@@ -133,8 +133,8 @@ llama.cpp family:
 
 - **Typed snapshot**: The snapshot is a value type representing backend state at a single point in time. It is cloneable for independent concurrent access.
 
-- Carries nine quantities: KV usage fraction, KV free fraction, cumulative preemptions, cumulative prompt tokens, cumulative generation tokens, running request count, waiting request count, cumulative cached prompt tokens, and cumulative decode calls.
-- The default snapshot represents a zero-load baseline: usage is zero, free is one, and all other quantities are zero.
+- Carries ten quantities: KV usage fraction, KV free fraction, the llama.cpp slot count (`slot_count: Option<u32>`, the `/slots` length; `None` when `/slots` was unavailable this scrape), cumulative preemptions, cumulative prompt tokens, cumulative generation tokens, running request count, waiting request count, cumulative cached prompt tokens, and cumulative decode calls.
+- The default snapshot represents a zero-load baseline: usage is zero, free is one, slot count is absent (`None`), and all other quantities are zero.
 - `cached_prompt_tokens` and `decode_calls` are llama.cpp-only progress signals: vLLM backends never populate them, so they stay at their zero default on vLLM backends.
 - `is_busy()` reports whether the engine has queued or running work: true when either the running or waiting request count is positive.
 

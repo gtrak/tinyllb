@@ -87,9 +87,11 @@ metric-name prefix on each `/metrics` scrape. llama.cpp notes:
   admits and never preempts in-flight flows.
 - Align `scheduler.max_active_flows` with llama-server's `--parallel N` so
   the proxy admits no more concurrent flows than slots the backend can run.
-- Set `backend.llamacpp_slots: N` (mirror `--parallel N`) to pin named
-  sessions to a stable slot for prompt KV-cache reuse; ephemeral requests keep
-  auto-selection. vLLM deployments leave it unset.
+- Session pinning is automatic — the slot count is read from the server's
+  `/slots` endpoint (the same one used for KV pressure), so named sessions pin
+  to a stable slot for prompt KV-cache reuse with no config; ephemeral requests
+  keep auto-selection. It is disabled when `/slots` is unavailable (vLLM
+  deployments are unaffected).
 
 ### 2. Start the proxy
 
