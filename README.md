@@ -176,6 +176,7 @@ overridden via environment variables (see below).
 | `backend.transient_retry.max_attempts` | `3` | Transient-error re-forward attempts; `0` disables |
 | `backend.transient_retry.backoff_start` | `500ms` | First backoff delay between re-forwards |
 | `backend.transient_retry.backoff_max` | `4s` | Cap on the exponential backoff delay |
+| `backend.kv_unified` | `false` | llama-server runs with `-kvu` (unified KV); selects the `/slots` pressure denominator |
 | `scheduler.max_active_flows` | `4` | Max concurrent flows admitted |
 | `scheduler.starvation_timeout` | `300s` | Force-admit a flow after this idle time |
 | `scheduler.completion_bias.enabled` | `true` | Defer new-flow admission while active flows exceed target |
@@ -184,6 +185,8 @@ overridden via environment variables (see below).
 | `scheduler.kv_bias.enabled` | `true` | KV-cache-aware selection bias among eligible waiting flows |
 | `scheduler.kv_bias.bias_full_at` | `0.9` | KV fraction at which the bias fully dominates selection |
 | `scheduler.kv_bias.pressure_below` | `0.5` | KV fraction below which the bias is off (pure DRR fairness) |
+| `scheduler.kv_pressure.enabled` | `false` | KV-pressure-driven dynamic concurrency cap (soft: holds new admits, never preempts) |
+| `scheduler.kv_pressure.thresholds` | `[]` | Threshold ladder: KV fraction >= `at` caps to `max_flows` (ascending) |
 | `flows.default_weight` | `1` | Default DRR weight per flow |
 | `flows.default_priority` | `50` | Default priority (higher = more urgent) |
 | `flows.flow_idle_ttl` | `600s` | Evict a flow after this much idle time |
@@ -195,10 +198,12 @@ overridden via environment variables (see below).
 | `backpressure.max_wait` | `10s` | Max time a request waits in queue |
 | `backpressure.retry_after_base` | `1s` | Base `Retry-After` for backpressure rejections |
 | `server.bind` | `0.0.0.0:8080` | Listen address for the proxy |
+| `server.tps_window_secs` | `10` | Rolling window (seconds) for the `llm_tokens_per_second` gauge |
 | `metrics.endpoint` | `/metrics` | Path serving Prometheus metrics |
-| `kv_policy.enabled` | `false` | Enable KV-cache-aware admission |
-| `kv_policy.reject_threshold` | `0.95` | Reject when KV utilization > threshold |
-| `kv_policy.delay_threshold` | `0.80` | Delay admission when KV utilization > threshold |
+| `backpressure.kv_policy.enabled` | `false` | Enable KV-cache-aware admission |
+| `backpressure.kv_policy.reject_threshold` | `0.95` | Reject when KV utilization > threshold |
+| `backpressure.kv_policy.delay_threshold` | `0.80` | Delay admission when KV utilization > threshold |
+| `backpressure.kv_policy.bypass_interactive` | `true` | Interactive (priority-100) flows skip KV delay/reject |
 | `priority_policy.enabled` | `true` | Turn-boundary priority reclassification |
 | `priority_policy.idle_gap_threshold` | `30s` | Idle gap at a user turn that counts as a turn boundary |
 | `priority_policy.agentic_suspected_threshold` | `5` | Continuous arrivals to suspect agentic (agent priority) |
@@ -230,8 +235,10 @@ overridden via environment variables (see below).
 | `PORT` | Override bind port (e.g. `PORT=9090` binds to `0.0.0.0:9090`) |
 | `TINYLLB__BACKEND__URL` | Override `backend.url` |
 | `TINYLLB__BACKEND__STALL_TIMEOUT` | Override stall watchdog window |
+| `TINYLLB__BACKEND__KV_UNIFIED` | Override `backend.kv_unified` |
 | `TINYLLB__SCHEDULER__MAX_ACTIVE_FLOWS` | Override max active flows |
 | `TINYLLB__SCHEDULER__STARVATION_TIMEOUT` | Override starvation timeout |
+| `TINYLLB__SCHEDULER__KV_PRESSURE__ENABLED` | Override KV pressure cap enable flag |
 | `TINYLLB__FLOWS__DEFAULT_WEIGHT` | Override default flow weight |
 | `TINYLLB__FLOWS__DEFAULT_PRIORITY` | Override default flow priority |
 | `TINYLLB__PRIORITIES__INTERACTIVE` | Override interactive priority |
@@ -240,9 +247,9 @@ overridden via environment variables (see below).
 | `TINYLLB__BACKPRESSURE__MODE` | Override backpressure mode |
 | `TINYLLB__BACKPRESSURE__MAX_QUEUE_DEPTH` | Override max queue depth |
 | `TINYLLB__SERVER__BIND` | Override server bind address |
-| `TINYLLB__KV_POLICY__ENABLED` | Override KV policy enable flag |
-| `TINYLLB__KV_POLICY__REJECT_THRESHOLD` | Override KV reject threshold |
-| `TINYLLB__KV_POLICY__DELAY_THRESHOLD` | Override KV delay threshold |
+| `TINYLLB__BACKPRESSURE__KV_POLICY__ENABLED` | Override KV policy enable flag |
+| `TINYLLB__BACKPRESSURE__KV_POLICY__REJECT_THRESHOLD` | Override KV reject threshold |
+| `TINYLLB__BACKPRESSURE__KV_POLICY__DELAY_THRESHOLD` | Override KV delay threshold |
 | `TINYLLB__PRIORITY_POLICY__ENABLED` | Override turn-boundary priority reclassification |
 | `TINYLLB__RETRY_POLICY__ENABLED` | Override premature-stop retry enable flag |
 | `TINYLLB__REQUEST_TIMEOUT` | Override request timeout |
