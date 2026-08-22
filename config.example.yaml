@@ -10,7 +10,7 @@ backend:
   metrics_interval: 1s        # how often to poll vLLM /metrics (feeds KV policy + stall watchdog)
   stall_timeout: 30s          # inference-stall watchdog window; 0 disables
   kv_unified: false           # llama-server runs with -kvu (unified KV); selects the /slots pressure denominator
-  # llama.cpp only: slot count for id_session pinning (mirror --parallel).
+  # llama.cpp only: slot count for id_slot pinning (mirror --parallel).
   # None/unset disables; set to e.g. 4 to pin named sessions to a stable slot.
   # llamacpp_slots: 4
   # Proxy-side re-forward of transient llama.cpp context errors

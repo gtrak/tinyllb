@@ -29,7 +29,7 @@ The configuration surface presents contractual guarantees about what values are 
 
 **Configuration components**
 
-- **Backend specification** requires an absolute URL with scheme and a metrics poll interval; defaults are `http://localhost:8000` and `1s`. It also declares `kv_unified` (default `false`), which mirrors llama-server's `-kvu` flag and selects the `/slots` pressure denominator for llama.cpp backends (ignored for vLLM).
+- **Backend specification** requires an absolute URL with scheme and a metrics poll interval; defaults are `http://localhost:8000` and `1s`. It also declares `kv_unified` (default `false`), which mirrors llama-server's `-kvu` flag and selects the `/slots` pressure denominator for llama.cpp backends (ignored for vLLM), and `llamacpp_slots` (optional, default `None`; `Some(n)` requires `n >= 1`), the llama-server slot count that enables `id_slot` session pinning by mirroring `--parallel N` (ignored for vLLM). See [[gateway#Session Slot Pinning]].
 - **Scheduling discipline** is fixed to deficit round robin (DRR); the discipline is not configurable — the configuration surface exposes no scheduling-algorithm choice.
 - **Scheduler limits** declare `max_active_flows` (default `4`) and `starvation_timeout` (default `300s`).
 - **Completion bias** controls admission gating for new flows: `enabled` (default `true`), `target_active_flows` (default `0`, meaning "use `max_active_flows`"), and `predictive_admit` (default `false`).
@@ -83,6 +83,7 @@ These limitations are inherent to the configuration model.
 - When `scheduler.kv_pressure.enabled` is `true`, `thresholds` must be non-empty, every `at` must be in `[0, 1]` and strictly ascending, and every `max_flows` must be in `[1, max_active_flows]`. When `enabled` is `false`, the ladder is not validated.
 - When `retry_policy.enabled` is `true`, `max_retries` must be > 0, `temperature_step` must be > 0.0, `max_temperature` must be >= `default_temperature`, and `max_temperature` must be <= 2.0. When `enabled` is `false`, these fields are not validated.
 - When `backend.transient_retry.max_attempts` is greater than zero, `backoff_start` must be strictly positive and `backoff_max` must be >= `backoff_start`. When `max_attempts` is zero, these fields are not validated.
+- When `backend.llamacpp_slots` is set, it must be >= 1; a value of `0` is rejected at load.
 - `agentic_confirmed_threshold` must be strictly greater than `agentic_suspected_threshold`, and `agentic_suspected_threshold` must be at least 1. These constraints are validated regardless of the `enabled` flag.
 
 **Input format**

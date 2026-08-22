@@ -43,6 +43,7 @@ pub struct ResolvedFlow {
 /// slot_count). Stable across restarts (unlike the randomized HashMap
 /// hasher) so a session keeps the same slot and its KV cache.
 /// `slot_count == 0` → 0 (defensive; config validation forbids it).
+// @lat: [[gateway#Session Slot Pinning]]
 pub fn slot_id_for_flow(flow: &str, slot_count: u32) -> u32 {
     if slot_count == 0 {
         return 0;

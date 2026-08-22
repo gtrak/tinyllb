@@ -264,6 +264,7 @@ Concepts and source artifacts associated with reverse proxy request handling.
 - [[scheduler#Scheduler Facade and Policy Selection]] — admission control and backpressure enforcement.
 - [[flow#Flow Identification]] — flow ID resolution from headers and body.
 - [[gateway#Streaming Passthrough and Token Accounting]] — streaming response token accumulation and request tracking.
+- [[gateway#Session Slot Pinning]] — `id_slot` injection into the forwarded body for named sessions.
 - [[gateway#Gateway Application State]] — configuration surface for backend URL, timeout, and scheduler binding.
 - [[src/gateway/proxy.rs#proxy_handler]] — main request handler.
 - [[src/gateway/proxy.rs#is_inference_request]] — inference-route gate that scopes admission, retry, and token accounting.
@@ -587,6 +588,75 @@ Source files and cross-concept links for the transient re-forward subsystem.
 - [[backend#Backend Metrics Parsing]] — backend flavor identification that motivates dual-family support.
 - [[config#Configuration Contract]] — `backend.transient_retry` configuration surface.
 - [[metrics#Metric Family Contracts]] — retry counters.
+
+# Session Slot Pinning
+
+Pins a named session to a stable llama.cpp slot via the `id_slot` request field so the session's prompt KV cache reuses across turns; disabled by default, ephemeral requests keep auto-selection.
+
+## Purpose
+
+Session slot pinning reuses a session's prompt KV cache across multi-turn conversations on llama.cpp backends, lowering time-to-first-token on follow-up turns.
+
+llama-server's `--parallel N` slots each hold their own KV cache, and without pinning the server auto-selects a free slot per request, scattering a conversation's turns across slots and re-encoding the full prompt each turn.
+
+- Named (non-ephemeral) inference requests get an `id_slot` integer injected into the forwarded body, pinning every turn of the session to the same slot.
+- Ephemeral (one-shot) requests and non-inference requests are never pinned; they keep llama.cpp's auto-selection for lowest latency.
+- The feature is opt-in: when the slot count is unset, behavior is byte-identical to the pre-feature proxy ([[config#Configuration Contract]]).
+
+## Non-goals
+
+Slot pinning assigns slots; it does not observe them or manage slot lifecycle.
+
+- No per-slot / per-session KV attribution or observation (reading which slot a session is on and its KV usage back from `/slots`) — a follow-up on top of this.
+- No free-list slot allocation (first-free-slot-per-flow) with lifecycle cleanup; a deterministic hash is the assignment mechanism.
+- vLLM backends are unaffected: vLLM has no slot concept, and pinning is gated off by configuration.
+- No change to scheduling, admission, KV gate, retries, or token accounting.
+
+## Interface
+
+Pinning is driven by one configuration key and one pure hash function, with injection happening at the outgoing-body build site in [[gateway#Reverse Proxy Request Handling]].
+
+- `backend.llamacpp_slots: Option<u32>` — `None` (default) disables pinning; `Some(n)` with `n >= 1` pins named flows. `Some(0)` is rejected at config load ([[config#Configuration Contract]]).
+- `slot_id_for_flow(flow, n) = fnv1a(flow) % n` — FNV-1a 64-bit over the flow-id bytes, modulo the slot count, yielding a slot index in `[0, n)` ([[src/flow/mod.rs#slot_id_for_flow]]).
+- `id_slot` is injected as a JSON **integer** into the forwarded request body for **named inference requests only** (non-ephemeral flow AND `POST /v1/chat/completions` or `POST /v1/completions`), after the `include_usage` injection ([[src/gateway/proxy.rs#inject_id_slot]]).
+- When the body changes from injection, the forwarded `Content-Length` is dropped so the client recomputes it.
+
+## Invariants
+
+The following properties hold regardless of implementation details.
+
+- With `backend.llamacpp_slots: None`, no `id_slot` is injected and every outbound body is byte-identical to the pre-feature proxy (vLLM-safe regression gate).
+- The slot mapping is deterministic: the same flow id always maps to the same slot, including across proxy restarts.
+- The injected `id_slot` is always an integer in `[0, n)` for a configured `n`.
+- Ephemeral flows and non-inference requests are never pinned; they never carry an `id_slot`.
+- `id_slot` is baked into the captured `forwarded_body`, so transient-retry and premature-stop re-forwards (which re-send that body) carry the same slot with no extra work ([[gateway#Transient Backend-Error Re-forward]], [[gateway#Premature-Stop Retry]]).
+- A vLLM backend never receives an `id_slot` field (the configuration key is documented as llama.cpp-only and is simply unset for vLLM deployments).
+
+## Constraints
+
+Operator configuration determines slot behavior; the proxy does not auto-detect the backend's slot count.
+
+- `n` should mirror llama-server's `--parallel N`. If set higher than the real slot count, llama.cpp wraps (`id_slot % slots.size()`), so nothing breaks — it just load-biases; if set lower, it under-uses slots.
+- A deterministic hash is required: Rust's default `HashMap` hasher is randomized per-process and would re-shuffle pinning on every restart, defeating cache reuse. FNV-1a has no dependency and is stable.
+- `id_slot` is only meaningful on llama.cpp backends; the field is unknown to vLLM, which is why pinning is gated off by default.
+
+## Rationale
+
+The design trades load balance for cache locality and statelessness for simplicity.
+
+- **Why pin.** Prompt KV-cache reuse means follow-up turns of a conversation skip re-encoding the prompt, directly lowering time-to-first-token for multi-turn sessions.
+- **Why hash over free-list allocation.** A deterministic hash of the flow id is stateless — no per-flow slot bookkeeping, no coupling to flow reaping or slot lifecycle, and no race management for slot acquisition.
+- **Why config over `/slots` auto-detect.** A static config value is predictable, self-gating (unset = off), and matches what the operator already knows (`--parallel N`); auto-detection would add runtime monitor state and a cold-start gap before the first scrape.
+
+## Related
+
+Concepts and source artifacts associated with session slot pinning.
+
+- [[gateway#Reverse Proxy Request Handling]] — the handler that computes and injects `id_slot` into the forwarded body.
+- [[flow#Flow Identifier Contract]] — the flow identity (ephemeral vs named) that gates and drives pinning.
+- [[config#Configuration Contract]] — `backend.llamacpp_slots` configuration surface.
+- [[src/flow/mod.rs#slot_id_for_flow]] — deterministic FNV-1a slot hash.
+- [[src/gateway/proxy.rs#inject_id_slot]] — `id_slot` body injection.
 
 # Turn-Boundary Detection
 

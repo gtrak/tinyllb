@@ -69,6 +69,7 @@ Related concepts and source code for identity semantics.
 - [[flow#Flow Identification]] — Request-time resolution of FlowId from HTTP request context, including header extraction, body metadata parsing, empty-value rejection, and auto-generated ephemeral ID generation.
 - [[flow#Flow Registry and State]] — FlowId serves as the lookup key for the flow registry; see [[flow#Flow Registry and State]] for registration, lookup, and lifecycle semantics.
 - [[flow#Flow Registry and State]] — FlowId labels the logical client within a scheduling unit.
+- [[gateway#Session Slot Pinning]] — a named flow id also selects a stable llama.cpp backend slot via a deterministic hash.
 - FlowId identities are rendered via Display for snapshot observability.
 - [[src/flow/mod.rs#FlowId]] — FlowId definition and trait implementations.
 

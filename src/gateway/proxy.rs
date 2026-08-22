@@ -506,7 +506,7 @@ pub async fn proxy_handler(
     // unaffected. When modified, the forwarded Content-Length must be dropped
     // (reqwest recomputes it from the new body).
     // Capture the exact forwarded body for potential retry reuse.
-    // `forwarded_body` is the body after include_usage injection.
+    // `forwarded_body` is the body after include_usage and id_slot injection.
     let mut headers = headers;
     let mut forwarded_body: Bytes = body_bytes.clone();
     if let Some(b) = inject_include_usage(&forwarded_body) {
