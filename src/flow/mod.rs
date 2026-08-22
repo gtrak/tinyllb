@@ -1,5 +1,8 @@
 pub mod cadence;
 pub mod identify;
+pub mod slots;
+
+pub use slots::SlotAllocator;
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU8, AtomicU64, Ordering};
@@ -229,6 +232,9 @@ pub struct FlowRegistry {
     flows: DashMap<FlowId, Arc<Flow>>,
     default_weight: f64,
     default_priority: u32,
+    /// Stateful llama.cpp slot assignment for `id_slot` pinning; released
+    /// when the flow is reaped.
+    slots: SlotAllocator,
 }
 
 impl FlowRegistry {
@@ -238,6 +244,7 @@ impl FlowRegistry {
             flows: DashMap::new(),
             default_weight,
             default_priority,
+            slots: SlotAllocator::new(),
         }
     }
 
@@ -257,6 +264,17 @@ impl FlowRegistry {
         // Refresh the idle-eviction timestamp on every access.
         flow.last_seen.store(now_unix_secs(), Ordering::Relaxed);
         flow
+    }
+
+    /// Resolve the llama.cpp slot for a named flow, recording the
+    /// assignment for the flow's registered lifetime. The first request of
+    /// a flow takes its deterministic hash home slot when free, otherwise
+    /// the lowest free slot, so two live flows never share a slot while
+    /// capacity allows. Ephemeral flows are never assigned (the caller
+    /// gates on non-ephemeral).
+    // @lat: [[gateway#Session Slot Pinning]]
+    pub fn assign_slot(&self, id: &FlowId, slot_count: u32) -> u32 {
+        self.slots.assign(id, slot_count)
     }
 
     /// Register (upsert) a flow with explicit weight and priority.
@@ -295,7 +313,8 @@ impl FlowRegistry {
 
     /// Remove flows that have no active or queued requests and haven't
     /// been seen in the last `ttl` seconds. Returns the number of flows
-    /// removed.
+    /// removed. Also releases each removed flow's llama.cpp slot
+    /// assignment and sweeps any orphaned assignments (defensive).
     pub fn reap_idle(&self, ttl: std::time::Duration) -> usize {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
@@ -317,7 +336,11 @@ impl FlowRegistry {
 
         for id in &to_remove {
             self.flows.remove(id);
+            self.slots.release(id);
         }
+        // Defensive: drop slot assignments for flows no longer registered
+        // (should not occur; keeps the allocator from leaking slots).
+        self.slots.sweep_missing(|id| self.flows.contains_key(id));
         to_remove.len()
     }
 
@@ -426,6 +449,7 @@ impl std::fmt::Debug for FlowRegistry {
             .field("flows", &self.flows.len())
             .field("default_weight", &self.default_weight)
             .field("default_priority", &self.default_priority)
+            .field("slots", &self.slots.len())
             .finish()
     }
 }

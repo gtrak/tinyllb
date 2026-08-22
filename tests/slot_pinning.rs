@@ -1,9 +1,11 @@
-//! Integration tests for `id_slot` session pinning (plan 009, task 02):
-//! a named (non-ephemeral) inference request carries a deterministic
-//! `id_slot` integer in the forwarded body when the live slot count is
-//! present; ephemeral requests, non-inference routes, and the disabled
-//! (`slot_count: None`) case never get it. The stub backend records every
-//! body so tests assert on the actual bytes the proxy sent.
+//! Integration tests for `id_slot` session pinning (plans 009/010/011):
+//! a named (non-ephemeral) inference request carries a stateful `id_slot`
+//! integer in the forwarded body when the live slot count is present;
+//! two live sessions never share a slot while capacity allows (colliding
+//! hash homes are resolved to distinct slots); ephemeral requests,
+//! non-inference routes, and the disabled (`slot_count: None`) case never
+//! get it. The stub backend records every body so tests assert on the
+//! actual bytes the proxy sent.
 
 use axum::body::Body;
 use axum::http::Request;
@@ -408,5 +410,90 @@ async fn id_slot_survives_retry() {
     assert!(
         slot2 == Some(serde_json::json!(expected)),
         "retried attempt must carry the same id_slot, got {slot2:?}"
+    );
+}
+
+/// Find two distinct session ids whose deterministic hash home slots collide
+/// mod `n` (FNV-1a is deterministic, so a collision always exists for small
+/// `n` and this always terminates quickly).
+fn find_colliding_sessions(n: u32) -> (String, String) {
+    for i in 0..100_000u32 {
+        let a = format!("ses-a-{i}");
+        for j in 0..100_000u32 {
+            let b = format!("ses-b-{j}");
+            if tinyllb::flow::slot_id_for_flow(&a, n) == tinyllb::flow::slot_id_for_flow(&b, n) {
+                return (a, b);
+            }
+        }
+    }
+    panic!("no colliding session pair found mod {n}")
+}
+
+/// 8. Collision avoidance (the stateful-allocation core property): two named
+/// sessions whose deterministic hash home slots collide (mod 2) must still
+/// be pinned to distinct slots — the first keeps its home, the second takes
+/// the lowest free slot — and each stays put across subsequent turns.
+#[tokio::test]
+async fn colliding_sessions_get_distinct_slots() {
+    let (addr, stub) = start_stub_backend().await;
+    let backend_url = format!("http://{}/", addr);
+    let (app, _tx) = build_proxy_app(&backend_url, Some(2));
+
+    let (s1, s2) = find_colliding_sessions(2);
+    for s in [&s1, &s2, &s2] {
+        let resp = post_chat(&app, CHAT_BODY, Some(s)).await;
+        assert_eq!(resp.status(), 200);
+        let _ = collect_body_bytes(resp).await;
+    }
+
+    let bodies = recorded_json_bodies(&stub);
+    assert_eq!(bodies.len(), 3);
+    let slots: Vec<u64> = bodies
+        .iter()
+        .map(|b| b["id_slot"].as_u64().expect("id_slot must be present"))
+        .collect();
+    assert!(
+        slots.iter().all(|s| *s < 2),
+        "id_slot must be in [0, 2), got {slots:?}"
+    );
+    assert_eq!(
+        slots[0],
+        u64::from(tinyllb::flow::slot_id_for_flow(&s1, 2)),
+        "the first session keeps its deterministic home slot"
+    );
+    assert_ne!(
+        slots[0], slots[1],
+        "colliding sessions must be pinned to distinct slots"
+    );
+    assert_eq!(
+        slots[1], slots[2],
+        "the second session must stay on its assigned slot across turns"
+    );
+}
+
+/// 9. Saturation: with 2 slots and 3 live sessions, the third session cannot
+/// avoid sharing a slot; allocation degrades to its deterministic hash home
+/// (the pre-stateful behavior under load).
+#[tokio::test]
+async fn saturation_shares_hash_home() {
+    let (addr, stub) = start_stub_backend().await;
+    let backend_url = format!("http://{}/", addr);
+    let (app, _tx) = build_proxy_app(&backend_url, Some(2));
+
+    let (s1, s2) = find_colliding_sessions(2);
+    let s3 = "ses-overflow".to_string();
+    for s in [&s1, &s2, &s3] {
+        let resp = post_chat(&app, CHAT_BODY, Some(s)).await;
+        assert_eq!(resp.status(), 200);
+        let _ = collect_body_bytes(resp).await;
+    }
+
+    let bodies = recorded_json_bodies(&stub);
+    assert_eq!(bodies.len(), 3);
+    let slot3 = bodies[2]["id_slot"].as_u64().expect("id_slot must be present");
+    assert_eq!(
+        slot3,
+        u64::from(tinyllb::flow::slot_id_for_flow(&s3, 2)),
+        "a saturated allocator must fall back to the hash home slot"
     );
 }

@@ -591,33 +591,34 @@ Source files and cross-concept links for the transient re-forward subsystem.
 
 # Session Slot Pinning
 
-Pins a named session to a stable llama.cpp slot via the `id_slot` request field so the session's prompt KV cache reuses across turns; the slot count is auto-detected from the backend's `/slots`, ephemeral requests keep auto-selection.
+Pins a named session to a stable llama.cpp slot via the `id_slot` field so the prompt KV cache reuses across turns. Stateful allocation keeps two live sessions off the same slot while capacity allows; the slot count is auto-detected from `/slots`.
 
 ## Purpose
 
 Session slot pinning reuses a session's prompt KV cache across multi-turn conversations on llama.cpp backends, lowering time-to-first-token on follow-up turns.
 
-llama-server's `--parallel N` slots each hold their own KV cache, and without pinning the server auto-selects a free slot per request, scattering a conversation's turns across slots and re-encoding the full prompt each turn.
+llama-server's `--parallel N` slots each hold their own KV cache, and without pinning the server auto-selects a free slot per request, scattering a conversation's turns across slots and re-encoding the full prompt each turn. Two sessions sharing one slot evict each other's KV cache every turn, so allocation is stateful and avoids that while capacity allows.
 
 - Named (non-ephemeral) inference requests get an `id_slot` integer injected into the forwarded body, pinning every turn of the session to the same slot.
+- A new session takes its deterministic hash home slot when free, otherwise the lowest free slot; only when no slot is free (more live sessions than slots) does a session share its hash home.
 - Ephemeral (one-shot) requests and non-inference requests are never pinned; they keep llama.cpp's auto-selection for lowest latency.
 - The slot count is auto-detected from the backend's `/slots` scrape; when it is unknown (cold start, `/slots` unavailable, or vLLM), behavior is byte-identical to the pre-feature proxy ([[backend#Backend KV-Cache Monitor]]).
 
 ## Non-goals
 
-Slot pinning assigns slots; it does not observe them or manage slot lifecycle.
+Slot pinning assigns and releases slots; it does not observe them.
 
 - No per-slot / per-session KV attribution or observation (reading which slot a session is on and its KV usage back from `/slots`) — a follow-up on top of this.
-- No free-list slot allocation (first-free-slot-per-flow) with lifecycle cleanup; a deterministic hash is the assignment mechanism.
+- No mid-life slot migration: once assigned, a session keeps its slot until it is reaped (moving it would discard its warm KV cache).
 - vLLM backends are unaffected: vLLM has no slot concept, and the monitor never fetches `/slots` for it, so `slot_count` stays `None` and pinning is off.
 - No change to scheduling, admission, KV gate, retries, or token accounting.
 
 ## Interface
 
-Pinning is driven by the live slot count from the backend monitor and one pure hash function, with injection happening at the outgoing-body build site in [[gateway#Reverse Proxy Request Handling]].
+Pinning is driven by the live slot count from the backend monitor and a stateful flow→slot allocator owned by the flow registry ([[flow#Flow Registry and State]]), with injection happening at the outgoing-body build site in [[gateway#Reverse Proxy Request Handling]].
 
 - The slot count is `BackendSnapshot.slot_count: Option<u32>`, read live from the backend monitor's snapshot (`AppState.snapshot_rx`); `Some(n)` when the last `/slots` scrape reported n slots, `None` otherwise. `Some(n)` with `n >= 1` pins named flows; `None` disables pinning ([[backend#Backend KV-Cache Monitor]]).
-- `slot_id_for_flow(flow, n) = fnv1a(flow) % n` — FNV-1a 64-bit over the flow-id bytes, modulo the slot count, yielding a slot index in `[0, n)` ([[src/flow/mod.rs#slot_id_for_flow]]).
+- `FlowRegistry::assign_slot(flow, n)` resolves the slot statefully: a new flow takes its deterministic hash **home slot** `fnv1a(flow) % n` ([[src/flow/mod.rs#slot_id_for_flow]]) when free, otherwise the lowest free slot; if no slot is free (saturation) it takes the hash home slot and shares it. The assignment is stable for the flow's registered lifetime ([[src/flow/slots.rs#SlotAllocator]]).
 - `id_slot` is injected as a JSON **integer** into the forwarded request body for **named inference requests only** (non-ephemeral flow AND `POST /v1/chat/completions` or `POST /v1/completions`), after the `include_usage` injection ([[src/gateway/proxy.rs#inject_id_slot]]).
 - When the body changes from injection, the forwarded `Content-Length` is dropped so the client recomputes it.
 
@@ -626,7 +627,9 @@ Pinning is driven by the live slot count from the backend monitor and one pure h
 The following properties hold regardless of implementation details.
 
 - With `slot_count: None` (cold start, `/slots` unavailable, or vLLM), no `id_slot` is injected and every outbound body is byte-identical to the pre-feature proxy (vLLM-safe regression gate).
-- The slot mapping is deterministic: the same flow id always maps to the same slot, including across proxy restarts.
+- A flow's slot is stable for its registered lifetime: repeat requests of the same flow always carry the same `id_slot`. The first request of a flow takes its deterministic hash home slot when free, so the common (collision-free) case is restart-stable and reproduces the pre-stateful mapping.
+- Two live (registered) flows are never assigned the same slot while the slot count exceeds the number of live flows; sharing occurs only under saturation, where a new flow falls back to its hash home slot.
+- A flow's slot is released when the flow is reaped, freeing capacity for later flows.
 - The injected `id_slot` is always an integer in `[0, n)` for a detected slot count `n >= 1`.
 - Ephemeral flows and non-inference requests are never pinned; they never carry an `id_slot`.
 - `id_slot` is baked into the captured `forwarded_body`, so transient-retry and premature-stop re-forwards (which re-send that body) carry the same slot with no extra work ([[gateway#Transient Backend-Error Re-forward]], [[gateway#Premature-Stop Retry]]).
@@ -637,15 +640,19 @@ The following properties hold regardless of implementation details.
 The proxy auto-detects the slot count from the backend's `/slots` endpoint (the same scrape that derives KV pressure); no configuration is involved.
 
 - Cold start: `slot_count` is `None` until the first successful `/slots` scrape (≈ one `metrics_interval`), so the first requests auto-select; pinning self-enables once the count is known.
-- A deterministic hash is required: Rust's default `HashMap` hasher is randomized per-process and would re-shuffle pinning on every restart, defeating cache reuse. FNV-1a has no dependency and is stable.
+- The hash home must be deterministic: Rust's default `HashMap` hasher is randomized per-process and would re-shuffle home slots on every restart. FNV-1a has no dependency and is stable.
+- Allocation state is per-process and in-memory: flow→slot assignments are not persisted, so after a proxy restart each flow's first request re-derives its hash home (warm server caches are preserved in the collision-free case; flows that had been moved to a free slot may land elsewhere).
+- A backend restart with a different `--parallel` self-heals: an assignment whose index is out of range for the new slot count is re-resolved on the flow's next request.
 - Graceful off: if `/slots` is unavailable (or the backend is vLLM), `slot_count` stays `None` and pinning is disabled; requests keep llama.cpp's auto-selection.
 
 ## Rationale
 
-The design trades load balance for cache locality and statelessness for simplicity.
+The design trades load balance and a little state for cache locality and collision avoidance.
 
 - **Why pin.** Prompt KV-cache reuse means follow-up turns of a conversation skip re-encoding the prompt, directly lowering time-to-first-token for multi-turn sessions.
-- **Why hash over free-list allocation.** A deterministic hash of the flow id is stateless — no per-flow slot bookkeeping, no coupling to flow reaping or slot lifecycle, and no race management for slot acquisition.
+- **Why stateful over pure hash.** A pure `fnv1a(flow) % n` mapping collides with probability ≈ 1/n per session pair: with `--parallel 2` (the common small-server case) two live sessions collide in about half of all deployments, and two sessions on one slot evict each other's KV cache every turn — defeating the point of pinning. Stateful allocation removes collisions while capacity allows, at the cost of a small in-memory map coupled to flow reaping.
+- **Why hash home over first-free.** Seeding with the deterministic home slot keeps the collision-free case byte-for-byte identical to the original mapping, so a proxy restart re-derives the same assignment and warm server KV caches stay usable. Only flows that genuinely collide get moved, and they move to a slot that was cold for them anyway.
+- **Why hash-home fallback under saturation.** When live flows outnumber slots, someone must share; LRU-stealing would discard a warm cache for no warm gain. Falling back to the deterministic home is simpler and reproduces the pre-stateful behavior under load.
 - **Why `/slots` auto-detect over config.** The monitor already polls `/slots` for KV pressure, so reusing that scrape to read the slot count needs no new endpoint, no new polling, and no operator to keep a value in sync with `--parallel N`; N is always the server's real count, so there is nothing to drift. The only cost is a cold-start gap before the first scrape, during which pinning is simply off.
 
 ## Related
@@ -655,7 +662,8 @@ Concepts and source artifacts associated with session slot pinning.
 - [[gateway#Reverse Proxy Request Handling]] — the handler that computes and injects `id_slot` into the forwarded body.
 - [[flow#Flow Identifier Contract]] — the flow identity (ephemeral vs named) that gates and drives pinning.
 - [[backend#Backend KV-Cache Monitor]] — surfaces `slot_count` in the snapshot that pinning reads.
-- [[src/flow/mod.rs#slot_id_for_flow]] — deterministic FNV-1a slot hash.
+- [[src/flow/slots.rs#SlotAllocator]] — stateful flow→slot allocator (home slot, lowest-free collision resolution, release on reap).
+- [[src/flow/mod.rs#slot_id_for_flow]] — deterministic FNV-1a home-slot hash.
 - [[src/gateway/proxy.rs#inject_id_slot]] — `id_slot` body injection.
 
 # Turn-Boundary Detection

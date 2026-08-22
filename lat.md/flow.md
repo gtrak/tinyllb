@@ -82,6 +82,7 @@ The flow registry is the authoritative source of scheduling-entity state. It map
 The registry guarantees that every flow identity maps to exactly one registered entry and provides concurrent access to independently usable flow references.
 
 - Supplies creation-time defaults, weight and priority upserts, aggregate depth queries, and queue snapshots.
+- Owns the stateful llama.cpp slot assignments that back `id_slot` session pinning ([[gateway#Session Slot Pinning]]).
 - Maintains per-flow attributes that scheduling policy reads without coordinating access.
 - The registry itself does not manage scheduling policy.
 - Consumers depend on it for flow identity, attribute access, and queue snapshots.
@@ -109,6 +110,7 @@ The registry exposes contractual surfaces covering construction, registration, l
 - **Per-flow attributes** — weight, priority, and priority source (readable/writable methods); depth, credit, enqueued timestamp, active count (direct public field access). Priority source indicates whether priority was set by the heuristic (0), an explicit header (1), or the admin API (2).
 - **Priority overrides** — `apply_priority_override` pins a flow's priority to a class value from the `X-LLM-Priority` header (source 1) or, on `auto`, clears the pin (source 0) and resets priority to the configured `agent` class.
 - **Idle eviction support** — a `last_seen` timestamp (unix seconds) is refreshed on lookup and registration; the active count is tracked via `inc_active`/`dec_active`/`is_active` accessors; together these feed the idle reaper (see [[app#Idle-Flow Reaper]]).
+- **Slot assignment** — `assign_slot(flow, n)` resolves a flow's llama.cpp slot statefully (hash home when free, else lowest free slot); the assignment is released when the flow is reaped ([[src/flow/slots.rs#SlotAllocator]], [[gateway#Session Slot Pinning]]).
 - **Flow identity** — opaque type with string construction, equality, display, ephemeral classification, and metric label derivation.
 
 ## Invariants
@@ -117,6 +119,7 @@ All statements about the registry remain true regardless of implementation detai
 
 - Each flow identity maps to at most one registered entry; creation paths never produce duplicates.
 - A flow remains registered until the idle reaper evicts it: entries with zero depth, zero active requests, and a last-seen timestamp older than the configured TTL are removed; there is no explicit unregistration API.
+- A flow's llama.cpp slot assignment, if any, is released when the flow is evicted by the idle reaper, so evicted capacity is available to later flows.
 - Weight, priority, credit, and depth are updated individually; no cross-attribute atomicity is guaranteed.
 - Snapshots list only flows with positive depth, contain no duplicates, and assign contiguous 1-based positions.
 - Ephemeral metric label always resolves to a single common value; named labels equal the identity string.
@@ -150,6 +153,7 @@ Related concepts and source code for flow registry semantics.
 - Consumer that reads weight, priority, depth, and credit from registered flows.
 - Queue snapshot surface and its interpretation.
 - [[src/flow/mod.rs#FlowRegistry]] — Registry implementation.
+- [[src/flow/slots.rs#SlotAllocator]] — Stateful slot assignment owned by the registry.
 - [[src/flow/mod.rs#Flow]] — Per-flow attribute storage.
 - [[src/flow/mod.rs#FlowId]] — Identity and label derivation.
 

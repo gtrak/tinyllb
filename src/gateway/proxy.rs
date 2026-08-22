@@ -10,7 +10,6 @@ use tracing::Span;
 use uuid::Uuid;
 
 use crate::flow::identify;
-use crate::flow::slot_id_for_flow;
 use crate::gateway::error::ProxyError;
 use crate::gateway::stream::{MetricStream, RequestActiveGuard, send_retry_request};
 use crate::metrics::Metrics;
@@ -473,12 +472,15 @@ pub async fn proxy_handler(
     let resolved = identify::resolve(&original_headers, &body_bytes);
     let flow_id = resolved.flow_id;
 
-    // Named (non-ephemeral) inference requests get pinned to a deterministic
-    // llama.cpp slot via `id_slot` when the slot count is configured.
+    // Named (non-ephemeral) inference requests get pinned to a stable
+    // llama.cpp slot via `id_slot` when the live slot count is known.
+    // Allocation is stateful per flow: the first request takes the flow's
+    // hash home slot if free, else the lowest free slot, so two live
+    // sessions never share a slot while capacity allows.
     let is_inference = is_inference_request(&method, &original_path);
     let slot_count = state.snapshot_rx.borrow().slot_count;
     let id_slot: Option<u32> = match (is_inference, flow_id.is_ephemeral(), slot_count) {
-        (true, false, Some(n)) if n >= 1 => Some(slot_id_for_flow(&flow_id.to_string(), n)),
+        (true, false, Some(n)) if n >= 1 => Some(state.flow_registry.assign_slot(&flow_id, n)),
         _ => None,
     };
 
