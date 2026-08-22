@@ -37,6 +37,9 @@ pub struct AppState {
     /// context-exceed + network errors from backend restart).
     /// `max_attempts: 0` disables. See plan 007.
     pub transient_retry: TransientRetry,
+    /// llama.cpp slot count for `id_slot` session pinning (mirrors
+    /// `--parallel`). `None` disables pinning. See plan 009.
+    pub llamacpp_slots: Option<u32>,
 }
 
 impl AppState {
@@ -64,6 +67,7 @@ impl AppState {
             stall_rx: crate::backend::BackendMonitor::empty().stall_receiver(),
             retry_policy: RetryPolicy::default(),
             transient_retry: TransientRetry::default(),
+            llamacpp_slots: None,
         }
     }
 }

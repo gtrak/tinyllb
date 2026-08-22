@@ -10,6 +10,7 @@ use tracing::Span;
 use uuid::Uuid;
 
 use crate::flow::identify;
+use crate::flow::slot_id_for_flow;
 use crate::gateway::error::ProxyError;
 use crate::gateway::stream::{MetricStream, RequestActiveGuard, send_retry_request};
 use crate::metrics::Metrics;
@@ -128,6 +129,18 @@ fn inject_include_usage(body: &Bytes) -> Option<Bytes> {
             }
         })
         .or_insert_with(|| serde_json::json!({ "include_usage": true }));
+    Some(serde_json::to_vec(&value).ok()?.into())
+}
+
+/// Inject `id_slot` (integer) into the outgoing body so llama-server pins
+/// the request to a specific slot (session KV-cache reuse). Returns `Some`
+/// with the new body, `None` if the body isn't a JSON object.
+fn inject_id_slot(body: &Bytes, slot: u32) -> Option<Bytes> {
+    let mut value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    value.as_object_mut()?.insert(
+        "id_slot".to_string(),
+        serde_json::Value::from(slot),
+    );
     Some(serde_json::to_vec(&value).ok()?.into())
 }
 
@@ -460,6 +473,18 @@ pub async fn proxy_handler(
     let resolved = identify::resolve(&original_headers, &body_bytes);
     let flow_id = resolved.flow_id;
 
+    // Named (non-ephemeral) inference requests get pinned to a deterministic
+    // llama.cpp slot via `id_slot` when the slot count is configured.
+    let is_inference = is_inference_request(&method, &original_path);
+    let id_slot: Option<u32> = match (
+        is_inference,
+        flow_id.is_ephemeral(),
+        state.llamacpp_slots,
+    ) {
+        (true, false, Some(n)) => Some(slot_id_for_flow(&flow_id.to_string(), n)),
+        _ => None,
+    };
+
     // Check if the request explicitly wants streaming.
     let wants_streaming = body_wants_streaming(&body_bytes);
     // Record late-bound fields in the request span.
@@ -483,25 +508,29 @@ pub async fn proxy_handler(
     // Capture the exact forwarded body for potential retry reuse.
     // `forwarded_body` is the body after include_usage injection.
     let mut headers = headers;
-    let injected = inject_include_usage(&body_bytes);
-    let forwarded_body: Bytes = match &injected {
-        Some(b) => b.clone(),
-        None => body_bytes.clone(),
-    };
-    let mut builder = state.client.request(method.clone(), backend_url.clone());
-    if let Some(injected) = injected {
-        headers.remove(axum::http::header::CONTENT_LENGTH);
-        builder = builder.body(injected);
-    } else {
-        builder = builder.body(body_bytes);
+    let mut forwarded_body: Bytes = body_bytes.clone();
+    if let Some(b) = inject_include_usage(&forwarded_body) {
+        forwarded_body = b;
     }
+    if let Some(slot) = id_slot {
+        if let Some(b) = inject_id_slot(&forwarded_body, slot) {
+            forwarded_body = b;
+        }
+    }
+    let mut builder = state.client.request(method.clone(), backend_url.clone());
+    if forwarded_body != body_bytes {
+        headers.remove(axum::http::header::CONTENT_LENGTH);
+    }
+    // Clone (Bytes is an Arc — cheap) so the handler retains `forwarded_body`
+    // for the transient / premature-stop retry re-forwards below.
+    builder = builder.body(forwarded_body.clone());
 
     // Non-inference requests (e.g. `GET /v1/models`, health probes) bypass
     // the admission gate, lifecycle tracking, premature-stop retry, and
     // token accounting. Only the body-size guard, header filtering, and
     // backend URL building above are shared. Metadata must never be held
     // behind inference backpressure or a KV-gate 429.
-    if !is_inference_request(&method, &original_path) {
+    if !is_inference {
         for (name, value) in headers.iter() {
             builder = builder.header(name, value);
         }
@@ -984,6 +1013,29 @@ mod tests {
     fn unparseable_body_untouched() {
         assert!(inject("not json").is_none());
         assert!(inject("").is_none());
+    }
+
+    #[test]
+    fn inject_id_slot_object_gets_integer_slot() {
+        let out = inject_id_slot(
+            &Bytes::from(r#"{"model":"local","messages":[]}"#.to_string()),
+            3,
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["id_slot"], 3);
+        assert!(
+            v["id_slot"].is_u64(),
+            "id_slot must be a JSON integer, not a string"
+        );
+        assert_eq!(v["model"], "local");
+    }
+
+    #[test]
+    fn inject_id_slot_non_object_returns_none() {
+        assert!(inject_id_slot(&Bytes::from("not json".to_string()), 1).is_none());
+        assert!(inject_id_slot(&Bytes::from(r#"[1,2,3]"#.to_string()), 1).is_none());
+        assert!(inject_id_slot(&Bytes::from(r#""a string""#.to_string()), 1).is_none());
     }
 
     #[test]
