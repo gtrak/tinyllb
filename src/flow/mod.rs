@@ -39,6 +39,24 @@ pub struct ResolvedFlow {
     pub unset_override: bool,
 }
 
+/// Deterministic llama.cpp slot index for a flow id (FNV-1a 64-bit mod
+/// slot_count). Stable across restarts (unlike the randomized HashMap
+/// hasher) so a session keeps the same slot and its KV cache.
+/// `slot_count == 0` → 0 (defensive; config validation forbids it).
+pub fn slot_id_for_flow(flow: &str, slot_count: u32) -> u32 {
+    if slot_count == 0 {
+        return 0;
+    }
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut h: u64 = OFFSET;
+    for b in flow.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(PRIME);
+    }
+    (h % slot_count as u64) as u32
+}
+
 /// Opaque identifier for a flow.
 ///
 /// Internally a `String`, but `FlowId` is a distinct type to prevent
@@ -468,4 +486,43 @@ mod tests {
         assert!(flow2.last_seen.load(Ordering::Relaxed) >= first);
         assert!(flow2.last_seen.load(Ordering::Relaxed) >= now_unix_secs() - 5);
     }
+
+        #[test]
+        fn slot_id_deterministic() {
+            let a = slot_id_for_flow("ses_a", 8);
+            let b = slot_id_for_flow("ses_a", 8);
+            assert_eq!(a, b, "same input must map to the same slot");
+        }
+
+        #[test]
+        fn slot_id_in_range() {
+            for n in [1u32, 2, 4, 7, 1000] {
+                let s = slot_id_for_flow("ses_a", n);
+                assert!(s < n, "slot {s} out of range for n={n}");
+            }
+        }
+
+        #[test]
+        fn slot_id_n1_is_zero() {
+            assert_eq!(slot_id_for_flow("any-flow", 1), 0);
+        }
+
+        #[test]
+        fn slot_id_zero_count_is_zero() {
+            assert_eq!(slot_id_for_flow("x", 0), 0);
+        }
+
+        #[test]
+        fn slot_id_distributes() {
+            use std::collections::HashSet;
+            let mut used = HashSet::new();
+            for i in 0..1000u32 {
+                used.insert(slot_id_for_flow(&format!("session-{i}"), 8));
+            }
+            assert!(
+                used.len() >= 4,
+                "a degenerate hash must still populate multiple slots (got {} used)",
+                used.len()
+            );
+        }
 }

@@ -64,6 +64,12 @@ pub struct Backend {
     /// denominator. Ignored for vLLM backends.
     #[serde(default)]
     pub kv_unified: bool,
+    /// llama-server slot count for `id_slot` session pinning. Mirrors the
+    /// llama-server `--parallel N` flag. `None` (default) disables pinning;
+    /// `Some(n)` pins each named session to slot `fnv1a(flow_id) % n`.
+    /// Ignored for vLLM backends.
+    #[serde(default)]
+    pub llamacpp_slots: Option<u32>,
 }
 
 impl Default for Backend {
@@ -74,6 +80,7 @@ impl Default for Backend {
             stall_timeout: Self::default_stall_timeout(),
             transient_retry: TransientRetry::default(),
             kv_unified: false,
+            llamacpp_slots: None,
         }
     }
 }
