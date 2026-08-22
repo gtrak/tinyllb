@@ -103,6 +103,11 @@ pub struct BackendSnapshot {
     pub kv_usage: f64,
     /// KV cache free fraction [0..1].
     pub kv_free: f64,
+    /// Number of llama.cpp slots the server reported this scrape
+    /// (`/slots` length). `None` when `/slots` was unavailable for this scrape
+    /// (cold start, or a backend that doesn't expose it, e.g. vLLM). Used for
+    /// `id_slot` session pinning.
+    pub slot_count: Option<u32>,
     /// Cumulative preemptions (best-effort; 0 if unavailable).
     pub preemptions: u64,
     /// Cumulative decode tokens (0 if unavailable).
@@ -128,6 +133,7 @@ impl Default for BackendSnapshot {
         Self {
             kv_usage: 0.0,
             kv_free: 1.0,
+            slot_count: None,
             preemptions: 0,
             generation_tokens: 0.0,
             prompt_tokens: 0.0,
@@ -449,22 +455,17 @@ impl BackendMonitor {
         url
     }
 
-    /// Fetch `/slots` and derive pool utilization for a llama.cpp backend.
-    /// Returns `None` on any failure (HTTP error, non-success status,
-    /// malformed JSON, empty array, zero pool) so the caller leaves
-    /// `kv_usage` at its 0.0 default for this scrape.
-    async fn fetch_slots_kv_usage(
-        client: &reqwest::Client,
-        slots_url: &Url,
-        kv_unified: bool,
-    ) -> Option<f64> {
+    /// Fetch and parse the llama-server `/slots` endpoint. Returns the parsed
+    /// slots, or `None` on any failure (HTTP error, non-success status,
+    /// malformed JSON, empty array). The caller derives both `kv_usage` and
+    /// `slot_count` from the result.
+    async fn fetch_slots(client: &reqwest::Client, slots_url: &Url) -> Option<Vec<SlotKv>> {
         let response = client.get(slots_url.clone()).send().await.ok()?;
         if !response.status().is_success() {
             return None;
         }
         let body = response.text().await.ok()?;
-        let slots = parse_slots(&body)?;
-        slots_kv_usage(&slots, kv_unified)
+        parse_slots(&body)
     }
 
     /// Background polling loop.
@@ -530,13 +531,21 @@ impl BackendMonitor {
                         // failure leaves kv_usage at its 0.0 default for
                         // this scrape.
                         if result.found_llamacpp {
-                            let usage =
-                                Self::fetch_slots_kv_usage(&client, &slots_url, kv_unified).await;
-                            if let Some(kv_usage) = usage {
-                                result.snapshot.kv_usage = kv_usage;
-                                result.snapshot.kv_free = 1.0 - kv_usage;
+                            let slots = Self::fetch_slots(&client, &slots_url).await;
+                            let ok = slots.is_some();
+                            match slots {
+                                Some(slots) => {
+                                    result.snapshot.slot_count = Some(slots.len() as u32);
+                                    if let Some(kv_usage) = slots_kv_usage(&slots, kv_unified) {
+                                        result.snapshot.kv_usage = kv_usage;
+                                        result.snapshot.kv_free = 1.0 - kv_usage;
+                                    }
+                                }
+                                None => {
+                                    result.snapshot.slot_count = None;
+                                    // kv_usage stays at its 0.0 default for this scrape.
+                                }
                             }
-                            let ok = usage.is_some();
                             match (last_slots_ok, ok) {
                                 (Some(true), false) => {
                                     tracing::warn!(
@@ -1136,5 +1145,47 @@ llamacpp:requests_deferred 0
         let slots = [SlotKv { n_ctx: 100, n_prompt_tokens: 250 }];
         let usage = slots_kv_usage(&slots, false).expect("should derive usage");
         assert_eq!(usage, 1.0, "tokens > pool must clamp to 1.0");
+    }
+
+    // ---- fetch_slots tests ----
+
+    #[tokio::test]
+    async fn fetch_slots_returns_parsed_slot_count() {
+        // The parsed Vec length is what becomes `slot_count` in the snapshot.
+        let app = axum::Router::new().route(
+            "/slots",
+            axum::routing::get(|| async {
+                r#"[
+                  {"id": 0, "n_ctx": 1000, "n_prompt_tokens": 100},
+                  {"id": 1, "n_ctx": 1000, "n_prompt_tokens": 0}
+                ]"#
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let url = Url::parse(&format!("http://{addr}/slots")).unwrap();
+        let client = reqwest::Client::new();
+        let slots = BackendMonitor::fetch_slots(&client, &url)
+            .await
+            .expect("valid /slots body should parse");
+        assert_eq!(slots.len(), 2, "slot_count should be the parsed /slots length");
+    }
+
+    #[tokio::test]
+    async fn fetch_slots_none_on_fetch_failure() {
+        // Bind a port, drop the listener, then request it: connection
+        // refused → `fetch_slots` must return `None` (slot_count stays None).
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let url = Url::parse(&format!("http://{addr}/slots")).unwrap();
+        let client = reqwest::Client::new();
+        assert!(
+            BackendMonitor::fetch_slots(&client, &url).await.is_none(),
+            "unreachable /slots should be None"
+        );
     }
 }
