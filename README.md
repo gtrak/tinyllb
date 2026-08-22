@@ -1,97 +1,112 @@
 # tinyllb
 
-tc/qdisc for LLM inference workloads.
+A scheduling and robustness proxy for LLM inference.
 
-An OpenAI-compatible scheduling proxy that sits between your agent/client and
-vLLM to enforce flow-aware scheduling (DRR), backpressure, and
-KV-cache-aware admission. Designed for local-first GPU deployments.
+tinyllb sits between your agents/clients and the inference backend (vLLM or
+llama.cpp). It has two jobs: **fair scheduling** of concurrent flows so no
+single workload monopolizes the GPU, and **robustness** — catching bad
+inference behavior (degenerate completions, backend stalls, KV-cache pressure)
+before it reaches the caller. It speaks the OpenAI-compatible API, so existing
+clients work unchanged.
+
+## Why
+
+Agents and interactive users share the same GPU. Without a proxy:
+
+- one long agent session starves interactive users;
+- a model that emits a stop token mid-thinking kills the agent thread;
+- a backend stall wedges every in-flight request.
+
+tinyllb solves all three. It schedules fairly, re-sends requests that produce
+degenerate completions, and detects a wedged backend before it holds all
+slots.
 
 ## Architecture
 
 ```
-client (agent) -> proxy (this) -> vLLM -> GPU
+agent / client  →  tinyllb (proxy)  →  vLLM / llama-server  →  GPU
 ```
 
-The proxy intercepts `/v1/*` requests, classifies them into flows, and applies
-scheduling + backpressure before forwarding to the backend. The proxy does not
-care about tensor parallelism or multi-GPU details — it forwards to a single
-backend URL.
+The proxy intercepts OpenAI-compatible requests, classifies them into flows,
+applies scheduling + robustness, and forwards to a single backend URL. It does
+not care about tensor parallelism or multi-GPU details — that is the backend's
+job.
 
-## Features
+## Scheduling
 
-- **DRR flow scheduling** — Deficit Round-Robin over flows with per-flow
-  weights, priorities, and starvation protection (force-admit after
-  `scheduler.starvation_timeout`).
-- **Completion bias** — while the number of active flows exceeds
-  `scheduler.completion_bias.target_active_flows`, admission is deferred for
-  *new* flows so in-flight work finishes first. `predictive_admit` optionally
-  lets a near-done flow (≥90% of estimated tokens delivered) yield early.
-- **KV selection bias** — under KV-cache pressure, the eligible waiting flow
-  with the largest resident KV footprint wins the next permit, so it finishes
-  and frees blocks instead of being paged in/out. Bias only: it never rejects
-  or delays a request.
-- **KV-cache-aware admission** (`kv_policy`) — opt-in delay/reject of
-  admissions based on live vLLM KV utilization
-  (`kv_policy.reject_threshold` / `kv_policy.delay_threshold`).
-- **Stall watchdog** — if the backend reports busy work but token counters
-  stop advancing for `backend.stall_timeout`, in-flight streams are aborted
-  (retry on fresh connections) and new admissions are rejected until the stall
-  clears. `0` disables the watchdog.
-- **Transport retry** — a stream that ends without a terminal frame is
-  treated as a transport failure: the body is aborted so the client's normal
-  retry logic re-sends the request.
-- **Transient backend-error re-forward** — pre-response transient errors are
-  re-sent with bounded exponential backoff (`backend.transient_retry`;
-  `max_attempts: 0` disables): llama.cpp intake `exceed_context_size_error`
-  where the prompt fits slot capacity, and network failures from a backend
-  restart. Permanent errors pass through unchanged.
-- **Premature-stop retry** — degenerate `finish_reason: "stop"` chat
-  responses (no content, no tool calls) are re-sent with bumped temperature;
-  see [Premature-Stop Retry](#premature-stop-retry).
-- **Turn-boundary priority** — a per-flow cadence state machine
-  reclassifies flows: a user-turn idle gap (≥ `priority_policy.idle_gap_threshold`)
-  marks the flow interactive; continuous arrivals past
-  `agentic_suspected_threshold` / `agentic_confirmed_threshold` demote it to
-  agent / background priority.
-- **Idle-flow eviction** — flows idle longer than `flows.flow_idle_ttl` are
-  reaped from the flow/cadence registries.
+- **DRR fair sharing** — Deficit Round-Robin over flows with per-flow weights
+  and priorities. No flow monopolizes the GPU.
+- **Turn-boundary priority** — flows are automatically classified: a user who
+  paused to type is *interactive* (highest priority); an agent firing rapid
+  tool calls is *agentic* (lower priority). No manual configuration.
+- **Starvation protection** — a queued flow that waits too long is
+  force-admitted.
+- **Completion bias** — while the GPU is full, new flows wait so in-flight
+  work finishes first.
+
+## Robustness
+
+The proxy doesn't just forward bytes — it parses requests and responses, and
+intercepts bad inference behavior before the caller sees it.
+
+- **Premature-stop retry** — catches degenerate completions where the model
+  emits a stop token with no content and no tool calls (e.g. Qwen emitting EOS
+  mid-thinking). The proxy re-sends the request with a higher temperature,
+  transparently. The agent never sees the failed attempt — the stream simply
+  continues.
+- **Stall watchdog** — if the backend is busy but producing no tokens for a
+  configurable window, in-flight streams are aborted and new admissions are
+  rejected until the stall clears. Prevents a wedged engine from holding all
+  slots.
+- **Transient re-forward** — pre-response backend errors (context overflow on
+  a prompt that fits, backend restart) are re-sent with exponential backoff.
+  The client sees a single clean response.
+- **KV pressure management** — under KV-cache pressure, the proxy adapts: it
+  biases admission toward flows with the largest resident KV footprint (so
+  they finish and free memory), and optionally caps concurrency via a
+  threshold ladder.
+
+## Backend Support
+
+- **vLLM** — full support. KV pressure is read from the backend's
+  `/metrics` (KV cache utilization gauge). No slot concept; session pinning is
+  off.
+- **llama.cpp (llama-server)** — full support. KV pressure is derived from
+  `/slots` (per-slot resident tokens). **Session slot pinning**: named
+  sessions are deterministically pinned to a stable llama-server slot so the
+  prompt KV cache is reused across turns, cutting time-to-first-token on
+  follow-up turns. Auto-detected from the server's `/slots` endpoint — no
+  config needed. Ephemeral requests keep auto-selection.
+
+The proxy auto-detects the backend flavor (vLLM vs llama.cpp) from the
+metrics endpoint.
 
 ## Quickstart
 
-### 1. Run vLLM locally
+### 1. Run a backend
+
+vLLM:
 
 ```bash
 vllm serve meta-llama/Llama-3.2-1B-Instruct --port 8000
 ```
 
-Or any OpenAI-compatible backend — e.g. llama.cpp's `llama-server` with
-metrics enabled:
+Or llama.cpp's `llama-server` with metrics and slots enabled:
 
 ```bash
 llama-server --model model.gguf --metrics --slots --port 8000
 ```
 
-The proxy auto-detects the backend flavor (vLLM vs llama.cpp) from the
-metric-name prefix on each `/metrics` scrape. llama.cpp notes:
+llama.cpp notes:
 
 - `--metrics` feeds the stall watchdog; `--slots` adds a live KV-pressure
-  signal: the proxy polls `/slots` and derives `kv_usage` from the slots'
-  resident tokens, which makes `kv_policy` (admission), `kv_bias` (selection),
-  and the `kv_pressure` cap active on that backend. Without `--slots`,
-  `kv_usage` stays 0.0 and those features remain inert.
-- Set `backend.kv_unified: true` when llama-server runs with `-kvu` (unified
-  KV pool) so the pressure denominator is the single shared pool, not the sum
-  of per-slot `n_ctx`.
-- `scheduler.kv_pressure` (disabled by default) maps KV pressure to a dynamic
-  `max_active_flows` ceiling via a threshold ladder — a soft cap: it holds new
-  admits and never preempts in-flight flows.
+  signal, which activates KV-aware admission, selection bias, and the
+  KV-pressure concurrency cap. Without `--slots`, KV pressure stays 0 and
+  those features remain inert.
 - Align `scheduler.max_active_flows` with llama-server's `--parallel N` so
   the proxy admits no more concurrent flows than slots the backend can run.
 - Session pinning is automatic — the slot count is read from the server's
-  `/slots` endpoint (the same one used for KV pressure), so named sessions pin
-  to a stable slot for prompt KV-cache reuse with no config; ephemeral requests
-  keep auto-selection. It is disabled when `/slots` is unavailable (vLLM
-  deployments are unaffected).
+  `/slots` endpoint, so named sessions pin to a stable slot with no config.
 
 ### 2. Start the proxy
 
@@ -101,7 +116,7 @@ cargo run --release
 ```
 
 The proxy binds to `0.0.0.0:8080` by default and forwards to
-`http://localhost:8000` (the vLLM backend).
+`http://localhost:8000` (the backend).
 
 ### 3. Test
 
@@ -118,50 +133,20 @@ chmod +x scripts/run_local.sh
 
 The script starts the proxy and prints curl examples for common endpoints.
 
-## Docker Deployment (Single-GPU)
-
-Build and deploy with docker compose:
+### Docker deployment (single-GPU)
 
 ```bash
 docker compose up -d
 curl localhost:8080/v1/models
 ```
 
-This starts two services:
-- **vllm** — vLLM OpenAI server on port 8000 (GPU-reserved).
-- **proxy** — this proxy on port 8080, forwarding to the vllm service.
-
-Edit `config.example.yaml` or mount your own `config.yaml` to override
-settings. You can also override via environment variables:
-
-```yaml
-# docker-compose override example
-environment:
-  - TINYLLB__BACKEND__URL=http://vllm:8000
-  - TINYLLB__SCHEDULER__COMPLETION_BIAS__ENABLED=false
-  - TINYLLB__SCHEDULER__MAX_ACTIVE_FLOWS=8
-```
-
-### Multi-GPU Local (Tensor Parallel)
-
-To run vLLM across multiple GPUs, change the vLLM command in
-`docker-compose.yaml`:
-
-```yaml
-vllm:
-  image: vllm/vllm-openai:latest
-  command: --model meta-llama/Llama-3.2-1B-Instruct --tensor-parallel-size 2
-  deploy:
-    resources:
-      reservations:
-        devices:
-          - driver: nvidia
-            count: 2
-            capabilities: [gpu]
-```
-
-The proxy does not need changes — it forwards to the single backend URL
-(`http://vllm:8000`). Tensor parallelism is handled entirely by vLLM.
+This starts two services: the backend (vLLM on port 8000, GPU-reserved) and
+the proxy (port 8080, forwarding to the backend). Edit `config.example.yaml`
+or mount your own `config.yaml` to override settings; individual keys can also
+be overridden via environment variables (see below). For multi-GPU (tensor
+parallel) setups, adjust the backend service's command and GPU reservations in
+`docker-compose.yaml` — the proxy needs no changes, since it forwards to the
+single backend URL.
 
 ## Configuration
 
@@ -215,19 +200,7 @@ overridden via environment variables (see below).
 | `retry_policy.default_temperature` | `0.0` | Base temperature when the request omits one |
 | `request_timeout` | *(none)* | Optional per-request timeout (e.g. `300s`) |
 
-### Endpoints
-
-| Endpoint | Method | Description |
-| --- | --- | --- |
-| `/healthz` | GET | Health check (returns `ok`) |
-| `/metrics` | GET | Prometheus metrics |
-| `/v1/models` | GET | List models (proxied to vLLM) |
-| `/v1/chat/completions` | POST | Chat completions (proxied) |
-| `/v1/completions` | POST | Completions (proxied) |
-| `/flows` | POST | Register (or update) a flow's weight/priority |
-| `/queue` | GET | Current queue state |
-
-## Environment Variables
+### Environment Variables
 
 | Variable | Description |
 | --- | --- |
@@ -257,42 +230,76 @@ overridden via environment variables (see below).
 The `TINYLLB__` prefix replaces config sections: `TINYLLB__SECTION__KEY`
 maps to `section.key` in YAML.
 
-## Premature-Stop Retry
+## Metrics
 
-The proxy can retry `/v1/chat/completions` requests that produce degenerate
-stops — responses with `finish_reason: "stop"`, empty `content`, and no
-`tool_calls`. Such turns kill agentic threads because the agent sees an
-empty assistant message and cannot continue.
+`GET /metrics` serves Prometheus format.
 
-**How it works:** On detection of a premature stop, the proxy re-sends the
-exact forwarded body with `temperature` bumped by `temperature_step` per
-attempt (capped at `max_temperature`), up to `max_retries` times. The retry
-bypasses the scheduler (admission slot held) and skips non-chat paths.
+### Scheduling
 
-- **Streaming:** The client sees a seamless concatenation — failed reasoning
-appears as extra "thinking" but the thread survives with a single terminal
-frame + `[DONE]`.
-- **Non-streaming:** The client receives the good response body after retry;
-fail-open forwards the last degenerate body if all retries are exhausted.
-- **Environment overrides:** `TINYLLB__RETRY_POLICY__ENABLED=true`, etc.
+| Metric | Description |
+| --- | --- |
+| `llm_active_flows` | gauge, number of currently active flows |
+| `llm_flow_credit` | gauge per flow, current DRR credit |
+| `llm_queue_depth` | gauge, requests waiting in queue |
+| `llm_queue_wait_seconds` | histogram, queue wait time |
+| `llm_starvation_force_admits_total` | counter, force-admit events |
 
-**Disabled by default.** Enable via `retry_policy.enabled: true` in config.
+### Throughput
 
-**Prometheus metrics** (prefixed `tinyllb_premature_stop_`):
-`detected_total`, `retries_total`, `exhausted_total`.
+| Metric | Description |
+| --- | --- |
+| `llm_tokens_generated_total` | counter, total tokens generated |
+| `llm_tokens_per_second` | gauge, approximate tokens/sec |
+| `llm_request_events_total` | counter, lifecycle events (started/token/completed/cancelled) |
 
-See `docs/plans/005-premature-stop-retry/PLAN.md` for the full design.
+### Backend Health
 
-## Benchmarks
+| Metric | Description |
+| --- | --- |
+| `llm_backend_kv_pressure` | gauge, latest KV usage fraction (vLLM or llama.cpp /slots-derived) |
+| `llm_backend_stalled` | gauge, 1 while the watchdog considers the backend deadlocked |
+| `llm_kv_admission_decisions_total` | counter, KV admission decisions (accept/delay/reject) |
+| `scheduler_effective_max_flows` | gauge, pressure-capped max_active_flows |
+| `tinyllb_backend_stall_events_total` | counter, stalls detected |
 
-Measured throughput and fairness benchmarks are documented in:
+### Robustness
 
-- [Phase 1 Results](docs/plans/001-tinyllb/PHASE1-RESULTS.md) —
-  Admission control vs direct uncontrolled path. At N=32, proxy achieves
-  3.48× higher tokens/sec than direct.
-- [Phase 2 Results](docs/plans/001-tinyllb/PHASE2-RESULTS.md) —
-  historical Phase 2 results (fairness / no-starvation / queue-endpoint
-  correctness under DRR).
+| Metric | Description |
+| --- | --- |
+| `tinyllb_premature_stop_detected_total` | counter, premature stops detected |
+| `tinyllb_premature_stop_exhausted_total` | counter, degenerate turns after retries exhausted |
+| `tinyllb_backend_retries_total` | counter, transient re-forwards |
+| `tinyllb_backend_retry_exhausted_total` | counter, retries exhausted |
+
+### Priority Heuristic
+
+| Metric | Description |
+| --- | --- |
+| `llm_flow_cadence_state` | gauge per flow, cadence state (0=cold, 1=interactive, 2=agentic_suspected, 3=agentic_confirmed) |
+| `llm_flow_priority_class` | gauge per flow, numeric priority (100/50/10) |
+| `llm_flow_inter_request_seconds` | histogram per flow, inter-request gap |
+
+## Endpoints
+
+| Endpoint | Method | Description |
+| --- | --- | --- |
+| `/healthz` | GET | Health check (returns `ok`) |
+| `/metrics` | GET | Prometheus metrics |
+| `/v1/models` | GET | List models (proxied to vLLM) |
+| `/v1/chat/completions` | POST | Chat completions (proxied) |
+| `/v1/completions` | POST | Completions (proxied) |
+| `/flows` | POST | Register (or update) a flow's weight/priority |
+| `/queue` | GET | Current queue state |
+
+## Design Docs
+
+For in-depth design docs — invariants, non-goals, rationale, and interface
+contracts — see the `lat.md/` directory. Each file covers a domain:
+`gateway.md` (proxy, streaming, retries), `scheduler.md` (DRR, admission),
+`scheduler_policies.md` (completion bias, KV bias, pressure cap),
+`backend.md` (metrics monitor, stall watchdog), `flow.md` (identity,
+cadence), `admission.md` (backpressure), `metrics.md` (metric families),
+`config.md` (configuration), `api.md` (admin endpoints).
 
 ## License
 
