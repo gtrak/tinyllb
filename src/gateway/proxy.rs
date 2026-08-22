@@ -476,12 +476,9 @@ pub async fn proxy_handler(
     // Named (non-ephemeral) inference requests get pinned to a deterministic
     // llama.cpp slot via `id_slot` when the slot count is configured.
     let is_inference = is_inference_request(&method, &original_path);
-    let id_slot: Option<u32> = match (
-        is_inference,
-        flow_id.is_ephemeral(),
-        state.llamacpp_slots,
-    ) {
-        (true, false, Some(n)) => Some(slot_id_for_flow(&flow_id.to_string(), n)),
+    let slot_count = state.snapshot_rx.borrow().slot_count;
+    let id_slot: Option<u32> = match (is_inference, flow_id.is_ephemeral(), slot_count) {
+        (true, false, Some(n)) if n >= 1 => Some(slot_id_for_flow(&flow_id.to_string(), n)),
         _ => None,
     };
 

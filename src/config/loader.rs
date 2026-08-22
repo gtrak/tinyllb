@@ -79,9 +79,6 @@ pub fn load() -> anyhow::Result<Config> {
         .set_default("backpressure.retry_after_base", "1s")?
         .set_default("backend.metrics_interval", "1s")?
         .set_default("backend.kv_unified", false)?
-        // backend.llamacpp_slots is an Option and relies on #[serde(default)]
-        // (defaults to None) — same idiom as request_timeout / kv_policy —
-        // so no set_default is needed here.
         .set_default("backend.transient_retry.max_attempts", 3u32)?
         .set_default("backend.transient_retry.backoff_start", "500ms")?
         .set_default("backend.transient_retry.backoff_max", "4s")?
@@ -275,15 +272,6 @@ fn validate(cfg: &Config) -> anyhow::Result<()> {
         return Err(anyhow::anyhow!(
             "priority_policy.agentic_suspected_threshold must be >= 1"
         ));
-    }
-
-    // Validate llama.cpp slot pinning: when set, the slot count must be >= 1.
-    if let Some(n) = cfg.backend.llamacpp_slots {
-        if n == 0 {
-            return Err(anyhow::anyhow!(
-                "backend.llamacpp_slots must be >= 1 when set"
-            ));
-        }
     }
 
     Ok(())

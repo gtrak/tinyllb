@@ -130,7 +130,7 @@ async fn main() {
         stall_rx: monitor.stall_receiver(),
         retry_policy: cfg.retry_policy.clone(),
         transient_retry: cfg.backend.transient_retry.clone(),
-        llamacpp_slots: cfg.backend.llamacpp_slots,
+        snapshot_rx: monitor.snapshot_receiver(),
     };
 
     // Periodic flow eviction: remove idle flows to prevent unbounded
@@ -197,7 +197,7 @@ mod tests {
             stall_rx: tinyllb::backend::BackendMonitor::empty().stall_receiver(),
             retry_policy: config::RetryPolicy::default(),
             transient_retry: config::TransientRetry::default(),
-            llamacpp_slots: None,
+            snapshot_rx: tinyllb::backend::BackendMonitor::empty().snapshot_receiver(),
         };
         let app = create_router(state);
         let response = app

@@ -9,6 +9,7 @@ use std::sync::Arc;
 use url::Url;
 
 use self::proxy::proxy_handler;
+use crate::backend::BackendSnapshot;
 use crate::config::{Backpressure, Priorities, RetryPolicy, TransientRetry};
 use crate::flow::FlowRegistry;
 use crate::metrics::Metrics;
@@ -37,9 +38,10 @@ pub struct AppState {
     /// context-exceed + network errors from backend restart).
     /// `max_attempts: 0` disables. See plan 007.
     pub transient_retry: TransientRetry,
-    /// llama.cpp slot count for `id_slot` session pinning (mirrors
-    /// `--parallel`). `None` disables pinning. See plan 009.
-    pub llamacpp_slots: Option<u32>,
+    /// Latest backend snapshot (for reading the live llama.cpp slot count
+    /// for `id_slot` pinning). `slot_count` is `None` until the first
+    /// successful `/slots` scrape (or for vLLM) ⇒ no pinning. See plan 010.
+    pub snapshot_rx: tokio::sync::watch::Receiver<BackendSnapshot>,
 }
 
 impl AppState {
@@ -67,7 +69,7 @@ impl AppState {
             stall_rx: crate::backend::BackendMonitor::empty().stall_receiver(),
             retry_policy: RetryPolicy::default(),
             transient_retry: TransientRetry::default(),
-            llamacpp_slots: None,
+            snapshot_rx: crate::backend::BackendMonitor::empty().snapshot_receiver(),
         }
     }
 }

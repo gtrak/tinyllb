@@ -1,8 +1,8 @@
 //! Integration tests for `id_slot` session pinning (plan 009, task 02):
 //! a named (non-ephemeral) inference request carries a deterministic
-//! `id_slot` integer in the forwarded body when `llamacpp_slots` is set;
-//! ephemeral requests, non-inference routes, and the disabled (`None`)
-//! config never get it. The stub backend records every forwarded request
+//! `id_slot` integer in the forwarded body when the live slot count is
+//! present; ephemeral requests, non-inference routes, and the disabled
+//! (`slot_count: None`) case never get it. The stub backend records every
 //! body so tests assert on the actual bytes the proxy sent.
 
 use axum::body::Body;
@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tower::ServiceExt;
 
+use tinyllb::backend::BackendSnapshot;
 use tinyllb::config::{BackpressureMode, TransientRetry};
 use tinyllb::flow::FlowRegistry;
 use tinyllb::gateway;
@@ -120,22 +121,25 @@ async fn start_stub_backend() -> (std::net::SocketAddr, Arc<StubState>) {
 }
 
 /// Build the proxy app pointing at the given backend URL, with the given
-/// `llamacpp_slots` config. Transient retry uses the default (disabled-fast)
-/// policy; the retry test overrides it separately.
-fn build_proxy_app(backend_url: &str, llamacpp_slots: Option<u32>) -> Router {
-    build_proxy_app_with_retry(
-        backend_url,
-        llamacpp_slots,
-        TransientRetry::default(),
-    )
+/// live `slot_count` injected via a watch channel. Transient retry uses the
+/// default (disabled-fast) policy; the retry test overrides it separately.
+/// Returns the `(Router, sender)` pair; keep the sender alive so the channel
+/// stays open for the test's duration.
+fn build_proxy_app(
+    backend_url: &str,
+    slot_count: Option<u32>,
+) -> (Router, tokio::sync::watch::Sender<BackendSnapshot>) {
+    build_proxy_app_with_retry(backend_url, slot_count, TransientRetry::default())
 }
 
-/// Build the proxy app with an explicit transient-retry policy.
+/// Build the proxy app with an explicit transient-retry policy and a live
+/// `slot_count` injected via a watch channel. Returns the `(Router, sender)`
+/// pair; keep the sender alive so the channel stays open for the test.
 fn build_proxy_app_with_retry(
     backend_url: &str,
-    llamacpp_slots: Option<u32>,
+    slot_count: Option<u32>,
     transient_retry: TransientRetry,
-) -> Router {
+) -> (Router, tokio::sync::watch::Sender<BackendSnapshot>) {
     let metrics = metrics::create_metrics();
     let flow_registry = Arc::new(FlowRegistry::new(1.0, 50));
     let scheduler = scheduler::Scheduler::new_with_defaults(
@@ -147,8 +151,15 @@ fn build_proxy_app_with_retry(
         Duration::from_secs(10),
         Duration::from_secs(1),
     );
+    // Inject the live llama.cpp slot count via a watch channel. The proxy
+    // reads `snapshot_rx.borrow().slot_count`; `None` disables pinning.
+    let (tx, rx) = tokio::sync::watch::channel(BackendSnapshot::default());
+    let _ = tx.send(BackendSnapshot {
+        slot_count,
+        ..Default::default()
+    });
     let state = gateway::AppState {
-        llamacpp_slots,
+        snapshot_rx: rx,
         transient_retry,
         ..gateway::AppState::test_default(
             gateway::build_client(),
@@ -160,7 +171,8 @@ fn build_proxy_app_with_retry(
     };
 
     let gateway_router = gateway::create_router().with_state(state.clone());
-    Router::new().merge(gateway_router).with_state(state)
+    let router = Router::new().merge(gateway_router).with_state(state);
+    (router, tx)
 }
 
 /// Collect a response body into bytes.
@@ -203,13 +215,13 @@ async fn post_chat(app: &Router, body: &str, session: Option<&str>) -> Response<
 // Tests
 // ---------------------------------------------------------------------------
 
-/// 1. Named session + enabled config → forwarded body carries `id_slot`
+/// 1. Named session + live slot count → forwarded body carries `id_slot`
 /// equal to `slot_id_for_flow("ses_a", 4)`.
 #[tokio::test]
 async fn named_session_injects_id_slot() {
     let (addr, stub) = start_stub_backend().await;
     let backend_url = format!("http://{}/", addr);
-    let app = build_proxy_app(&backend_url, Some(4));
+    let (app, _tx) = build_proxy_app(&backend_url, Some(4));
 
     let resp = post_chat(&app, CHAT_BODY, Some("ses_a")).await;
     assert_eq!(resp.status(), 200);
@@ -235,7 +247,7 @@ async fn named_session_injects_id_slot() {
 async fn same_session_same_slot() {
     let (addr, stub) = start_stub_backend().await;
     let backend_url = format!("http://{}/", addr);
-    let app = build_proxy_app(&backend_url, Some(4));
+    let (app, _tx) = build_proxy_app(&backend_url, Some(4));
 
     let resp1 = post_chat(&app, CHAT_BODY, Some("ses_dup")).await;
     assert_eq!(resp1.status(), 200);
@@ -256,13 +268,13 @@ async fn same_session_same_slot() {
     );
 }
 
-/// 3. No session header → ephemeral flow → no `id_slot` even with the
-/// config enabled.
+/// 3. No session header → ephemeral flow → no `id_slot` even with a live
+/// slot count.
 #[tokio::test]
 async fn ephemeral_omits_id_slot() {
     let (addr, stub) = start_stub_backend().await;
     let backend_url = format!("http://{}/", addr);
-    let app = build_proxy_app(&backend_url, Some(4));
+    let (app, _tx) = build_proxy_app(&backend_url, Some(4));
 
     let resp = post_chat(&app, CHAT_BODY, None).await;
     assert_eq!(resp.status(), 200);
@@ -276,14 +288,14 @@ async fn ephemeral_omits_id_slot() {
     );
 }
 
-/// 4. Disabled config (`llamacpp_slots: None`) → no `id_slot` for a named
+/// 4. No live slot count (`slot_count: None`) → no `id_slot` for a named
 /// session, and the forwarded body is byte-identical to the client's body
 /// (regression gate: nothing is re-serialized).
 #[tokio::test]
 async fn disabled_omits_id_slot() {
     let (addr, stub) = start_stub_backend().await;
     let backend_url = format!("http://{}/", addr);
-    let app = build_proxy_app(&backend_url, None);
+    let (app, _tx) = build_proxy_app(&backend_url, None);
 
     let resp = post_chat(&app, CHAT_BODY, Some("ses_a")).await;
     assert_eq!(resp.status(), 200);
@@ -310,7 +322,7 @@ async fn disabled_omits_id_slot() {
 async fn id_slot_is_integer() {
     let (addr, stub) = start_stub_backend().await;
     let backend_url = format!("http://{}/", addr);
-    let app = build_proxy_app(&backend_url, Some(8));
+    let (app, _tx) = build_proxy_app(&backend_url, Some(8));
 
     let resp = post_chat(&app, CHAT_BODY, Some("ses_num")).await;
     assert_eq!(resp.status(), 200);
@@ -325,13 +337,13 @@ async fn id_slot_is_integer() {
 }
 
 /// 6. `GET /v1/models` is not an inference request → never pinned, even
-/// with a session header and the config enabled. The stub records the
+/// with a session header and a live slot count. The stub records the
 /// (empty) forwarded body: nothing is injected.
 #[tokio::test]
 async fn models_route_never_pinned() {
     let (addr, stub) = start_stub_backend().await;
     let backend_url = format!("http://{}/", addr);
-    let app = build_proxy_app(&backend_url, Some(4));
+    let (app, _tx) = build_proxy_app(&backend_url, Some(4));
 
     let resp = app
         .clone()
@@ -374,7 +386,7 @@ async fn id_slot_survives_retry() {
         backoff_start: Duration::from_millis(1),
         backoff_max: Duration::from_millis(5),
     };
-    let app = build_proxy_app_with_retry(&backend_url, Some(4), fast_policy);
+    let (app, _tx) = build_proxy_app_with_retry(&backend_url, Some(4), fast_policy);
 
     let resp = post_chat(&app, CHAT_BODY, Some("ses_retry")).await;
     assert_eq!(resp.status(), 200);
